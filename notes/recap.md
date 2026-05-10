@@ -1,3 +1,6 @@
+## Roadmap
+![alt text](images/roadmap.png)
+
 ## Related Paper 
 ### On-Policy Distillation of Large Language Models (arxiv.org/abs/2306.08543)
 - Metodenya pake 'Forward KL Divergence' untuk loss functionnya jadi studentnya dipaksa mencocokkan seluruh distribusi probabilitas teacher termasuk bagian yang probabilitasnya hampir nol
