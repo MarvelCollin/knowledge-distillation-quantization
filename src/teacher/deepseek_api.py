@@ -15,7 +15,14 @@ class DeepSeekTeacher:
         temperature: float,
         top_logprobs: int,
     ):
-        self.client = OpenAI(api_key=api_key, base_url=api_base)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=api_base,
+            default_headers={
+                "HTTP-Referer": "https://github.com/MarvelCollin/knowledge-distillation-quantization",
+                "X-Title": "Knowledge Distillation Quantization",
+            },
+        )
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature

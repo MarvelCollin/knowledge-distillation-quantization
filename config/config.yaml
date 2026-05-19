@@ -1,9 +1,9 @@
 teacher:
-  model: "deepseek-chat"
-  api_base: "https://api.deepseek.com"
+  model: "deepseek/deepseek-v4-flash:free"
+  api_base: "https://openrouter.ai/api/v1"
   max_tokens: 512
   temperature: 0.0
-  top_logprobs: 20
+  top_logprobs: 5
 
 student:
   model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"

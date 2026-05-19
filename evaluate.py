@@ -1,8 +1,12 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
 import json
 import yaml
 import torch
 import argparse
-from pathlib import Path
 
 from tqdm import tqdm
 

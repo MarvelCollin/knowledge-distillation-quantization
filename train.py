@@ -1,9 +1,13 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
 import os
 import yaml
 import torch
 import argparse
 import torch.nn.functional as F
-from pathlib import Path
 
 from dotenv import load_dotenv
 from torch.optim import AdamW
