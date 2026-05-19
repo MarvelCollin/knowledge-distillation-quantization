@@ -2,7 +2,7 @@ services:
   download-model:
     build: .
     volumes:
-      - hf_cache:/root/.cache/huggingface
+      - ~/.cache/huggingface:/root/.cache/huggingface
     command: python scripts/download_model.py
 
   train:
@@ -10,7 +10,7 @@ services:
     env_file: .env
     volumes:
       - .:/workspace
-      - hf_cache:/root/.cache/huggingface
+      - ~/.cache/huggingface:/root/.cache/huggingface
     command: python train.py --config config/config.yaml
     deploy:
       resources:
@@ -25,7 +25,7 @@ services:
     env_file: .env
     volumes:
       - .:/workspace
-      - hf_cache:/root/.cache/huggingface
+      - ~/.cache/huggingface:/root/.cache/huggingface
     command: python evaluate.py --config config/config.yaml --checkpoint outputs/final
     deploy:
       resources:
@@ -35,5 +35,4 @@ services:
               count: 1
               capabilities: [gpu]
 
-volumes:
-  hf_cache:
+volumes: {}

@@ -6,7 +6,7 @@ teacher:
   top_logprobs: 20
 
 student:
-  model_name: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+  model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
   max_length: 512
 
 training:
