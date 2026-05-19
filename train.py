@@ -19,7 +19,7 @@ from src.data.dataset import create_datasets
 from src.distillation.loss import build_teacher_distribution, compute_total_loss
 from src.distillation.qead import compute_qead_weights
 from src.student.model import StudentModel
-from src.teacher.deepseek_api import DeepSeekTeacher
+from src.teacher.teacher_api import TeacherModel
 
 
 def load_config(path: str) -> dict:
@@ -74,8 +74,8 @@ def main():
 
     train_dataset, val_dataset = create_datasets(config, student.tokenizer)
 
-    teacher = DeepSeekTeacher(
-        api_key=os.environ["DEEPSEEK_API_KEY"],
+    teacher = TeacherModel(
+        api_key=os.environ["TEACHER_API_KEY"],
         model=config["teacher"]["model"],
         api_base=config["teacher"]["api_base"],
         max_tokens=config["teacher"]["max_tokens"],
@@ -92,7 +92,7 @@ def main():
     )
     val_loader = DataLoader(val_dataset, batch_size=config["training"]["batch_size"])
 
-    optimizer = AdamW(student.parameters(), lr=config["training"]["learning_rate"])
+    optimizer = AdamW(student.parameters(), lr=float(config["training"]["learning_rate"]))
     total_steps = len(train_loader) * config["training"]["num_epochs"]
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -129,7 +129,7 @@ def main():
             teacher_dist = torch.zeros(len(sample_idxs), max_length, vocab_size, device=device)
 
             for i in range(len(sample_idxs)):
-                cached = DeepSeekTeacher.load_cached(cache_dir, sample_idxs[i].item())
+                cached = TeacherModel.load_cached(cache_dir, sample_idxs[i].item())
                 if not cached or not cached["logprobs"]:
                     continue
                 logprobs = cached["logprobs"]

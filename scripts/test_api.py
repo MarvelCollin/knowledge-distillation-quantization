@@ -7,15 +7,15 @@ import os
 import yaml
 from dotenv import load_dotenv
 
-from src.teacher.deepseek_api import DeepSeekTeacher
+from src.teacher.teacher_api import TeacherModel
 
 
-def test_deepseek_api():
+def test_teacher_api():
     load_dotenv()
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get("TEACHER_API_KEY")
 
     if not api_key:
-        print("ERROR: DEEPSEEK_API_KEY not set in .env")
+        print("ERROR: TEACHER_API_KEY not set in .env")
         return False
 
     config_path = Path(__file__).parent.parent / "config" / "config.yaml"
@@ -29,7 +29,7 @@ def test_deepseek_api():
     print(f"API base: {api_base}")
     print(f"Key: {api_key[:15]}...")
 
-    teacher = DeepSeekTeacher(
+    teacher = TeacherModel(
         api_key=api_key,
         model=model,
         api_base=api_base,
@@ -53,5 +53,5 @@ def test_deepseek_api():
 
 
 if __name__ == "__main__":
-    success = test_deepseek_api()
+    success = test_teacher_api()
     exit(0 if success else 1)

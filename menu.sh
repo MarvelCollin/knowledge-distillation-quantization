@@ -16,28 +16,26 @@ header() {
     echo -e "${NC}"
 }
 
-current_model() {
-    grep "^  model:" config/config.yaml 2>/dev/null | awk '{print $2}' || echo "unknown"
-}
-
 show_menu() {
     header
-    echo -e "  Current teacher model: ${GREEN}$(current_model)${NC}"
+    echo -e "  Teacher: ${GREEN}gemini-2.0-flash${NC} (Google AI Studio)"
     echo ""
     echo -e "  ${BOLD}Setup${NC}"
-    echo "  1) Find working free model (auto-updates config)"
-    echo "  2) Test API connection"
+    echo "  1) Test API connection"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
-    echo "  3) Run training"
-    echo "  4) Run evaluation"
+    echo "  2) Run training"
+    echo "  3) Run evaluation"
+    echo ""
+    echo -e "  ${BOLD}Cache${NC}"
+    echo "  7) View cached teacher responses"
     echo ""
     echo -e "  ${BOLD}Docker${NC}"
-    echo "  5) Build Docker image"
-    echo "  6) Open shell inside container"
+    echo "  4) Build Docker image"
+    echo "  5) Open shell inside container"
     echo ""
     echo -e "  ${BOLD}GPU Setup${NC}"
-    echo "  7) Install nvidia-container-toolkit (requires sudo)"
+    echo "  6) Install nvidia-container-toolkit (requires sudo)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -57,6 +55,53 @@ run_cmd() {
     fi
     echo ""
     read -rp "Press Enter to return to menu..."
+}
+
+view_cache() {
+    local cache_dir="cache/teacher_logprobs"
+    header
+    local total
+    total=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
+    if [ "$total" -eq 0 ]; then
+        echo -e "${RED}No cached responses found in $cache_dir${NC}"
+        echo ""
+        read -rp "Press Enter to return to menu..."
+        return
+    fi
+    echo -e "  Found ${GREEN}$total${NC} cached responses."
+    echo -e "  Use ${BOLD}arrow keys / PgUp PgDn${NC} to scroll, ${BOLD}q${NC} to return.\n"
+    python3 - "$cache_dir" <<'PYEOF' | less -R
+import json, os, sys, textwrap, glob
+
+cache_dir = sys.argv[1]
+files = sorted(
+    glob.glob(os.path.join(cache_dir, '*.json')),
+    key=lambda f: int(os.path.basename(f).replace('.json', ''))
+)
+
+CYAN  = '\033[0;36m'
+BOLD  = '\033[1m'
+NC    = '\033[0m'
+
+for f in files:
+    num = os.path.basename(f).replace('.json', '')
+    with open(f) as fh:
+        d = json.load(fh)
+    prompt = d.get('prompt', '').replace('\n', ' ').strip()
+    text   = d.get('text', '').strip() or '(empty)'
+
+    print(f'{BOLD}{CYAN}{"─" * 60}')
+    print(f'  Entry #{num}  ({os.path.basename(f)}){NC}')
+    print(f'{BOLD}{CYAN}{"─" * 60}{NC}')
+    print(f'{BOLD}PROMPT:{NC}')
+    for line in textwrap.wrap(prompt, width=78):
+        print('  ' + line)
+    print()
+    print(f'{BOLD}RESPONSE:{NC}')
+    for line in text.splitlines():
+        print('  ' + line)
+    print()
+PYEOF
 }
 
 install_nvidia_toolkit() {
@@ -82,25 +127,35 @@ while true; do
     case $choice in
         1)
             header
-            run_cmd "sudo docker compose run --rm train python scripts/find_working_model.py"
+            run_cmd "sudo docker compose run --rm train python scripts/test_api.py"
             ;;
         2)
             header
-            run_cmd "sudo docker compose run --rm train python scripts/test_api.py"
+            run_cmd "sudo docker compose run --rm train python train.py"
             ;;
         3)
             header
-            run_cmd "sudo docker compose run --rm train python train.py"
+            latest=$(find outputs -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tail -1)
+            if [ -z "$latest" ]; then
+                echo -e "${RED}No checkpoints found in outputs/. Run training first.${NC}"
+                echo ""
+                read -rp "Press Enter to return to menu..."
+            else
+                echo -e "Available checkpoints:"
+                find outputs -maxdepth 1 -mindepth 1 -type d | sort | nl -w2 -s') '
+                echo ""
+                echo -e "Latest: ${GREEN}$latest${NC}"
+                echo -n "Enter checkpoint path (or press Enter to use latest): "
+                read -r ckpt
+                [ -z "$ckpt" ] && ckpt="$latest"
+                run_cmd "sudo docker compose run --rm evaluate python evaluate.py --checkpoint /workspace/$ckpt"
+            fi
             ;;
         4)
             header
-            run_cmd "sudo docker compose run --rm evaluate python evaluate.py"
-            ;;
-        5)
-            header
             run_cmd "sudo docker compose build"
             ;;
-        6)
+        5)
             header
             echo -e "${YELLOW}▶ Opening shell inside train container...${NC}"
             echo ""
@@ -108,8 +163,11 @@ while true; do
             echo ""
             read -rp "Press Enter to return to menu..."
             ;;
-        7)
+        6)
             install_nvidia_toolkit
+            ;;
+        7)
+            view_cache
             ;;
         q|Q)
             echo -e "${NC}Bye."
