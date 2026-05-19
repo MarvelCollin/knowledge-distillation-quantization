@@ -1,0 +1,39 @@
+services:
+  download-model:
+    build: .
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    command: python scripts/download_model.py
+
+  train:
+    build: .
+    env_file: .env
+    volumes:
+      - .:/workspace
+      - hf_cache:/root/.cache/huggingface
+    command: python train.py --config config/config.yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  evaluate:
+    build: .
+    env_file: .env
+    volumes:
+      - .:/workspace
+      - hf_cache:/root/.cache/huggingface
+    command: python evaluate.py --config config/config.yaml --checkpoint outputs/final
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf_cache:
