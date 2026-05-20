@@ -15,10 +15,12 @@ class TeacherModel:
         max_tokens: int,
         temperature: float,
         top_logprobs: int,
+        headers: dict = None,
     ):
         self.client = OpenAI(
             api_key=api_key,
             base_url=api_base,
+            default_headers=headers or {},
         )
         self.model = model
         self.max_tokens = max_tokens

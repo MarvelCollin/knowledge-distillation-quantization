@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--offline", action="store_true",
                         help="Skip teacher API calls; use only existing cached responses.")
+    parser.add_argument("--local", action="store_true",
+                        help="Use local teacher model instead of API.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -68,29 +70,58 @@ def main():
     output_dir = Path(config["training"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    student = StudentModel(
-        model_name=config["student"]["model_name"],
-        max_length=config["student"]["max_length"],
-    )
-    student.to(device)
-
-    train_dataset, val_dataset = create_datasets(config, student.tokenizer)
-
     cache_dir = config["data"]["teacher_cache_dir"]
 
-    if args.offline:
-        print("Offline mode: skipping teacher API. Using existing cache only.")
-    else:
-        teacher = TeacherModel(
-            api_key=os.environ["TEACHER_API_KEY"],
-            model=config["teacher"]["model"],
-            api_base=config["teacher"]["api_base"],
+    if args.local:
+        from transformers import AutoTokenizer
+        from src.teacher.local_teacher import LocalTeacherModel
+        _tokenizer = AutoTokenizer.from_pretrained(
+            config["student"]["model_name"], trust_remote_code=True
+        )
+        train_dataset, val_dataset = create_datasets(config, _tokenizer)
+        train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
+
+        local_path = config["teacher"].get("local_model_path", "cache/teacher-model")
+        local_teacher = LocalTeacherModel(
+            model_path=f"/workspace/{local_path}",
             max_tokens=config["teacher"]["max_tokens"],
             temperature=config["teacher"]["temperature"],
             top_logprobs=config["teacher"]["top_logprobs"],
         )
+        local_teacher.precompute_and_cache(train_prompts, cache_dir)
+        del local_teacher
+        torch.cuda.empty_cache()
+        print("Local teacher freed. Loading student model...")
+
+        student = StudentModel(
+            model_name=config["student"]["model_name"],
+            max_length=config["student"]["max_length"],
+        )
+        student.to(device)
+    else:
+        student = StudentModel(
+            model_name=config["student"]["model_name"],
+            max_length=config["student"]["max_length"],
+        )
+        student.to(device)
+
+        train_dataset, val_dataset = create_datasets(config, student.tokenizer)
         train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
-        teacher.precompute_and_cache(train_prompts, cache_dir)
+
+        if args.offline:
+            print("Offline mode: skipping teacher API. Using existing cache only.")
+        else:
+            api_key_env = config["teacher"].get("api_key_env", "TEACHER_API_KEY")
+            teacher = TeacherModel(
+                api_key=os.environ[api_key_env],
+                model=config["teacher"]["model"],
+                api_base=config["teacher"]["api_base"],
+                max_tokens=config["teacher"]["max_tokens"],
+                temperature=config["teacher"]["temperature"],
+                top_logprobs=config["teacher"]["top_logprobs"],
+                headers=config["teacher"].get("headers") or {},
+            )
+            teacher.precompute_and_cache(train_prompts, cache_dir)
 
     train_loader = DataLoader(
         train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, drop_last=True

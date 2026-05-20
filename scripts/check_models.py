@@ -70,8 +70,10 @@ def update_config(info: dict) -> None:
     config_path = Path("/workspace/config/config.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    config["teacher"]["model"]   = info["model"]
-    config["teacher"]["api_base"] = info["api_base"]
+    config["teacher"]["model"]       = info["model"]
+    config["teacher"]["api_base"]    = info["api_base"]
+    config["teacher"]["api_key_env"] = info["api_key_env"]
+    config["teacher"]["headers"]     = info["headers"]
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 

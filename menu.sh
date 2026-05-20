@@ -24,22 +24,23 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Setup${NC}"
     echo "  1) Test API connection"
-    echo "  8) Check available models (auto-selects & updates config)"
+    echo "  2) Check available models (auto-selects & updates config)"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
-    echo "  2) Run training (fetch teacher responses + train)"
-    echo "  2o) Run training offline (use cached data only, no API calls)"
-    echo "  3) Run evaluation"
+    echo "  3) Run training"
+    echo "  4) Run evaluation"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
-    echo "  7) View cached teacher responses"
+    echo "  5) View cached teacher responses"
+    echo "  6) Enter manual answers for teacher prompts"
+    echo "  7) Reset teacher cache (delete all cached responses)"
     echo ""
     echo -e "  ${BOLD}Docker${NC}"
-    echo "  4) Build Docker image"
-    echo "  5) Open shell inside container"
+    echo "  8) Build Docker image"
+    echo "  9) Open shell inside container"
     echo ""
     echo -e "  ${BOLD}GPU Setup${NC}"
-    echo "  6) Install nvidia-container-toolkit (requires sudo)"
+    echo "  10) Install nvidia-container-toolkit (requires sudo)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -125,7 +126,15 @@ install_nvidia_toolkit() {
     read -rp "Press Enter to return to menu..."
 }
 
+MENU_FILE="$(realpath "$0")"
+MENU_MTIME="$(stat -c %Y "$MENU_FILE")"
+
 while true; do
+    current_mtime="$(stat -c %Y "$MENU_FILE")"
+    if [ "$current_mtime" != "$MENU_MTIME" ]; then
+        echo -e "\n${YELLOW}menu.sh changed — reloading...${NC}\n"
+        exec "$MENU_FILE"
+    fi
     show_menu
     read -r choice
     case $choice in
@@ -135,13 +144,61 @@ while true; do
             ;;
         2)
             header
-            run_cmd "sudo docker compose run --rm train python train.py"
-            ;;
-        2o|2O)
-            header
-            run_cmd "sudo docker compose run --rm train python train.py --offline"
+            echo -e "${YELLOW}▶ Checking available teacher models...${NC}"
+            echo ""
+            sudo docker compose run --rm train python scripts/check_models.py
+            check_code=$?
+            echo ""
+            if [ $check_code -eq 0 ]; then
+                new_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+                echo -e "  Active model: ${GREEN}${new_model}${NC}"
+                echo ""
+                echo -n "  Run training now with this model? (y/n): "
+                read -r ans
+                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+                    echo ""
+                    run_cmd "sudo docker compose run --rm train python train.py"
+                else
+                    echo ""
+                    read -rp "Press Enter to return to menu..."
+                fi
+            else
+                read -rp "Press Enter to return to menu..."
+            fi
             ;;
         3)
+            header
+            cur_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+            local_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
+            local_path=${local_path:-cache/teacher-model}
+            local_exists=""
+            [ -d "$local_path" ] && local_exists=" ${GREEN}✓ found${NC}" || local_exists=" ${RED}✗ not found${NC}"
+            echo -e "  ${BOLD}Choose teacher source:${NC}"
+            echo ""
+            echo -e "  1) API teacher    ${CYAN}(${cur_model})${NC}"
+            echo -e "  2) Local model    ${CYAN}(${local_path})${NC}${local_exists}"
+            echo "  3) Offline        (use cached responses only, no new requests)"
+            echo ""
+            echo -n "  Select: "
+            read -r tsrc
+            echo ""
+            case $tsrc in
+                1)
+                    run_cmd "sudo docker compose run --rm train python train.py"
+                    ;;
+                2)
+                    run_cmd "sudo docker compose run --rm train python train.py --local"
+                    ;;
+                3)
+                    run_cmd "sudo docker compose run --rm train python train.py --offline"
+                    ;;
+                *)
+                    echo -e "${RED}Invalid option.${NC}"
+                    read -rp "Press Enter to return to menu..."
+                    ;;
+            esac
+            ;;
+        4)
             header
             latest=$(find outputs -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tail -1)
             if [ -z "$latest" ]; then
@@ -159,11 +216,50 @@ while true; do
                 run_cmd "sudo docker compose run --rm evaluate python evaluate.py --checkpoint /workspace/$ckpt"
             fi
             ;;
-        4)
+        5)
+            view_cache
+            ;;
+        6)
+            header
+            echo -e "${YELLOW}▶ Manual answer entry for teacher prompts...${NC}"
+            echo ""
+            sudo docker compose run --rm -it train python scripts/manual_cache.py
+            echo ""
+            read -rp "Press Enter to return to menu..."
+            ;;
+        7)
+            header
+            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
+            cache_dir=${cache_dir:-cache/teacher_logprobs}
+            count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
+            echo -e "  Cache directory: ${YELLOW}${cache_dir}${NC}"
+            echo -e "  Files found:     ${YELLOW}${count}${NC}"
+            echo ""
+            if [ "$count" -eq 0 ]; then
+                echo -e "  ${GREEN}Cache is already empty.${NC}"
+                echo ""
+                read -rp "Press Enter to return to menu..."
+            else
+                echo -e "  ${RED}This will delete all $count cached response files.${NC}"
+                echo -n "  Are you sure? (yes/n): "
+                read -r ans
+                if [ "$ans" = "yes" ]; then
+                    sudo rm -f "${cache_dir}"/*.json
+                    echo ""
+                    echo -e "  ${GREEN}✓ Cache cleared.${NC}"
+                else
+                    echo ""
+                    echo -e "  Cancelled."
+                fi
+                echo ""
+                read -rp "Press Enter to return to menu..."
+            fi
+            ;;
+        8)
             header
             run_cmd "sudo docker compose build"
             ;;
-        5)
+        9)
             header
             echo -e "${YELLOW}▶ Opening shell inside train container...${NC}"
             echo ""
@@ -171,36 +267,8 @@ while true; do
             echo ""
             read -rp "Press Enter to return to menu..."
             ;;
-        6)
+        10)
             install_nvidia_toolkit
-            ;;
-        7)
-            view_cache
-            ;;
-        8)
-            header
-            echo -e "${YELLOW}▶ Checking available teacher models...${NC}"
-            echo ""
-            sudo docker compose run --rm train python scripts/check_models.py
-            check_code=$?
-            echo ""
-            if [ $check_code -eq 0 ]; then
-                local new_model
-                new_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
-                echo -e "  Active model: ${GREEN}${new_model}${NC}"
-                echo ""
-                echo -n "  Run training now with this model? (y/n): "
-                read -r ans
-                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-                    echo ""
-                    run_cmd "sudo docker compose run --rm train python train.py"
-                else
-                    echo ""
-                    read -rp "Press Enter to return to menu..."
-                fi
-            else
-                read -rp "Press Enter to return to menu..."
-            fi
             ;;
         q|Q)
             echo -e "${NC}Bye."
