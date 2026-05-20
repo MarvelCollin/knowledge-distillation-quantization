@@ -10,10 +10,11 @@ import argparse
 import torch.nn.functional as F
 
 from dotenv import load_dotenv
-from torch.optim import AdamW
+import gc
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup
+from transformers.optimization import Adafactor
 
 from src.data.dataset import create_datasets
 from src.distillation.loss import build_teacher_distribution, compute_total_loss
@@ -90,8 +91,9 @@ def main():
         )
         local_teacher.precompute_and_cache(train_prompts, cache_dir)
         del local_teacher
+        gc.collect()
         torch.cuda.empty_cache()
-        print("Local teacher freed. Loading student model...")
+        print(f"Local teacher freed. GPU now: {torch.cuda.memory_allocated()/1024**3:.1f} GB. Loading student model...")
 
         student = StudentModel(
             model_name=config["student"]["model_name"],
@@ -128,7 +130,13 @@ def main():
     )
     val_loader = DataLoader(val_dataset, batch_size=config["training"]["batch_size"])
 
-    optimizer = AdamW(student.parameters(), lr=float(config["training"]["learning_rate"]))
+    optimizer = Adafactor(
+        student.parameters(),
+        lr=float(config["training"]["learning_rate"]),
+        scale_parameter=False,
+        relative_step=False,
+        warmup_init=False,
+    )
     total_steps = len(train_loader) * config["training"]["num_epochs"]
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -145,6 +153,7 @@ def main():
     max_length = config["student"]["max_length"]
 
     global_step = 0
+    student.model.gradient_checkpointing_enable()
 
     for epoch in range(config["training"]["num_epochs"]):
         student.train()

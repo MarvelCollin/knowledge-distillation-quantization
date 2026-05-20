@@ -28,19 +28,20 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Training${NC}"
     echo "  3) Run training"
-    echo "  4) Run evaluation"
+    echo "  4) Run evaluation       (single checkpoint, val split)"
+    echo "  5) Compare all 3 models (original | teacher | distilled) + graph"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
-    echo "  5) View cached teacher responses"
-    echo "  6) Enter manual answers for teacher prompts"
-    echo "  7) Reset teacher cache (delete all cached responses)"
+    echo "  6) View cached teacher responses"
+    echo "  7) Enter manual answers for teacher prompts"
+    echo "  8) Reset teacher cache (delete all cached responses)"
     echo ""
     echo -e "  ${BOLD}Docker${NC}"
-    echo "  8) Build Docker image"
-    echo "  9) Open shell inside container"
+    echo "  9) Build Docker image"
+    echo "  10) Open shell inside container"
     echo ""
     echo -e "  ${BOLD}GPU Setup${NC}"
-    echo "  10) Install nvidia-container-toolkit (requires sudo)"
+    echo "  11) Install nvidia-container-toolkit (requires sudo)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -213,13 +214,31 @@ while true; do
                 echo -n "Enter checkpoint path (or press Enter to use latest): "
                 read -r ckpt
                 [ -z "$ckpt" ] && ckpt="$latest"
-                run_cmd "sudo docker compose run --rm evaluate python evaluate.py --checkpoint /workspace/$ckpt"
+                echo -n "Verbose output? (y/n) [default: n]: "
+                read -r vb
+                vflag=""
+                [ "$vb" = "y" ] || [ "$vb" = "Y" ] && vflag=" --verbose"
+                run_cmd "sudo docker compose run --rm evaluate python evaluate.py --checkpoint /workspace/$ckpt$vflag"
             fi
             ;;
         5)
-            view_cache
+            header
+            echo -e "  ${BOLD}Compare all 3 models on MBPP test split${NC}"
+            echo ""
+            echo -n "  Number of test problems [default: 30]: "
+            read -r np
+            [ -z "$np" ] && np=30
+            echo -n "  Skip teacher evaluation? (y/n) [default: n]: "
+            read -r skipteach
+            skip_flag=""
+            [ "$skipteach" = "y" ] || [ "$skipteach" = "Y" ] && skip_flag="--skip-teacher"
+            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $skip_flag"
+            echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
             ;;
         6)
+            view_cache
+            ;;
+        7)
             header
             echo -e "${YELLOW}▶ Manual answer entry for teacher prompts...${NC}"
             echo ""
@@ -227,7 +246,7 @@ while true; do
             echo ""
             read -rp "Press Enter to return to menu..."
             ;;
-        7)
+        8)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
             cache_dir=${cache_dir:-cache/teacher_logprobs}
@@ -255,11 +274,11 @@ while true; do
                 read -rp "Press Enter to return to menu..."
             fi
             ;;
-        8)
+        9)
             header
             run_cmd "sudo docker compose build"
             ;;
-        9)
+        10)
             header
             echo -e "${YELLOW}▶ Opening shell inside train container...${NC}"
             echo ""
@@ -267,7 +286,7 @@ while true; do
             echo ""
             read -rp "Press Enter to return to menu..."
             ;;
-        10)
+        11)
             install_nvidia_toolkit
             ;;
         q|Q)

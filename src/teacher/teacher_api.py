@@ -27,6 +27,8 @@ class TeacherModel:
         self.temperature = temperature
         self.top_logprobs = top_logprobs
 
+    _SYSTEM = "You are a coding assistant. Output ONLY a raw Python function definition. No explanation, no markdown, no triple backticks. Start directly with def."
+
     def get_response_with_logprobs(self, prompt: str) -> dict:
         delays = [30, 60, 120]
         for attempt, delay in enumerate([0] + delays):
@@ -36,7 +38,10 @@ class TeacherModel:
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": self._SYSTEM},
+                        {"role": "user", "content": prompt},
+                    ],
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                 )

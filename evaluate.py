@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
+import re
 import yaml
 import torch
 import argparse
@@ -15,28 +16,69 @@ from src.evaluation.evaluator import run_test_cases
 from src.student.model import StudentModel
 
 
+def extract_function(code: str) -> str:
+    """Keep only the first function definition; strip \r\n and trailing test/print code."""
+    code = code.replace('\r\n', '\n').replace('\r', '\n')
+    lines = code.split('\n')
+    result = []
+    for line in lines:
+        if not result:
+            result.append(line)
+        elif not line or line[0] in (' ', '\t'):
+            result.append(line)
+        else:
+            break
+    while result and not result[-1].strip():
+        result.pop()
+    return '\n'.join(result)
+
+
+def _extract_fn_name(test_cases: list) -> str | None:
+    for tc in test_cases:
+        m = re.search(r'\bassert\s+(\w+)\s*\(', tc)
+        if m:
+            return m.group(1)
+    return None
+
+
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-def generate_solution(student: StudentModel, prompt: str, max_new_tokens: int, device: torch.device) -> str:
+def generate_solution(student: StudentModel, prompt: str, test_cases: list,
+                      max_new_tokens: int, device: torch.device) -> str:
+    expected = _extract_fn_name(test_cases)
+    if expected and prompt.endswith("def "):
+        primed_prompt = prompt[:-4] + f"def {expected}("
+        code_prefix = f"def {expected}("
+    else:
+        primed_prompt = prompt
+        code_prefix = "def "
+
     student.eval()
     with torch.no_grad():
-        inputs = student.tokenizer(prompt, return_tensors="pt").to(device)
+        inputs = student.tokenizer(primed_prompt, return_tensors="pt").to(device)
         output_ids = student.generate(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
             max_new_tokens=max_new_tokens,
         )
         generated = output_ids[0][inputs["input_ids"].shape[1]:]
-        return student.tokenizer.decode(generated, skip_special_tokens=True)
+        decoded = student.tokenizer.decode(generated, skip_special_tokens=True)
+        if code_prefix == "def ":
+            code = "def " + decoded.lstrip()
+        else:
+            code = code_prefix + decoded
+        return extract_function(code)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show full generated code and error messages for each test")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -62,7 +104,7 @@ def main():
         prompt = val_dataset.get_prompt(i)
         test_cases = val_dataset.get_test_cases(i)
 
-        generated_code = generate_solution(student, prompt, config["evaluation"]["max_new_tokens"], device)
+        generated_code = generate_solution(student, prompt, test_cases, config["evaluation"]["max_new_tokens"], device)
         result = run_test_cases(generated_code, test_cases)
 
         total_passed += result["passed"]
@@ -74,15 +116,31 @@ def main():
         detail_str = "  ".join(
             f"[{'✓' if d == 'pass' else '✗' if d == 'fail' else '⏱'}]" for d in result["details"]
         )
+        code_preview = generated_code.replace('\n', ' | ')[:100]
         tqdm.write(
-            f"  {status_icon} Problem {i:>2}  {result['passed']}/{result['total']} passed  {detail_str}"
+            f"  {status_icon} Problem {i:>2}  {result['passed']}/{result['total']} passed  {detail_str}\n"
+            f"    CODE: {code_preview}"
         )
+
+        if args.verbose:
+            tqdm.write(f"\n  ── Problem {i} full output ──")
+            tqdm.write(generated_code)
+            for j, (assertion, outcome, error) in enumerate(
+                zip(test_cases, result["details"], result["errors"])
+            ):
+                icon = "✓" if outcome == "pass" else "⏱" if outcome == "timeout" else "✗"
+                tqdm.write(f"  [{icon}] test {j}: {assertion}")
+                if error:
+                    for err_line in error.splitlines():
+                        tqdm.write(f"       {err_line}")
+            tqdm.write("")
 
         all_results.append({
             "problem_idx": i,
             "passed": result["passed"],
             "total": result["total"],
             "details": result["details"],
+            "errors": result["errors"],
             "generated_code": generated_code,
         })
 

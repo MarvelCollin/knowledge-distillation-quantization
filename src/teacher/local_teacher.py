@@ -26,8 +26,13 @@ class LocalTeacherModel:
         gpu_mem = torch.cuda.memory_allocated() / 1024 ** 3 if torch.cuda.is_available() else 0
         print(f"Local teacher loaded.  GPU mem used: {gpu_mem:.1f} GB")
 
+    _SYSTEM = "You are a coding assistant. Output ONLY a raw Python function definition. No explanation, no markdown, no triple backticks. Start directly with def."
+
     def get_response_with_logprobs(self, prompt: str) -> dict:
-        messages = [{"role": "user", "content": prompt}]
+        messages = [
+            {"role": "system", "content": self._SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
         formatted = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -37,28 +42,32 @@ class LocalTeacherModel:
         streamer = TextStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
 
         with torch.no_grad():
-            outputs = self.model.generate(
+            generated = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_tokens,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
                 top_k=None,
-                output_scores=True,
-                return_dict_in_generate=True,
                 pad_token_id=self.tokenizer.eos_token_id,
                 streamer=streamer,
             )
 
-        generated_ids = outputs.sequences[0][input_length:]
+        generated_ids = generated[0][input_length:]
         text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        full_ids = generated[0].unsqueeze(0)
+        with torch.no_grad():
+            logits = self.model(full_ids).logits
+
+        gen_logits = logits[0, input_length - 1: input_length - 1 + len(generated_ids)]
 
         tokens = []
         logprobs_per_token = []
-        for token_id, scores in zip(generated_ids, outputs.scores):
+        for i, token_id in enumerate(generated_ids):
             token = self.tokenizer.decode([token_id.item()])
             tokens.append(token)
-            log_probs = F.log_softmax(scores[0].float(), dim=-1)
+            log_probs = F.log_softmax(gen_logits[i].float(), dim=-1)
             top_k = torch.topk(log_probs, k=min(self.top_logprobs, log_probs.shape[-1]))
             top_k_dict = {
                 self.tokenizer.decode([idx.item()]): val.item()
@@ -109,86 +118,6 @@ class LocalTeacherModel:
                     json.dump({"prompt": prompt, **result}, f)
             except Exception as e:
                 print(f"\n  WARNING: prompt {idx} failed ({e}). Skipping.", flush=True)
-
-    @staticmethod
-    def load_cached(cache_dir: str, idx: int) -> dict | None:
-        file_path = Path(cache_dir) / f"{idx}.json"
-        if not file_path.exists():
-            return None
-        with open(file_path) as f:
-            return json.load(f)
-
-
-    def get_response_with_logprobs(self, prompt: str) -> dict:
-        messages = [{"role": "user", "content": prompt}]
-        formatted = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(formatted, return_tensors="pt").to(self.model.device)
-        input_length = inputs["input_ids"].shape[1]
-
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                output_scores=True,
-                return_dict_in_generate=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-
-        generated_ids = outputs.sequences[0][input_length:]
-        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        tokens = []
-        logprobs_per_token = []
-        for token_id, scores in zip(generated_ids, outputs.scores):
-            token = self.tokenizer.decode([token_id.item()])
-            tokens.append(token)
-            log_probs = F.log_softmax(scores[0].float(), dim=-1)
-            top_k = torch.topk(log_probs, k=min(self.top_logprobs, log_probs.shape[-1]))
-            top_k_dict = {
-                self.tokenizer.decode([idx.item()]): val.item()
-                for idx, val in zip(top_k.indices, top_k.values)
-            }
-            logprobs_per_token.append(top_k_dict)
-
-        return {"text": text, "tokens": tokens, "logprobs": logprobs_per_token}
-
-    def precompute_and_cache(self, prompts: list, cache_dir: str) -> None:
-        cache_path = Path(cache_dir)
-        cache_path.mkdir(parents=True, exist_ok=True)
-
-        def _is_valid(idx: int, prompt: str) -> bool:
-            f = cache_path / f"{idx}.json"
-            if not f.exists():
-                return False
-            try:
-                d = json.loads(f.read_text())
-                return d.get("prompt", "") == prompt
-            except Exception:
-                return False
-
-        pending = [(idx, p) for idx, p in enumerate(prompts) if not _is_valid(idx, p)]
-
-        if not pending:
-            print(f"All {len(prompts)} teacher responses already cached.")
-            return
-
-        print(f"Caching {len(pending)}/{len(prompts)} teacher responses (local model)...")
-        for idx, prompt in pending:
-            print(f"  [{idx + 1}/{len(prompts)}] Generating response...")
-            try:
-                result = self.get_response_with_logprobs(prompt)
-                preview = (result["text"] or "").replace("\n", " ").strip()[:120]
-                print(f"  ✓ {preview}")
-                with open(cache_path / f"{idx}.json", "w") as f:
-                    json.dump({"prompt": prompt, **result}, f)
-            except Exception as e:
-                print(f"  WARNING: prompt {idx} failed ({e}). Skipping.")
 
     @staticmethod
     def load_cached(cache_dir: str, idx: int) -> dict | None:

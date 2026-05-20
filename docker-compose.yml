@@ -35,4 +35,19 @@ services:
               count: 1
               capabilities: [gpu]
 
+  compare_eval:
+    build: .
+    env_file: .env
+    volumes:
+      - .:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    command: python compare_eval.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
 volumes: {}

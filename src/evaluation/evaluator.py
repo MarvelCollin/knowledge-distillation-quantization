@@ -1,7 +1,7 @@
 import subprocess
 
 
-def execute_assertion(code: str, assertion: str, timeout: int = 5) -> str:
+def execute_assertion(code: str, assertion: str, timeout: int = 5) -> tuple:
     full_code = code + "\n" + assertion
     try:
         result = subprocess.run(
@@ -10,17 +10,21 @@ def execute_assertion(code: str, assertion: str, timeout: int = 5) -> str:
             text=True,
             timeout=timeout,
         )
-        return "pass" if result.returncode == 0 else "fail"
+        if result.returncode == 0:
+            return "pass", ""
+        return "fail", (result.stderr.strip() or result.stdout.strip())
     except subprocess.TimeoutExpired:
-        return "timeout"
+        return "timeout", "execution timed out"
 
 
 def run_test_cases(code: str, test_cases: list) -> dict:
     passed = 0
     details = []
+    errors = []
     for assertion in test_cases:
-        outcome = execute_assertion(code, assertion)
+        outcome, error = execute_assertion(code, assertion)
         details.append(outcome)
+        errors.append(error)
         if outcome == "pass":
             passed += 1
-    return {"passed": passed, "total": len(test_cases), "details": details}
+    return {"passed": passed, "total": len(test_cases), "details": details, "errors": errors}
