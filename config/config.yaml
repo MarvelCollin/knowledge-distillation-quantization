@@ -1,34 +1,30 @@
+data:
+  dataset_name: google-research-datasets/mbpp
+  max_samples: 50
+  teacher_cache_dir: cache/teacher_logprobs
+  train_ratio: 0.9
+evaluation:
+  max_new_tokens: 256
+  output_dir: outputs/eval
+student:
+  max_length: 512
+  model_name: Qwen/Qwen2.5-Coder-3B-Instruct
 teacher:
-  model: "gemini-2.0-flash"
-  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  api_base: https://openrouter.ai/api/v1
   max_tokens: 512
+  model: deepseek/deepseek-v4-flash:free
   temperature: 0.0
   top_logprobs: 5
-
-student:
-  model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
-  max_length: 512
-
 training:
-  learning_rate: 2e-5
-  batch_size: 2                          # (standard: 4)
-  gradient_accumulation_steps: 2         # (standard: 4)
-  num_epochs: 1                          # (standard: 3)
   alpha: 0.7
+  batch_size: 2
   distill_temperature: 2.0
-  skew_lambda: 0.1
-  save_steps: 10                         # (standard: 200)
-  eval_steps: 5                          # (standard: 100)
-  output_dir: "outputs"
-  warmup_steps: 5                        # (standard: 100)
+  eval_steps: 5
+  gradient_accumulation_steps: 2
+  learning_rate: 2e-5
   max_grad_norm: 1.0
-
-data:
-  dataset_name: "sahil2801/CodeAlpaca-20k"
-  max_samples: 50                        # (standard: 5000)
-  train_ratio: 0.9
-  teacher_cache_dir: "cache/teacher_logprobs"
-
-evaluation:
-  output_dir: "outputs/eval"
-  max_new_tokens: 256
+  num_epochs: 1
+  output_dir: outputs
+  save_steps: 10
+  skew_lambda: 0.1
+  warmup_steps: 5

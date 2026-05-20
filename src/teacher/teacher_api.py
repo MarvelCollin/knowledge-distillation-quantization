@@ -65,8 +65,19 @@ class TeacherModel:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
 
+        def _is_valid(idx: int, prompt: str) -> bool:
+            file_path = cache_path / f"{idx}.json"
+            if not file_path.exists():
+                return False
+            try:
+                with open(file_path) as f:
+                    cached = json.load(f)
+                return cached.get("prompt", "") == prompt
+            except Exception:
+                return False
+
         pending = [(idx, prompt) for idx, prompt in enumerate(prompts)
-                   if not (cache_path / f"{idx}.json").exists()]
+                   if not _is_valid(idx, prompt)]
 
         if not pending:
             print(f"All {len(prompts)} teacher responses already cached.")
@@ -85,7 +96,7 @@ class TeacherModel:
             except Exception as e:
                 print(f"  WARNING: prompt {idx} failed ({e}). Skipping — will retry next run.")
             if i < len(pending) - 1:
-                time.sleep(10)
+                time.sleep(30)
 
     @staticmethod
     def load_cached(cache_dir: str, idx: int) -> dict | None:

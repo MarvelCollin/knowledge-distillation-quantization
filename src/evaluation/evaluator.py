@@ -1,14 +1,26 @@
-from nltk.translate.bleu_score import corpus_bleu
-from rouge_score import rouge_scorer
+import subprocess
 
 
-def compute_bleu(references: list, hypotheses: list) -> float:
-    refs = [[ref.split()] for ref in references]
-    hyps = [hyp.split() for hyp in hypotheses]
-    return corpus_bleu(refs, hyps)
+def execute_assertion(code: str, assertion: str, timeout: int = 5) -> str:
+    full_code = code + "\n" + assertion
+    try:
+        result = subprocess.run(
+            ["python3", "-c", full_code],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return "pass" if result.returncode == 0 else "fail"
+    except subprocess.TimeoutExpired:
+        return "timeout"
 
 
-def compute_rouge_l(references: list, hypotheses: list) -> float:
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
-    scores = [scorer.score(ref, hyp)["rougeL"].fmeasure for ref, hyp in zip(references, hypotheses)]
-    return sum(scores) / len(scores)
+def run_test_cases(code: str, test_cases: list) -> dict:
+    passed = 0
+    details = []
+    for assertion in test_cases:
+        outcome = execute_assertion(code, assertion)
+        details.append(outcome)
+        if outcome == "pass":
+            passed += 1
+    return {"passed": passed, "total": len(test_cases), "details": details}

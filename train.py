@@ -57,6 +57,8 @@ def run_validation(student: StudentModel, val_loader: DataLoader, device: torch.
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
+    parser.add_argument("--offline", action="store_true",
+                        help="Skip teacher API calls; use only existing cached responses.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -74,18 +76,21 @@ def main():
 
     train_dataset, val_dataset = create_datasets(config, student.tokenizer)
 
-    teacher = TeacherModel(
-        api_key=os.environ["TEACHER_API_KEY"],
-        model=config["teacher"]["model"],
-        api_base=config["teacher"]["api_base"],
-        max_tokens=config["teacher"]["max_tokens"],
-        temperature=config["teacher"]["temperature"],
-        top_logprobs=config["teacher"]["top_logprobs"],
-    )
-
     cache_dir = config["data"]["teacher_cache_dir"]
-    train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
-    teacher.precompute_and_cache(train_prompts, cache_dir)
+
+    if args.offline:
+        print("Offline mode: skipping teacher API. Using existing cache only.")
+    else:
+        teacher = TeacherModel(
+            api_key=os.environ["TEACHER_API_KEY"],
+            model=config["teacher"]["model"],
+            api_base=config["teacher"]["api_base"],
+            max_tokens=config["teacher"]["max_tokens"],
+            temperature=config["teacher"]["temperature"],
+            top_logprobs=config["teacher"]["top_logprobs"],
+        )
+        train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
+        teacher.precompute_and_cache(train_prompts, cache_dir)
 
     train_loader = DataLoader(
         train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, drop_last=True

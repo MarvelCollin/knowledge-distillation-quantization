@@ -17,14 +17,18 @@ header() {
 }
 
 show_menu() {
+    local cur_model
+    cur_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
     header
-    echo -e "  Teacher: ${GREEN}gemini-2.0-flash${NC} (Google AI Studio)"
+    echo -e "  Teacher: ${GREEN}${cur_model:-unknown}${NC}"
     echo ""
     echo -e "  ${BOLD}Setup${NC}"
     echo "  1) Test API connection"
+    echo "  8) Check available models (auto-selects & updates config)"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
-    echo "  2) Run training"
+    echo "  2) Run training (fetch teacher responses + train)"
+    echo "  2o) Run training offline (use cached data only, no API calls)"
     echo "  3) Run evaluation"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
@@ -133,6 +137,10 @@ while true; do
             header
             run_cmd "sudo docker compose run --rm train python train.py"
             ;;
+        2o|2O)
+            header
+            run_cmd "sudo docker compose run --rm train python train.py --offline"
+            ;;
         3)
             header
             latest=$(find outputs -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tail -1)
@@ -168,6 +176,31 @@ while true; do
             ;;
         7)
             view_cache
+            ;;
+        8)
+            header
+            echo -e "${YELLOW}▶ Checking available teacher models...${NC}"
+            echo ""
+            sudo docker compose run --rm train python scripts/check_models.py
+            check_code=$?
+            echo ""
+            if [ $check_code -eq 0 ]; then
+                local new_model
+                new_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+                echo -e "  Active model: ${GREEN}${new_model}${NC}"
+                echo ""
+                echo -n "  Run training now with this model? (y/n): "
+                read -r ans
+                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+                    echo ""
+                    run_cmd "sudo docker compose run --rm train python train.py"
+                else
+                    echo ""
+                    read -rp "Press Enter to return to menu..."
+                fi
+            else
+                read -rp "Press Enter to return to menu..."
+            fi
             ;;
         q|Q)
             echo -e "${NC}Bye."
