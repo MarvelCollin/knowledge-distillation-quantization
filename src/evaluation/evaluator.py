@@ -1,11 +1,23 @@
 import subprocess
+import tempfile
+import os
+
+_PREAMBLE = (
+    "from typing import *\n"
+    "from collections import *\n"
+    "import heapq\nimport math\nimport itertools\nimport functools\n\n"
+)
 
 
 def execute_assertion(code: str, assertion: str, timeout: int = 5) -> tuple:
-    full_code = code + "\n" + assertion
+    full_code = _PREAMBLE + code + "\n" + assertion
+    tmp = None
     try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(full_code)
+            tmp = f.name
         result = subprocess.run(
-            ["python3", "-c", full_code],
+            ["python3", tmp],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -15,6 +27,9 @@ def execute_assertion(code: str, assertion: str, timeout: int = 5) -> tuple:
         return "fail", (result.stderr.strip() or result.stdout.strip())
     except subprocess.TimeoutExpired:
         return "timeout", "execution timed out"
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def run_test_cases(code: str, test_cases: list) -> dict:

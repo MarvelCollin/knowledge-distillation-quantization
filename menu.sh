@@ -223,16 +223,56 @@ while true; do
             ;;
         5)
             header
-            echo -e "  ${BOLD}Compare all 3 models on MBPP test split${NC}"
+            echo -e "  ${BOLD}Compare all 3 models on LeetCode test split${NC}"
             echo ""
             echo -n "  Number of test problems [default: 30]: "
             read -r np
             [ -z "$np" ] && np=30
+            echo -e "  Difficulty filter:"
+            echo "  1) All"
+            echo "  2) Easy only"
+            echo "  3) Medium only"
+            echo "  4) Hard only"
+            echo -n "  Select [default: 1]: "
+            read -r diffchoice
+            case $diffchoice in
+                2) diff_flag="--difficulty easy" ;;
+                3) diff_flag="--difficulty medium" ;;
+                4) diff_flag="--difficulty hard" ;;
+                *) diff_flag="--difficulty all" ;;
+            esac
             echo -n "  Skip teacher evaluation? (y/n) [default: n]: "
             read -r skipteach
             skip_flag=""
             [ "$skipteach" = "y" ] || [ "$skipteach" = "Y" ] && skip_flag="--skip-teacher"
-            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $skip_flag"
+            model_flag=""
+            if [ "$skipteach" != "y" ] && [ "$skipteach" != "Y" ]; then
+                cur_teacher=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+                echo ""
+                local_teacher_path
+                local_teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
+                local_teacher_path=${local_teacher_path:-cache/teacher-model}
+                echo -e "  ${BOLD}Teacher model selection:${NC}"
+                echo -e "  1) ${cur_teacher}  ${CYAN}(from config)${NC}"
+                echo -e "  2) Local Qwen 14B  ${CYAN}(${local_teacher_path})${NC}"
+                echo "  3) konektika-pro"
+                echo "  4) konektika-thinking"
+                echo "  5) deepseek/deepseek-r1"
+                echo "  6) qwen/qwen-2.5-coder-32b-instruct"
+                echo "  7) google/gemini-2.5-flash"
+                echo -n "  Select [default: 1]: "
+                read -r mchoice
+                case $mchoice in
+                    2) model_flag="--local-teacher" ;;
+                    3) model_flag="--teacher-model konektika-pro" ;;
+                    4) model_flag="--teacher-model konektika-thinking" ;;
+                    5) model_flag="--teacher-model deepseek/deepseek-r1" ;;
+                    6) model_flag="--teacher-model qwen/qwen-2.5-coder-32b-instruct" ;;
+                    7) model_flag="--teacher-model google/gemini-2.5-flash" ;;
+                    *) model_flag="" ;;
+                esac
+            fi
+            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $diff_flag $skip_flag $model_flag"
             echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
             ;;
         6)

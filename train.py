@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import os
+import re
 import yaml
 import torch
 import argparse
@@ -11,16 +12,45 @@ import torch.nn.functional as F
 
 from dotenv import load_dotenv
 import gc
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup
 from transformers.optimization import Adafactor
 
 from src.data.dataset import create_datasets
-from src.distillation.loss import build_teacher_distribution, compute_total_loss
-from src.distillation.qead import compute_qead_weights
+from src.distillation.loss import (
+    adaptive_skew_lambda,
+    build_teacher_distribution,
+    compute_total_loss,
+)
+from src.distillation.qead import compute_qead_weights, teacher_confidence_weights
+from src.evaluation.evaluator import run_test_cases
 from src.student.model import StudentModel
 from src.teacher.teacher_api import TeacherModel
+
+
+def _extract_teacher_code(text: str) -> str:
+    text = text.strip()
+    fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+    m = re.search(r'def \w', text)
+    if m:
+        text = text[m.start():]
+    elif not text.startswith("def "):
+        text = "def " + text.lstrip()
+    lines = text.split('\n')
+    result = []
+    for line in lines:
+        if not result:
+            result.append(line)
+        elif not line or line[0] in (' ', '\t'):
+            result.append(line)
+        else:
+            break
+    while result and not result[-1].strip():
+        result.pop()
+    return '\n'.join(result)
 
 
 def load_config(path: str) -> dict:
@@ -88,6 +118,7 @@ def main():
             max_tokens=config["teacher"]["max_tokens"],
             temperature=config["teacher"]["temperature"],
             top_logprobs=config["teacher"]["top_logprobs"],
+            student_tokenizer=_tokenizer,
         )
         local_teacher.precompute_and_cache(train_prompts, cache_dir)
         del local_teacher
@@ -122,12 +153,35 @@ def main():
                 temperature=config["teacher"]["temperature"],
                 top_logprobs=config["teacher"]["top_logprobs"],
                 headers=config["teacher"].get("headers") or {},
+                provider=config["teacher"].get("provider", "openrouter"),
             )
             teacher.precompute_and_cache(train_prompts, cache_dir)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, drop_last=True
-    )
+    curriculum_mode = config["training"].get("curriculum", "none")
+    if curriculum_mode == "length":
+        order = train_dataset.curriculum_order(cache_dir)
+        print(f"Curriculum: ordering {len(order)} samples by teacher response length (easy first).")
+
+        class _FixedOrderSampler(Sampler):
+            def __init__(self, indices):
+                self.indices = list(indices)
+
+            def __iter__(self):
+                return iter(self.indices)
+
+            def __len__(self):
+                return len(self.indices)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["training"]["batch_size"],
+            sampler=_FixedOrderSampler(order),
+            drop_last=True,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, drop_last=True
+        )
     val_loader = DataLoader(val_dataset, batch_size=config["training"]["batch_size"])
 
     optimizer = Adafactor(
@@ -147,10 +201,14 @@ def main():
     vocab_size = student.model.config.vocab_size
     alpha = config["training"]["alpha"]
     skew_lambda = config["training"]["skew_lambda"]
+    skew_lambda_max = config["training"].get("skew_lambda_max", skew_lambda)
+    use_adaptive_skew = config["training"].get("adaptive_skew", False)
+    use_confidence = config["training"].get("teacher_confidence_weight", False)
     distill_temp = config["training"]["distill_temperature"]
     grad_accum = config["training"]["gradient_accumulation_steps"]
     max_grad_norm = config["training"]["max_grad_norm"]
     max_length = config["student"]["max_length"]
+    filter_failed_teacher = config["training"].get("filter_failed_teacher", False)
 
     global_step = 0
     student.model.gradient_checkpointing_enable()
@@ -174,30 +232,56 @@ def main():
             teacher_dist = torch.zeros(len(sample_idxs), max_length, vocab_size, device=device)
 
             for i in range(len(sample_idxs)):
-                cached = TeacherModel.load_cached(cache_dir, sample_idxs[i].item())
-                if not cached or not cached["logprobs"]:
+                idx = sample_idxs[i].item()
+                cached = TeacherModel.load_cached(cache_dir, idx)
+                if not cached or not cached.get("logprobs"):
                     continue
+                if cached.get("prompt") != train_dataset.get_prompt(idx):
+                    continue
+                if filter_failed_teacher:
+                    teacher_code = _extract_teacher_code(cached.get("text", ""))
+                    test_cases = train_dataset.get_test_cases(idx)
+                    if run_test_cases(teacher_code, test_cases)["passed"] < len(test_cases):
+                        continue
                 logprobs = cached["logprobs"]
+                top_k_ids = cached.get("top_k_ids")
+                top_k_vals = cached.get("top_k_vals")
                 pl = prompt_lengths[i].item()
-                aligned_len = min(len(logprobs), max_length - pl)
+                dist_start = pl - 1
+                aligned_len = min(len(logprobs), max_length - dist_start)
                 if aligned_len <= 0:
                     continue
+                kwargs = {}
+                if top_k_ids is not None and top_k_vals is not None:
+                    kwargs["top_k_ids"] = top_k_ids[:aligned_len]
+                    kwargs["top_k_vals"] = top_k_vals[:aligned_len]
                 partial = build_teacher_distribution(
                     logprobs[:aligned_len],
                     student.tokenizer,
                     vocab_size,
                     device,
                     distill_temp,
+                    **kwargs,
                 )
-                teacher_dist[i, pl : pl + aligned_len] = partial
+                teacher_dist[i, dist_start : dist_start + aligned_len] = partial
 
             valid_teacher = teacher_dist.sum(dim=-1) > 1e-8
             qead_weights = qead_weights * valid_teacher.float()
+            if use_confidence:
+                qead_weights = qead_weights * teacher_confidence_weights(teacher_dist)
             weight_sums = qead_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
             qead_weights = qead_weights / weight_sums
 
+            if use_adaptive_skew:
+                effective_lambda = adaptive_skew_lambda(
+                    student_logits, teacher_dist, qead_weights,
+                    skew_lambda, skew_lambda_max, distill_temp,
+                )
+            else:
+                effective_lambda = skew_lambda
+
             total, l_distill, l_task = compute_total_loss(
-                student_logits, teacher_dist, qead_weights, labels, alpha, skew_lambda, distill_temp
+                student_logits, teacher_dist, qead_weights, labels, alpha, effective_lambda, distill_temp
             )
 
             (total / grad_accum).backward()

@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip python3-dev && \
+    apt-get install -y python3 python3-pip python3-dev curl wget && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 

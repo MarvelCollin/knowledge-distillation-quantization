@@ -1,3 +1,7 @@
+import json
+import re
+from pathlib import Path
+
 import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
@@ -6,8 +10,13 @@ PROMPT_TEMPLATE = (
     "Write a solution in Python to solve the following problem.\n"
     "Your answer must be a Python function only. Do not use any other language.\n\n"
     "Problem: {text}\n\n"
-    "def "
 )
+
+
+def _extract_test_cases(test_str: str, entry_point: str) -> list:
+    if not test_str.strip() or not entry_point:
+        return []
+    return [test_str + f"\ncheck({entry_point})"]
 
 
 class CodingDataset(Dataset):
@@ -28,11 +37,30 @@ class CodingDataset(Dataset):
     def get_test_cases(self, idx: int) -> list:
         return self.problems[idx]["test_cases"]
 
+    def curriculum_order(self, cache_dir: str) -> list:
+        cache_path = Path(cache_dir)
+        scored = []
+        for i in range(len(self.problems)):
+            difficulty = None
+            f = cache_path / f"{i}.json"
+            if f.exists():
+                try:
+                    d = json.loads(f.read_text())
+                    toks = d.get("tokens") or []
+                    if toks:
+                        difficulty = len(toks)
+                except Exception:
+                    difficulty = None
+            if difficulty is None:
+                difficulty = len(self.problems[i]["text"])
+            scored.append((difficulty, i))
+        scored.sort(key=lambda x: x[0])
+        return [i for _, i in scored]
+
     def __getitem__(self, idx: int) -> dict:
         prompt = self.get_prompt(idx)
         solution = self.get_reference(idx)
-        # prompt ends with "def " so the solution starts from the function name
-        full_text = prompt + solution[4:] if solution.startswith("def ") else prompt + solution
+        full_text = prompt + solution
 
         full_enc = self.tokenizer(
             full_text,
@@ -73,12 +101,17 @@ def create_datasets(config: dict, tokenizer) -> tuple:
 
     problems = []
     for item in raw:
-        test_cases = [t for t in item.get("test_list", []) if isinstance(t, str) and t.strip()]
-        if not test_cases or not item.get("code", "").strip():
+        entry_point = (item.get("entry_point") or "").strip()
+        ep_clean = re.search(r'(\w+)$', entry_point)
+        entry_point = ep_clean.group(1) if ep_clean else entry_point
+        test_cases = _extract_test_cases(item.get("test") or "", entry_point)
+        code = (item.get("response") or "").strip()
+        text = (item.get("problem_description") or "").strip()
+        if not test_cases or not code or not text:
             continue
         problems.append({
-            "text": item["text"].strip(),
-            "code": item["code"].strip(),
+            "text": text,
+            "code": code,
             "test_cases": test_cases,
         })
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Three-way evaluation: original student | teacher | distilled student.
-Uses the MBPP *test* split — never seen during training.
+Uses the LeetCodeDataset *test* split — never seen during training.
 
 Usage (inside Docker):
     python compare_eval.py
@@ -15,10 +15,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import gc
 import json
+import os
 import re
+import traceback
 import yaml
 import torch
 import argparse
+
+from dotenv import load_dotenv
 
 from datasets import load_dataset
 from tqdm import tqdm
@@ -52,15 +56,19 @@ def _extract_function(code: str) -> str:
 
 def _extract_fn_name(test_cases: list) -> str | None:
     for tc in test_cases:
+        for name in re.findall(r'\bcheck\((\w+)\)', tc):
+            if name != 'candidate':
+                return name
         m = re.search(r'\bassert\s+(\w+)\s*\(', tc)
-        if m:
+        if m and m.group(1) != 'candidate':
             return m.group(1)
     return None
 
 
 _SYSTEM = (
-    "You are a coding assistant. Output ONLY a raw Python function definition. "
-    "No explanation, no markdown, no triple backticks. Start directly with def."
+    "You are a coding assistant. Write a standalone Python function that solves the problem. "
+    "Output ONLY the function definition, nothing else. No class, no explanation, "
+    "no markdown, no triple backticks. Start directly with 'def'."
 )
 
 _INTERMEDIATE = Path("outputs/eval/intermediate")
@@ -78,18 +86,30 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def load_test_problems(n: int) -> list:
-    print(f"Loading {n} problems from MBPP test split (separate from training data)...")
-    raw = load_dataset("google-research-datasets/mbpp", split="test")
+def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> list:
+    diff_label = f"{difficulty} " if difficulty != "all" else ""
+    print(f"Loading {n} {diff_label}problems from {dataset_name} test split (separate from training data)...")
+    raw = load_dataset(dataset_name, split="test")
     problems = []
     for item in raw:
-        cases = [t for t in item.get("test_list", []) if isinstance(t, str) and t.strip()]
-        if not cases or not item.get("code", "").strip():
+        if difficulty != "all" and (item.get("difficulty") or "").lower() != difficulty.lower():
+            continue
+        entry_point = (item.get("entry_point") or "").strip()
+        # Strip class prefix like "Solution().method" → just the method name
+        ep_clean = re.search(r'(\w+)$', entry_point)
+        entry_point = ep_clean.group(1) if ep_clean else entry_point
+        test_str = item.get("test") or ""
+        cases = [test_str + f"\ncheck({entry_point})"] if test_str.strip() and entry_point else []
+        code = (item.get("response") or "").strip()
+        text = (item.get("problem_description") or "").strip()
+        if not cases or not code or not text:
             continue
         problems.append({
-            "text": item["text"].strip(),
-            "code": item["code"].strip(),
+            "text": text,
+            "code": code,
             "test_cases": cases,
+            "difficulty": (item.get("difficulty") or ""),
+            "entry_point": entry_point,
         })
         if len(problems) >= n:
             break
@@ -107,20 +127,23 @@ def _save_intermediate(label: str, data: dict) -> None:
     _cache_path(label).write_text(json.dumps(data, indent=2))
 
 
-def _load_intermediate(label: str) -> dict | None:
+def _load_intermediate(label: str, dataset_name: str) -> dict | None:
     p = _cache_path(label)
     if p.exists():
-        return json.loads(p.read_text())
+        d = json.loads(p.read_text())
+        if d.get("dataset") == dataset_name:
+            return d
     return None
 
 
-def _finalise(label: str, results: list) -> dict:
+def _finalise(label: str, results: list, dataset_name: str) -> dict:
     tp = sum(r["passed"] for r in results)
     tt = sum(r["total"] for r in results)
     solved = sum(1 for r in results if r["solved"])
     n = len(results)
     summary = {
         "name": label,
+        "dataset": dataset_name,
         "test_pass_rate": tp / max(tt, 1),
         "problem_solve_rate": solved / max(n, 1),
         "total_passed": tp,
@@ -136,70 +159,63 @@ def _finalise(label: str, results: list) -> dict:
 
 
 def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens: int,
-                 is_teacher: bool, device) -> str:
-    expected = _extract_fn_name(test_cases)
+                 entry_point: str | None = None) -> str:
+    expected = entry_point or _extract_fn_name(test_cases)
 
-    if is_teacher:
-        user_content = prompt
-        if expected:
-            user_content = prompt + f"\n\nName the function `{expected}`."
-        messages = [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user_content},
-        ]
-        fmt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+    clean_prompt = prompt.rstrip()
+    if clean_prompt.endswith("def"):
+        clean_prompt = clean_prompt[:-3].rstrip()
+
+    user_content = clean_prompt
+    if expected:
+        user_content = clean_prompt + f"\n\nName the function `{expected}`."
+
+    messages = [
+        {"role": "system", "content": _SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+    fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(fmt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            pad_token_id=tokenizer.eos_token_id,
         )
-        inputs = tokenizer(fmt, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-        gen = out[0][inputs["input_ids"].shape[1]:]
-        code = tokenizer.decode(gen, skip_special_tokens=True).strip()
-        if not code.startswith("def "):
-            code = "def " + code.lstrip()
-        code = _extract_function(code)
-        if expected:
-            old = re.match(r'def (\w+)\(', code)
-            if old and old.group(1) != expected:
-                old_name = re.escape(old.group(1))
-                code = re.sub(r'\b' + old_name + r'\b', expected, code)
-        return code
-    else:
-        if expected and prompt.endswith("def "):
-            primed = prompt[:-4] + f"def {expected}("
-            code_prefix = f"def {expected}("
-        else:
-            primed = prompt
-            code_prefix = "def "
-        inputs = tokenizer(primed, return_tensors="pt").to(device)
-        with torch.no_grad():
-            out = model.generate(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-        gen = out[0][inputs["input_ids"].shape[1]:]
-        decoded = tokenizer.decode(gen, skip_special_tokens=True)
-        if code_prefix == "def ":
-            code = "def " + decoded.lstrip()
-        else:
-            code = code_prefix + decoded
-        return _extract_function(code)
+
+    gen = out[0][inputs["input_ids"].shape[1]:]
+    code = tokenizer.decode(gen, skip_special_tokens=True).strip()
+
+    fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', code, re.DOTALL | re.IGNORECASE)
+    if fence:
+        code = fence.group(1).strip()
+
+    m = re.search(r'def \w', code)
+    if m:
+        code = code[m.start():]
+    elif not code.startswith("def "):
+        code = "def " + code.lstrip()
+
+    code = _extract_function(code)
+
+    if expected:
+        old = re.match(r'def (\w+)\(', code)
+        if old and old.group(1) != expected:
+            old_name = re.escape(old.group(1))
+            code = re.sub(r'\b' + old_name + r'\b', expected, code)
+
+    return code
 
 
 def evaluate_model(label: str, model_path: str, problems: list,
-                   max_new_tokens: int, device, is_teacher: bool = False) -> dict:
-    cached = _load_intermediate(label)
+                   max_new_tokens: int, device, is_teacher: bool = False,
+                   dataset_name: str = "") -> dict:
+    cached = _load_intermediate(label, dataset_name)
     if cached and cached.get("num_problems") == len(problems):
         print(f"\n  Loaded cached results for: {label}")
         return cached
@@ -230,7 +246,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
     for i, prob in enumerate(tqdm(problems, desc=label)):
         prompt = PROMPT_TEMPLATE.format(text=prob["text"])
         try:
-            code = _run_problem(model, tokenizer, prompt, prob["test_cases"], max_new_tokens, is_teacher, device)
+            code = _run_problem(model, tokenizer, prompt, prob["test_cases"], max_new_tokens, entry_point=prob.get("entry_point"))
         except Exception as exc:
             tqdm.write(f"  ✗ [{i+1:>2}/{len(problems)}] generation error: {exc}")
             results.append({"idx": i, "passed": 0, "total": len(prob["test_cases"]),
@@ -240,16 +256,23 @@ def evaluate_model(label: str, model_path: str, problems: list,
         r = run_test_cases(code, prob["test_cases"])
         solved = r["passed"] == r["total"] and r["total"] > 0
         results.append({"idx": i, **r, "solved": solved, "code": code})
+        diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
         tqdm.write(
-            f"  {'✓' if solved else '✗'} [{i+1:>2}/{len(problems)}]"
+            f"  {'✓' if solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
             f"  {r['passed']}/{r['total']} test cases"
         )
+        tqdm.write(f"    Code: {code.replace(chr(10), ' | ')[:140]}")
+        if not solved and r["errors"]:
+            first_err = next((e for e in r["errors"] if e), None)
+            if first_err:
+                for line in first_err.splitlines()[-6:]:
+                    tqdm.write(f"    {line}")
 
     del model, tokenizer
     gc.collect()
     torch.cuda.empty_cache()
 
-    return _finalise(label, results)
+    return _finalise(label, results, dataset_name)
 
 
 def _style_ax(ax) -> None:
@@ -320,7 +343,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
         ax_delta.axhline(0, color="#888888", linewidth=0.8, linestyle="--")
         ax_delta.set_xticks(np.arange(n_problems))
         ax_delta.set_xticklabels(np.arange(n_problems), fontsize=7, color="#aaaaaa")
-        ax_delta.set_xlabel("Problem index (MBPP test split)", color="#aaaaaa", fontsize=10)
+        ax_delta.set_xlabel("Problem index (LeetCode test split)", color="#aaaaaa", fontsize=10)
         ax_delta.set_title(
             f"Δ vs Student (original)  — +1 = newly solved, -1 = regression",
             color="white", fontsize=12, pad=8,
@@ -341,7 +364,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     ax_heat.set_yticklabels(names, color="white", fontsize=10)
     ax_heat.set_xticks(range(n_problems))
     ax_heat.set_xticklabels(range(n_problems), fontsize=7, color="#aaaaaa")
-    ax_heat.set_xlabel("Problem index (MBPP test split)", color="#aaaaaa", fontsize=10)
+    ax_heat.set_xlabel("Problem index (LeetCode test split)", color="#aaaaaa", fontsize=10)
     ax_heat.set_title(
         "Per-Problem Heatmap  (green = solved ✓, red = failed ✗)",
         color="white", fontsize=12, pad=8,
@@ -368,7 +391,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
         )
 
     fig.suptitle(
-        "QEAD Knowledge Distillation — Evaluation on MBPP Test Split\n"
+        "QEAD Knowledge Distillation — Evaluation on LeetCode Test Split\n"
         + "\n".join(summary_lines),
         color="white", fontsize=10, fontweight="bold",
         y=0.975, va="top", family="monospace",
@@ -380,39 +403,145 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     print(f"\nGraph saved → {out_path}")
 
 
+def evaluate_api_teacher(label: str, teacher, problems: list, dataset_name: str) -> dict:
+    from src.evaluation.evaluator import run_test_cases
+
+    cached = _load_intermediate(label, dataset_name)
+    if cached and cached.get("num_problems") == len(problems):
+        print(f"\n  Loaded cached results for: {label}")
+        return cached
+
+    print(f"\n{'═' * 62}")
+    print(f"  Evaluating: {label}")
+    print(f"  Provider:   {teacher.provider}  Model: {teacher.model}")
+    print(f"{'═' * 62}")
+
+    results = []
+    for i, prob in enumerate(tqdm(problems, desc=label)):
+        entry_point = prob.get("entry_point")
+        expected = entry_point or _extract_fn_name(prob["test_cases"])
+
+        clean_prompt = PROMPT_TEMPLATE.format(text=prob["text"]).rstrip()
+        if clean_prompt.endswith("def"):
+            clean_prompt = clean_prompt[:-3].rstrip()
+
+        user_content = clean_prompt
+        if expected:
+            user_content = clean_prompt + f"\n\nName the function `{expected}`."
+
+        try:
+            result = teacher.get_response_with_logprobs(user_content)
+            code = (result.get("text") or "").strip()
+        except Exception as exc:
+            tqdm.write(f"  ✗ [{i+1:>2}/{len(problems)}] API error: {type(exc).__name__}: {exc}")
+            for line in traceback.format_exc().splitlines()[-5:]:
+                tqdm.write(f"    {line}")
+            results.append({"idx": i, "passed": 0, "total": len(prob["test_cases"]),
+                            "solved": False, "details": [], "errors": [], "code": ""})
+            continue
+
+        fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', code, re.DOTALL | re.IGNORECASE)
+        if fence:
+            code = fence.group(1).strip()
+
+        m = re.search(r'def \w', code)
+        if m:
+            code = code[m.start():]
+        elif not code.startswith("def "):
+            code = "def " + code.lstrip()
+
+        code = _extract_function(code)
+
+        if expected:
+            old = re.match(r'def (\w+)\(', code)
+            if old and old.group(1) != expected:
+                old_name = re.escape(old.group(1))
+                code = re.sub(r'\b' + old_name + r'\b', expected, code)
+
+        r = run_test_cases(code, prob["test_cases"])
+        solved = r["passed"] == r["total"] and r["total"] > 0
+        results.append({"idx": i, **r, "solved": solved, "code": code})
+        diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
+        tqdm.write(
+            f"  {'✓' if solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
+            f"  {r['passed']}/{r['total']} test cases"
+        )
+        tqdm.write(f"    Code: {code.replace(chr(10), ' | ')[:140]}")
+        if not solved and r["errors"]:
+            first_err = next((e for e in r["errors"] if e), None)
+            if first_err:
+                for line in first_err.splitlines()[-6:]:
+                    tqdm.write(f"    {line}")
+
+    return _finalise(label, results, dataset_name)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Three-way model comparison on MBPP test split")
+    parser = argparse.ArgumentParser(description="Three-way model comparison on LeetCode test split")
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--distilled", default=None,
                         help="Path to distilled student checkpoint (auto-detected if omitted)")
     parser.add_argument("--num-problems", type=int, default=30,
-                        help="Number of MBPP test problems to evaluate (default: 30)")
+                        help="Number of LeetCode test problems to evaluate (default: 30)")
+    parser.add_argument("--difficulty", default="all",
+                        choices=["easy", "medium", "hard", "all"],
+                        help="Filter problems by difficulty (default: all)")
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation to save time (~1 min/problem)")
+    parser.add_argument("--teacher-model", default=None,
+                        help="Override teacher model name from config")
+    parser.add_argument("--local-teacher", action="store_true",
+                        help="Force local teacher model regardless of config provider")
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--out", default="outputs/eval/comparison.png")
     args = parser.parse_args()
+
+    load_dotenv()
+
+    for p in _INTERMEDIATE.glob("*.json"):
+        p.unlink()
 
     config = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     max_new_tokens = args.max_new_tokens or config["evaluation"]["max_new_tokens"]
     student_model  = config["student"]["model_name"]
     teacher_path   = f"/workspace/{config['teacher']['local_model_path']}"
+    teacher_provider = config["teacher"].get("provider", "local")
 
-    problems = load_test_problems(args.num_problems)
+    dataset_name = config["data"]["dataset_name"]
+    problems = load_test_problems(args.num_problems, dataset_name, args.difficulty)
 
     summaries = []
 
     summaries.append(evaluate_model(
         "Student (original)", student_model,
         problems, max_new_tokens, device, is_teacher=False,
+        dataset_name=dataset_name,
     ))
 
     if not args.skip_teacher:
-        summaries.append(evaluate_model(
-            "Teacher (14B)", teacher_path,
-            problems, max_new_tokens, device, is_teacher=True,
-        ))
+        if args.local_teacher or teacher_provider == "local":
+            summaries.append(evaluate_model(
+                "Teacher (14B)", teacher_path,
+                problems, max_new_tokens, device, is_teacher=True,
+                dataset_name=dataset_name,
+            ))
+        else:
+            from src.teacher.teacher_api import TeacherModel
+            api_key_env = config["teacher"].get("api_key_env", "TEACHER_API_KEY")
+            teacher_model_name = args.teacher_model or config["teacher"]["model"]
+            teacher = TeacherModel(
+                api_key=os.environ[api_key_env],
+                model=teacher_model_name,
+                api_base=config["teacher"]["api_base"],
+                max_tokens=max_new_tokens,
+                temperature=config["teacher"]["temperature"],
+                top_logprobs=config["teacher"]["top_logprobs"],
+                headers=config["teacher"].get("headers") or {},
+                provider=teacher_provider,
+            )
+            teacher_label = f"Teacher ({teacher_model_name})"
+            summaries.append(evaluate_api_teacher(teacher_label, teacher, problems, dataset_name))
 
     distilled_path = args.distilled
     if distilled_path is None:
@@ -428,6 +557,7 @@ def main() -> None:
         summaries.append(evaluate_model(
             "Student (distilled)", distilled_path,
             problems, max_new_tokens, device, is_teacher=False,
+            dataset_name=dataset_name,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")

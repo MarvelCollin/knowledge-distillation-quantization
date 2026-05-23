@@ -33,10 +33,20 @@ def extract_function(code: str) -> str:
     return '\n'.join(result)
 
 
+_SYSTEM = (
+    "You are a coding assistant. Write a standalone Python function that solves the problem. "
+    "Output ONLY the function definition, nothing else. No class, no explanation, "
+    "no markdown, no triple backticks. Start directly with 'def'."
+)
+
+
 def _extract_fn_name(test_cases: list) -> str | None:
     for tc in test_cases:
+        for name in re.findall(r'\bcheck\((\w+)\)', tc):
+            if name != 'candidate':
+                return name
         m = re.search(r'\bassert\s+(\w+)\s*\(', tc)
-        if m:
+        if m and m.group(1) != 'candidate':
             return m.group(1)
     return None
 
@@ -49,28 +59,56 @@ def load_config(path: str) -> dict:
 def generate_solution(student: StudentModel, prompt: str, test_cases: list,
                       max_new_tokens: int, device: torch.device) -> str:
     expected = _extract_fn_name(test_cases)
-    if expected and prompt.endswith("def "):
-        primed_prompt = prompt[:-4] + f"def {expected}("
-        code_prefix = f"def {expected}("
-    else:
-        primed_prompt = prompt
-        code_prefix = "def "
+
+    clean_prompt = prompt.rstrip()
+    if clean_prompt.endswith("def"):
+        clean_prompt = clean_prompt[:-3].rstrip()
+
+    user_content = clean_prompt
+    if expected:
+        user_content = clean_prompt + f"\n\nName the function `{expected}`."
+
+    messages = [
+        {"role": "system", "content": _SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+    fmt = student.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     student.eval()
     with torch.no_grad():
-        inputs = student.tokenizer(primed_prompt, return_tensors="pt").to(device)
-        output_ids = student.generate(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
+        inputs = student.tokenizer(fmt, return_tensors="pt").to(device)
+        out = student.model.generate(
+            **inputs,
             max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            pad_token_id=student.tokenizer.eos_token_id,
         )
-        generated = output_ids[0][inputs["input_ids"].shape[1]:]
-        decoded = student.tokenizer.decode(generated, skip_special_tokens=True)
-        if code_prefix == "def ":
-            code = "def " + decoded.lstrip()
-        else:
-            code = code_prefix + decoded
-        return extract_function(code)
+
+    gen = out[0][inputs["input_ids"].shape[1]:]
+    code = student.tokenizer.decode(gen, skip_special_tokens=True).strip()
+
+    fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', code, re.DOTALL | re.IGNORECASE)
+    if fence:
+        code = fence.group(1).strip()
+
+    m = re.search(r'def \w', code)
+    if m:
+        code = code[m.start():]
+    elif not code.startswith("def "):
+        code = "def " + code.lstrip()
+
+    code = extract_function(code)
+
+    if expected:
+        old = re.match(r'def (\w+)\(', code)
+        if old and old.group(1) != expected:
+            old_name = re.escape(old.group(1))
+            code = re.sub(r'\b' + old_name + r'\b', expected, code)
+
+    return code
 
 
 def main():

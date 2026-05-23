@@ -1,6 +1,6 @@
 data:
-  dataset_name: google-research-datasets/mbpp
-  max_samples: 50
+  dataset_name: newfacade/LeetCodeDataset
+  max_samples: 200
   teacher_cache_dir: cache/teacher_logprobs
   train_ratio: 0.9
 evaluation:
@@ -10,21 +10,22 @@ student:
   max_length: 512
   model_name: Qwen/Qwen2.5-Coder-3B-Instruct
 teacher:
-  api_base: https://openrouter.ai/api/v1
-  api_key_env: OPENROUTER_API_KEY
+  provider: konektika
+  api_base: https://konektikacloud.web.id/v1
+  api_key_env: KONEKTIKA_API_KEY
+  model: konektika-pro
   local_model_path: cache/teacher-model
-  headers:
-    HTTP-Referer: https://github.com/MarvelCollin/knowledge-distillation-quantization
-    X-Title: Knowledge Distillation Quantization
-  max_tokens: 512
-  model: deepseek/deepseek-v4-flash:free
+  headers: {}
+  max_tokens: 8192
   temperature: 0.0
-  top_logprobs: 5
+  top_logprobs: 20
 training:
   alpha: 0.7
   batch_size: 2
+  curriculum: length
   distill_temperature: 2.0
   eval_steps: 5
+  filter_failed_teacher: true
   gradient_accumulation_steps: 2
   learning_rate: 2e-5
   max_grad_norm: 1.0
@@ -32,4 +33,7 @@ training:
   output_dir: outputs
   save_steps: 10
   skew_lambda: 0.1
+  skew_lambda_max: 0.5
+  adaptive_skew: true
+  teacher_confidence_weight: true
   warmup_steps: 5

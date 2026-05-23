@@ -18,3 +18,15 @@ def compute_qead_weights(logits: torch.Tensor, response_mask: torch.Tensor) -> t
     error = error * response_mask.float()
     row_sums = error.sum(dim=-1, keepdim=True).clamp(min=1e-8)
     return error / row_sums
+
+
+def teacher_confidence_weights(teacher_dist: torch.Tensor) -> torch.Tensor:
+    with torch.no_grad():
+        nonempty = teacher_dist.sum(dim=-1) > 1e-8
+        safe = teacher_dist.clamp(min=1e-10)
+        entropy = -(safe * safe.log()).sum(dim=-1)
+        k_eff = (teacher_dist > 1e-10).float().sum(dim=-1).clamp(min=2.0)
+        max_entropy = torch.log(k_eff)
+        norm_entropy = (entropy / max_entropy).clamp(0.0, 1.0)
+        confidence = 1.0 - norm_entropy
+        return torch.where(nonempty, confidence, torch.zeros_like(confidence))

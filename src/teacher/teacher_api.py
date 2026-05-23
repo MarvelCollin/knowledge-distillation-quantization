@@ -3,7 +3,10 @@ import math
 import time
 from pathlib import Path
 
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError
+
+
+_RESTRICTED_PROVIDERS = {"konektika"}
 
 
 class TeacherModel:
@@ -16,6 +19,7 @@ class TeacherModel:
         temperature: float,
         top_logprobs: int,
         headers: dict = None,
+        provider: str = "openrouter",
     ):
         self.client = OpenAI(
             api_key=api_key,
@@ -26,30 +30,43 @@ class TeacherModel:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_logprobs = top_logprobs
+        self.provider = provider
 
     _SYSTEM = "You are a coding assistant. Output ONLY a raw Python function definition. No explanation, no markdown, no triple backticks. Start directly with def."
 
+    def _build_create_kwargs(self, messages: list) -> dict:
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+        }
+        if self.provider not in _RESTRICTED_PROVIDERS:
+            kwargs["temperature"] = self.temperature
+        return kwargs
+
     def get_response_with_logprobs(self, prompt: str) -> dict:
-        delays = [30, 60, 120]
+        messages = [
+            {"role": "system", "content": self._SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        delays = [10, 30, 60]
         for attempt, delay in enumerate([0] + delays):
             if delay:
-                print(f"Rate limited. Waiting {delay}s before retry {attempt}/{len(delays)}...")
+                print(f"  Retry {attempt}/{len(delays)} after {delay}s...")
                 time.sleep(delay)
             try:
                 response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": self._SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
+                    **self._build_create_kwargs(messages)
                 )
                 return self._parse_response(response)
             except RateLimitError:
                 if attempt == len(delays):
                     raise
-        raise RateLimitError
+                print(f"  Rate limited.")
+            except (APIConnectionError, APITimeoutError) as exc:
+                if attempt == len(delays):
+                    raise
+                print(f"  {type(exc).__name__}: {exc}")
 
     def _parse_response(self, response) -> dict:
         choice = response.choices[0]
@@ -62,8 +79,10 @@ class TeacherModel:
                 top_k = {item.token: item.logprob for item in token_logprob.top_logprobs}
                 logprobs_per_token.append(top_k)
 
+        text = choice.message.content
+
         return {
-            "text": choice.message.content,
+            "text": text,
             "tokens": tokens,
             "logprobs": logprobs_per_token,
         }
