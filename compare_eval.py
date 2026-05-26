@@ -167,15 +167,7 @@ def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens
 
     gen = out[0][inputs["input_ids"].shape[1]:]
     raw = tokenizer.decode(gen, skip_special_tokens=True)
-    code = extract_code(raw)
-
-    if expected:
-        old = re.match(r'def (\w+)\(', code)
-        if old and old.group(1) != expected:
-            old_name = re.escape(old.group(1))
-            code = re.sub(r'\b' + old_name + r'\b', expected, code)
-
-    return code
+    return extract_code(raw)
 
 
 def evaluate_model(label: str, model_path: str, problems: list,

@@ -25,7 +25,6 @@ from src.distillation.qead import compute_qead_weights, teacher_confidence_weigh
 from src.evaluation.evaluator import run_test_cases
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
-from src.utils.reasoning import extract_code
 from evaluate import generate_solution
 
 
@@ -239,14 +238,8 @@ def main():
                 if filter_failed_teacher:
                     cached_passed = cached.get("test_passed")
                     cached_total = cached.get("test_total")
-                    if cached_passed is not None and cached_total is not None:
-                        if cached_total == 0 or cached_passed < cached_total:
-                            continue
-                    else:
-                        teacher_code = extract_code(cached.get("text", ""))
-                        test_cases = train_dataset.get_test_cases(idx)
-                        if run_test_cases(teacher_code, test_cases)["passed"] < len(test_cases):
-                            continue
+                    if cached_total is None or cached_passed is None or cached_total == 0 or cached_passed < cached_total:
+                        continue
                 logprobs = cached["logprobs"]
                 top_k_ids = cached.get("top_k_ids")
                 top_k_vals = cached.get("top_k_vals")

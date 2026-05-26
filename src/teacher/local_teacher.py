@@ -1,14 +1,16 @@
 import gc
 import json
+import subprocess
 import sys
+import threading
 import time
 import torch
 import torch.nn.functional as F
 from pathlib import Path
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.utils.reasoning import SYSTEM_PROMPT, extract_code
-from src.evaluation.evaluator import run_test_cases
+from src.evaluation.evaluator import run_test_cases, _format_error
 
 
 class LocalTeacherModel:
@@ -53,8 +55,6 @@ class LocalTeacherModel:
         inputs = self.tokenizer(formatted, return_tensors="pt").to(self.model.device)
         input_length = inputs["input_ids"].shape[1]
 
-        streamer = TextStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
-
         with torch.no_grad():
             output = self.model.generate(
                 **inputs,
@@ -63,7 +63,6 @@ class LocalTeacherModel:
                 temperature=self.temperature,
                 top_p=self.top_p,
                 pad_token_id=self.tokenizer.eos_token_id,
-                streamer=streamer,
                 output_scores=True,
                 return_dict_in_generate=True,
             )
@@ -127,16 +126,17 @@ class LocalTeacherModel:
                 tokens = d.get("tokens") or []
                 if not tokens:
                     return False
-                test_passed = d.get("test_passed")
-                test_total = d.get("test_total")
-                if (
-                    test_total is not None
-                    and test_passed is not None
-                    and test_total > 0
-                    and test_passed < test_total
-                    and len(tokens) >= self.max_tokens
-                ):
-                    return False
+                cached_max_tokens = d.get("max_tokens", 0)
+                if cached_max_tokens < self.max_tokens:
+                    test_passed = d.get("test_passed")
+                    test_total = d.get("test_total")
+                    if (
+                        test_total is None
+                        or test_passed is None
+                        or test_total == 0
+                        or test_passed < test_total
+                    ):
+                        return False
                 return True
             except Exception:
                 return False
@@ -147,29 +147,75 @@ class LocalTeacherModel:
             print(f"All {len(prompts)} teacher responses already cached.")
             return
 
+        def _gpu_stats() -> str:
+            try:
+                raw = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=temperature.gpu,memory.used,memory.total,utilization.gpu",
+                     "--format=csv,noheader,nounits"],
+                    stderr=subprocess.DEVNULL,
+                ).decode().strip()
+                temp, mem_used, mem_total, util = raw.split(", ")
+                return f"{temp}°C  {int(mem_used)/1024:.1f}/{int(mem_total)/1024:.0f}GB  util {util}%"
+            except Exception:
+                return "GPU n/a"
+
         print(f"Caching {len(pending)}/{len(prompts)} teacher responses (local model)...")
         total_start = time.time()
         pass_count = 0
         fail_count = 0
 
+        spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+        def _run_with_spinner(fn, *args):
+            container = {"result": None, "error": None}
+            stop_event = threading.Event()
+
+            def _worker():
+                try:
+                    container["result"] = fn(*args)
+                except Exception as exc:
+                    container["error"] = exc
+                finally:
+                    stop_event.set()
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            frame = 0
+            gen_start = time.time()
+            while not stop_event.is_set():
+                elapsed = time.time() - gen_start
+                sys.stdout.write(f"\r  {spinner_frames[frame % len(spinner_frames)]}  reasoning... {elapsed:.0f}s")
+                sys.stdout.flush()
+                stop_event.wait(timeout=0.12)
+                frame += 1
+            sys.stdout.write("\r" + " " * 50 + "\r")
+            sys.stdout.flush()
+            t.join()
+            if container["error"] is not None:
+                raise container["error"]
+            return container["result"]
+
         for i, (idx, prompt) in enumerate(pending):
-            print(f"\n  [{i + 1}/{len(pending)}] prompt #{idx} — generating...", flush=True)
+            print(f"\n[{i + 1}/{len(pending)}] prompt #{idx}", flush=True)
             t0 = time.time()
             result = None
             for attempt in range(2):
                 try:
-                    result = self.get_response_with_logprobs(prompt)
+                    result = _run_with_spinner(self.get_response_with_logprobs, prompt)
                     break
                 except torch.cuda.OutOfMemoryError:
-                    print(f"\n  OOM on attempt {attempt + 1}, clearing GPU cache...", flush=True)
+                    print(f"  OOM on attempt {attempt + 1}, clearing GPU cache...", flush=True)
                     torch.cuda.empty_cache()
                     gc.collect()
                 except Exception as e:
-                    print(f"\n  WARNING: prompt {idx} failed ({e}). Saving empty stub.", flush=True)
+                    print(f"  WARNING: prompt {idx} failed ({e}). Saving empty stub.", flush=True)
                     break
 
             test_passed = None
             test_total = None
+            test_errors = []
+            test_details = []
+            code = ""
             if result is not None and test_cases_per_prompt is not None:
                 tcs = test_cases_per_prompt[idx]
                 try:
@@ -177,29 +223,59 @@ class LocalTeacherModel:
                     r = run_test_cases(code, tcs)
                     test_passed = r["passed"]
                     test_total = r["total"]
+                    test_errors = r["errors"]
+                    test_details = r["details"]
                 except Exception as exc:
-                    print(f"\n  ⚠ test exec error: {type(exc).__name__}: {exc}", flush=True)
+                    print(f"  ⚠ test exec error: {type(exc).__name__}: {exc}", flush=True)
 
             if result is not None:
                 elapsed = time.time() - t0
                 done = i + 1
                 avg = (time.time() - total_start) / done
                 eta = avg * (len(pending) - done)
-                status = ""
+                eta_m, eta_s = divmod(int(eta), 60)
+
                 if test_total is not None:
                     if test_total > 0 and test_passed == test_total:
-                        status = f"  |  ✓ PASSED {test_passed}/{test_total}"
                         pass_count += 1
+                        verdict = f"✓ PASSED {test_passed}/{test_total}"
                     else:
-                        status = f"  |  ✗ FAILED {test_passed}/{test_total}"
                         fail_count += 1
+                        verdict = f"✗ FAILED {test_passed}/{test_total}"
+                else:
+                    verdict = "no tests"
+
                 print(
-                    f"\n  ✓ {len(result['tokens'])} tokens  {elapsed:.1f}s"
-                    f"  |  ETA {eta / 60:.0f}m {eta % 60:.0f}s"
-                    f"{status}",
+                    f"  tokens : {len(result['tokens'])}",
                     flush=True,
                 )
-                payload = {"prompt": prompt, **result}
+                print(
+                    f"  time   : {elapsed:.1f}s  |  ETA {eta_m}m {eta_s:02d}s",
+                    flush=True,
+                )
+                print(
+                    f"  gpu    : {_gpu_stats()}",
+                    flush=True,
+                )
+                print(
+                    f"  result : {verdict}  |  running {pass_count}/{pass_count + fail_count} passed",
+                    flush=True,
+                )
+                code_lines = code.strip().splitlines() if code.strip() else []
+                if code_lines:
+                    print("  --- extracted code ---", flush=True)
+                    for line in code_lines:
+                        print(f"  {line}", flush=True)
+                    print("  ----------------------", flush=True)
+                else:
+                    print("  code   : (no code extracted)", flush=True)
+                if test_details and test_passed is not None and test_passed < (test_total or 0):
+                    print("  --- failure details ---", flush=True)
+                    for j, (detail, err) in enumerate(zip(test_details, test_errors)):
+                        if detail != "pass" and err:
+                            print(f"  test {j}: {detail} — {_format_error(err)}", flush=True)
+                    print("  -----------------------", flush=True)
+                payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
                 if test_total is not None:
                     payload["test_passed"] = test_passed
                     payload["test_total"] = test_total
@@ -207,11 +283,11 @@ class LocalTeacherModel:
                     json.dump(payload, f)
             else:
                 fail_count += 1
-                print(f"\n  Saving empty stub for prompt {idx} (skipped during distillation).", flush=True)
+                print(f"  skipped — saving empty stub", flush=True)
                 torch.cuda.empty_cache()
                 gc.collect()
                 with open(cache_path / f"{idx}.json", "w") as f:
-                    json.dump({"prompt": prompt, "text": "", "tokens": [], "logprobs": []}, f)
+                    json.dump({"prompt": prompt, "text": "", "tokens": [], "logprobs": [], "max_tokens": self.max_tokens}, f)
 
         if test_cases_per_prompt is not None:
             tested = pass_count + fail_count
