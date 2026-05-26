@@ -17,31 +17,29 @@ header() {
 }
 
 show_menu() {
-    local cur_model
-    cur_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
+    local teacher_path student_model
+    teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
+    student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     header
-    echo -e "  Teacher: ${GREEN}${cur_model:-unknown}${NC}"
-    echo ""
-    echo -e "  ${BOLD}Setup${NC}"
-    echo "  1) Test API connection"
-    echo "  2) Check available models (auto-selects & updates config)"
+    echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local R1-Distill-Qwen-7B)${NC}"
+    echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
-    echo "  3) Run training"
-    echo "  4) Run evaluation       (single checkpoint, val split)"
-    echo "  5) Compare all 3 models (original | teacher | distilled) + graph"
+    echo "  1) Run training              (build/refresh teacher cache, then train)"
+    echo "  2) Run training --offline    (skip cache build, use existing cache)"
+    echo "  3) Run evaluation            (single checkpoint, val split)"
+    echo "  4) Compare original | teacher | distilled + graph"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
-    echo "  6) View cached teacher responses"
-    echo "  7) Enter manual answers for teacher prompts"
-    echo "  8) Reset teacher cache (delete all cached responses)"
+    echo "  5) View cached teacher responses"
+    echo "  6) Reset teacher cache (delete all cached responses)"
     echo ""
     echo -e "  ${BOLD}Docker${NC}"
-    echo "  9) Build Docker image"
-    echo "  10) Open shell inside container"
+    echo "  7) Build Docker image"
+    echo "  8) Open shell inside container"
     echo ""
     echo -e "  ${BOLD}GPU Setup${NC}"
-    echo "  11) Install nvidia-container-toolkit (requires sudo)"
+    echo "  9) Install nvidia-container-toolkit (requires sudo)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -64,7 +62,9 @@ run_cmd() {
 }
 
 view_cache() {
-    local cache_dir="cache/teacher_logprobs"
+    local cache_dir
+    cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
+    cache_dir=${cache_dir:-cache/teacher_logprobs_reasoning}
     header
     local total
     total=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
@@ -141,79 +141,56 @@ while true; do
     case $choice in
         1)
             header
-            run_cmd "sudo docker compose run --rm train python scripts/test_api.py"
+            REC_SAMPLES=1000
+            REC_EPOCHS=3
+            echo -e "  ${BOLD}Training presets (research-paper standards)${NC}"
+            echo ""
+            echo -e "  ${BOLD}max_samples${NC}  — problems to load (LeetCode train split has ~2,600)"
+            echo "     200    quick smoke test          (~2 min teacher cache, low statistical power)"
+            echo "     500    ablation runs             (~5 min teacher cache, ok for early experiments)"
+            echo -e "     ${GREEN}1000${NC}   ${GREEN}recommended for paper${NC}   (~10 min teacher cache, solid n for pass@k)"
+            echo "     2600   full dataset              (~25 min teacher cache, best — if you have time)"
+            echo ""
+            echo -e "  ${BOLD}epochs${NC}       — full passes over training set"
+            echo "     1      undertrained baseline"
+            echo -e "     ${GREEN}3${NC}      ${GREEN}distillation standard${NC}   (Hinton 2015, DistilBERT, MiniLM)"
+            echo "     5      if val loss still drops at epoch 3"
+            echo "     >5     overfitting risk on small datasets"
+            echo ""
+            echo -n "  max_samples [default: ${REC_SAMPLES}]: "
+            read -r ns
+            [ -z "$ns" ] && ns=$REC_SAMPLES
+            echo -n "  epochs      [default: ${REC_EPOCHS}]: "
+            read -r ne
+            [ -z "$ne" ] && ne=$REC_EPOCHS
+            run_cmd "sudo docker compose run --rm train python train.py --max-samples $ns --epochs $ne"
             ;;
         2)
             header
-            echo -e "${YELLOW}▶ Checking available teacher models...${NC}"
+            REC_SAMPLES=1000
+            REC_EPOCHS=3
+            echo -e "  ${BOLD}Offline training${NC} (skip teacher cache build — uses what is already cached)"
             echo ""
-            sudo docker compose run --rm train python scripts/check_models.py
-            check_code=$?
+            echo -e "  ${BOLD}max_samples${NC}  — only problems already in the teacher cache will train"
+            echo -e "  ${BOLD}epochs${NC}       — ${GREEN}3${NC} is the distillation standard (Hinton 2015, DistilBERT)"
             echo ""
-            if [ $check_code -eq 0 ]; then
-                new_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
-                echo -e "  Active model: ${GREEN}${new_model}${NC}"
-                echo ""
-                echo -n "  Run training now with this model? (y/n): "
-                read -r ans
-                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-                    echo ""
-                    run_cmd "sudo docker compose run --rm train python train.py"
-                else
-                    echo ""
-                    read -rp "Press Enter to return to menu..."
-                fi
-            else
-                read -rp "Press Enter to return to menu..."
-            fi
+            echo -n "  max_samples [default: ${REC_SAMPLES}]: "
+            read -r ns
+            [ -z "$ns" ] && ns=$REC_SAMPLES
+            echo -n "  epochs      [default: ${REC_EPOCHS}]: "
+            read -r ne
+            [ -z "$ne" ] && ne=$REC_EPOCHS
+            run_cmd "sudo docker compose run --rm train python train.py --offline --max-samples $ns --epochs $ne"
             ;;
         3)
             header
-            cur_model=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
-            local_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
-            local_path=${local_path:-cache/teacher-model}
-            local_exists=""
-            [ -d "$local_path" ] && local_exists=" ${GREEN}✓ found${NC}" || local_exists=" ${RED}✗ not found${NC}"
-            echo -e "  ${BOLD}Choose teacher source:${NC}"
-            echo ""
-            echo -e "  1) API teacher    ${CYAN}(${cur_model})${NC}"
-            echo -e "  2) Local model    ${CYAN}(${local_path})${NC}${local_exists}"
-            echo "  3) Offline        (use cached responses only, no new requests)"
-            echo ""
-            echo -n "  Select: "
-            read -r tsrc
-            echo ""
-            case $tsrc in
-                1)
-                    run_cmd "sudo docker compose run --rm train python train.py"
-                    ;;
-                2)
-                    run_cmd "sudo docker compose run --rm train python train.py --local"
-                    ;;
-                3)
-                    run_cmd "sudo docker compose run --rm train python train.py --offline"
-                    ;;
-                *)
-                    echo -e "${RED}Invalid option.${NC}"
-                    read -rp "Press Enter to return to menu..."
-                    ;;
-            esac
-            ;;
-        4)
-            header
-            latest=$(find outputs -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tail -1)
-            if [ -z "$latest" ]; then
-                echo -e "${RED}No checkpoints found in outputs/. Run training first.${NC}"
+            ckpt="outputs/final"
+            if [ ! -d "$ckpt" ]; then
+                echo -e "${RED}No checkpoint at ${ckpt}. Run training first.${NC}"
                 echo ""
                 read -rp "Press Enter to return to menu..."
             else
-                echo -e "Available checkpoints:"
-                find outputs -maxdepth 1 -mindepth 1 -type d | sort | nl -w2 -s') '
-                echo ""
-                echo -e "Latest: ${GREEN}$latest${NC}"
-                echo -n "Enter checkpoint path (or press Enter to use latest): "
-                read -r ckpt
-                [ -z "$ckpt" ] && ckpt="$latest"
+                echo -e "Checkpoint: ${GREEN}${ckpt}${NC}"
                 echo -n "Verbose output? (y/n) [default: n]: "
                 read -r vb
                 vflag=""
@@ -221,9 +198,9 @@ while true; do
                 run_cmd "sudo docker compose run --rm evaluate python evaluate.py --checkpoint /workspace/$ckpt$vflag"
             fi
             ;;
-        5)
+        4)
             header
-            echo -e "  ${BOLD}Compare all 3 models on LeetCode test split${NC}"
+            echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
             echo ""
             echo -n "  Number of test problems [default: 30]: "
             read -r np
@@ -245,51 +222,16 @@ while true; do
             read -r skipteach
             skip_flag=""
             [ "$skipteach" = "y" ] || [ "$skipteach" = "Y" ] && skip_flag="--skip-teacher"
-            model_flag=""
-            if [ "$skipteach" != "y" ] && [ "$skipteach" != "Y" ]; then
-                cur_teacher=$(grep 'model:' config/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"')
-                echo ""
-                local_teacher_path
-                local_teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
-                local_teacher_path=${local_teacher_path:-cache/teacher-model}
-                echo -e "  ${BOLD}Teacher model selection:${NC}"
-                echo -e "  1) ${cur_teacher}  ${CYAN}(from config)${NC}"
-                echo -e "  2) Local Qwen 14B  ${CYAN}(${local_teacher_path})${NC}"
-                echo "  3) konektika-pro"
-                echo "  4) konektika-thinking"
-                echo "  5) deepseek/deepseek-r1"
-                echo "  6) qwen/qwen-2.5-coder-32b-instruct"
-                echo "  7) google/gemini-2.5-flash"
-                echo -n "  Select [default: 1]: "
-                read -r mchoice
-                case $mchoice in
-                    2) model_flag="--local-teacher" ;;
-                    3) model_flag="--teacher-model konektika-pro" ;;
-                    4) model_flag="--teacher-model konektika-thinking" ;;
-                    5) model_flag="--teacher-model deepseek/deepseek-r1" ;;
-                    6) model_flag="--teacher-model qwen/qwen-2.5-coder-32b-instruct" ;;
-                    7) model_flag="--teacher-model google/gemini-2.5-flash" ;;
-                    *) model_flag="" ;;
-                esac
-            fi
-            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $diff_flag $skip_flag $model_flag"
+            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $diff_flag $skip_flag"
             echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
             ;;
-        6)
+        5)
             view_cache
             ;;
-        7)
-            header
-            echo -e "${YELLOW}▶ Manual answer entry for teacher prompts...${NC}"
-            echo ""
-            sudo docker compose run --rm -it train python scripts/manual_cache.py
-            echo ""
-            read -rp "Press Enter to return to menu..."
-            ;;
-        8)
+        6)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs}
+            cache_dir=${cache_dir:-cache/teacher_logprobs_reasoning}
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
             echo -e "  Cache directory: ${YELLOW}${cache_dir}${NC}"
             echo -e "  Files found:     ${YELLOW}${count}${NC}"
@@ -314,11 +256,11 @@ while true; do
                 read -rp "Press Enter to return to menu..."
             fi
             ;;
-        9)
+        7)
             header
             run_cmd "sudo docker compose build"
             ;;
-        10)
+        8)
             header
             echo -e "${YELLOW}▶ Opening shell inside train container...${NC}"
             echo ""
@@ -326,7 +268,7 @@ while true; do
             echo ""
             read -rp "Press Enter to return to menu..."
             ;;
-        11)
+        9)
             install_nvidia_toolkit
             ;;
         q|Q)

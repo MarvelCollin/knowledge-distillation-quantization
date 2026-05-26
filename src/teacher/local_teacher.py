@@ -7,6 +7,9 @@ import torch.nn.functional as F
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
+from src.utils.reasoning import SYSTEM_PROMPT, extract_code
+from src.evaluation.evaluator import run_test_cases
+
 
 class LocalTeacherModel:
     def __init__(
@@ -16,9 +19,11 @@ class LocalTeacherModel:
         temperature: float,
         top_logprobs: int,
         student_tokenizer=None,
+        top_p: float = 0.95,
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.top_p = top_p
         self.top_logprobs = top_logprobs
         self.student_tokenizer = student_tokenizer
 
@@ -37,11 +42,9 @@ class LocalTeacherModel:
         if student_tokenizer is not None:
             print(f"  Student tokenizer wired for token-id top-k cache.")
 
-    _SYSTEM = "You are a coding assistant. Output ONLY a raw Python function definition. No explanation, no markdown, no triple backticks. Start directly with def."
-
     def get_response_with_logprobs(self, prompt: str) -> dict:
         messages = [
-            {"role": "system", "content": self._SYSTEM},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
         formatted = self.tokenizer.apply_chat_template(
@@ -56,10 +59,9 @@ class LocalTeacherModel:
             output = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
+                do_sample=True,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 pad_token_id=self.tokenizer.eos_token_id,
                 streamer=streamer,
                 output_scores=True,
@@ -109,7 +111,8 @@ class LocalTeacherModel:
             result["top_k_vals"] = top_k_vals_per_token
         return result
 
-    def precompute_and_cache(self, prompts: list, cache_dir: str) -> None:
+    def precompute_and_cache(self, prompts: list, cache_dir: str,
+                             test_cases_per_prompt: list = None) -> None:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
 
@@ -119,7 +122,22 @@ class LocalTeacherModel:
                 return False
             try:
                 d = json.loads(f.read_text())
-                return d.get("prompt", "") == prompt
+                if d.get("prompt", "") != prompt:
+                    return False
+                tokens = d.get("tokens") or []
+                if not tokens:
+                    return False
+                test_passed = d.get("test_passed")
+                test_total = d.get("test_total")
+                if (
+                    test_total is not None
+                    and test_passed is not None
+                    and test_total > 0
+                    and test_passed < test_total
+                    and len(tokens) >= self.max_tokens
+                ):
+                    return False
+                return True
             except Exception:
                 return False
 
@@ -131,6 +149,8 @@ class LocalTeacherModel:
 
         print(f"Caching {len(pending)}/{len(prompts)} teacher responses (local model)...")
         total_start = time.time()
+        pass_count = 0
+        fail_count = 0
 
         for i, (idx, prompt) in enumerate(pending):
             print(f"\n  [{i + 1}/{len(pending)}] prompt #{idx} — generating...", flush=True)
@@ -148,24 +168,55 @@ class LocalTeacherModel:
                     print(f"\n  WARNING: prompt {idx} failed ({e}). Saving empty stub.", flush=True)
                     break
 
+            test_passed = None
+            test_total = None
+            if result is not None and test_cases_per_prompt is not None:
+                tcs = test_cases_per_prompt[idx]
+                try:
+                    code = extract_code(result.get("text", ""))
+                    r = run_test_cases(code, tcs)
+                    test_passed = r["passed"]
+                    test_total = r["total"]
+                except Exception as exc:
+                    print(f"\n  ⚠ test exec error: {type(exc).__name__}: {exc}", flush=True)
+
             if result is not None:
                 elapsed = time.time() - t0
                 done = i + 1
                 avg = (time.time() - total_start) / done
                 eta = avg * (len(pending) - done)
+                status = ""
+                if test_total is not None:
+                    if test_total > 0 and test_passed == test_total:
+                        status = f"  |  ✓ PASSED {test_passed}/{test_total}"
+                        pass_count += 1
+                    else:
+                        status = f"  |  ✗ FAILED {test_passed}/{test_total}"
+                        fail_count += 1
                 print(
                     f"\n  ✓ {len(result['tokens'])} tokens  {elapsed:.1f}s"
-                    f"  |  ETA {eta / 60:.0f}m {eta % 60:.0f}s",
+                    f"  |  ETA {eta / 60:.0f}m {eta % 60:.0f}s"
+                    f"{status}",
                     flush=True,
                 )
+                payload = {"prompt": prompt, **result}
+                if test_total is not None:
+                    payload["test_passed"] = test_passed
+                    payload["test_total"] = test_total
                 with open(cache_path / f"{idx}.json", "w") as f:
-                    json.dump({"prompt": prompt, **result}, f)
+                    json.dump(payload, f)
             else:
+                fail_count += 1
                 print(f"\n  Saving empty stub for prompt {idx} (skipped during distillation).", flush=True)
                 torch.cuda.empty_cache()
                 gc.collect()
                 with open(cache_path / f"{idx}.json", "w") as f:
                     json.dump({"prompt": prompt, "text": "", "tokens": [], "logprobs": []}, f)
+
+        if test_cases_per_prompt is not None:
+            tested = pass_count + fail_count
+            rate = pass_count / max(tested, 1)
+            print(f"\n  Cache build complete: {pass_count}/{tested} prompts pass all tests ({rate:.1%}).")
 
     @staticmethod
     def load_cached(cache_dir: str, idx: int) -> dict | None:

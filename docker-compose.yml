@@ -1,10 +1,4 @@
 services:
-  download-model:
-    build: .
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    command: python scripts/download_model.py
-
   train:
     build: .
     env_file: .env

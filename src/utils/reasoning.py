@@ -1,22 +1,46 @@
-CODE_ONLY_SYSTEM_PROMPT = (
-    "You are a coding assistant. Output ONLY a raw Python function definition. "
-    "No explanation, no markdown, no triple backticks. Start directly with def."
-)
+import re
 
-REASONING_SYSTEM_PROMPT = (
+SYSTEM_PROMPT = (
     "You are a reasoning coding assistant. First think step by step inside <think>...</think>. "
     "After </think>, output the final Python function inside ```python ... ``` and nothing else."
 )
 
+THINK_END_TAG = "</think>"
 
-def strip_thinking(text: str, end_tag: str = "</think>") -> str:
-    if not text or not end_tag:
-        return text or ""
-    idx = text.find(end_tag)
+
+def strip_thinking(text: str) -> str:
+    if not text:
+        return ""
+    idx = text.find(THINK_END_TAG)
     if idx < 0:
         return text
-    return text[idx + len(end_tag):].lstrip()
+    return text[idx + len(THINK_END_TAG):].lstrip()
 
 
-def system_prompt(reasoning_enabled: bool) -> str:
-    return REASONING_SYSTEM_PROMPT if reasoning_enabled else CODE_ONLY_SYSTEM_PROMPT
+def extract_code(text: str) -> str:
+    if not text:
+        return ""
+    text = strip_thinking(text).strip()
+
+    fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+
+    m = re.search(r'def \w', text)
+    if m:
+        text = text[m.start():]
+    elif not text.startswith("def "):
+        text = "def " + text.lstrip()
+
+    lines = text.split('\n')
+    result = []
+    for line in lines:
+        if not result:
+            result.append(line)
+        elif not line or line[0] in (' ', '\t'):
+            result.append(line)
+        else:
+            break
+    while result and not result[-1].strip():
+        result.pop()
+    return '\n'.join(result)

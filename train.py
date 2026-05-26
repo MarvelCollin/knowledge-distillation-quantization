@@ -3,8 +3,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import os
-import re
 import yaml
 import torch
 import argparse
@@ -14,7 +12,7 @@ from dotenv import load_dotenv
 import gc
 from torch.utils.data import DataLoader, Sampler
 from tqdm import tqdm
-from transformers import get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from transformers.optimization import Adafactor
 
 from src.data.dataset import create_datasets
@@ -26,31 +24,9 @@ from src.distillation.loss import (
 from src.distillation.qead import compute_qead_weights, teacher_confidence_weights
 from src.evaluation.evaluator import run_test_cases
 from src.student.model import StudentModel
-from src.teacher.teacher_api import TeacherModel
-
-
-def _extract_teacher_code(text: str) -> str:
-    text = text.strip()
-    fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', text, re.DOTALL | re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-    m = re.search(r'def \w', text)
-    if m:
-        text = text[m.start():]
-    elif not text.startswith("def "):
-        text = "def " + text.lstrip()
-    lines = text.split('\n')
-    result = []
-    for line in lines:
-        if not result:
-            result.append(line)
-        elif not line or line[0] in (' ', '\t'):
-            result.append(line)
-        else:
-            break
-    while result and not result[-1].strip():
-        result.pop()
-    return '\n'.join(result)
+from src.teacher.local_teacher import LocalTeacherModel
+from src.utils.reasoning import extract_code
+from evaluate import generate_solution
 
 
 def load_config(path: str) -> dict:
@@ -85,17 +61,58 @@ def run_validation(student: StudentModel, val_loader: DataLoader, device: torch.
     return total_loss / max(total_tokens, 1)
 
 
+def run_test_validation(student: StudentModel, val_dataset, device: torch.device,
+                        num_problems: int, max_new_tokens: int) -> dict:
+    student.eval()
+    n = min(num_problems, len(val_dataset))
+    passed_total = 0
+    test_total = 0
+    solved_count = 0
+
+    for i in range(n):
+        prompt = val_dataset.get_prompt(i)
+        test_cases = val_dataset.get_test_cases(i)
+        try:
+            code = generate_solution(student, prompt, test_cases, max_new_tokens, device)
+            r = run_test_cases(code, test_cases)
+        except Exception as exc:
+            print(f"  [test-val {i}] generation/exec error: {type(exc).__name__}: {exc}")
+            continue
+        passed_total += r["passed"]
+        test_total += r["total"]
+        if r["total"] > 0 and r["passed"] == r["total"]:
+            solved_count += 1
+
+    return {
+        "test_pass_rate": passed_total / max(test_total, 1),
+        "problems_solved": solved_count,
+        "problems_total": n,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--offline", action="store_true",
-                        help="Skip teacher API calls; use only existing cached responses.")
-    parser.add_argument("--local", action="store_true",
-                        help="Use local teacher model instead of API.")
+                        help="Skip teacher cache build; use only existing cached responses.")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Override data.max_samples from config (total problems loaded before train/val split).")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override training.num_epochs from config.")
     args = parser.parse_args()
 
     load_dotenv()
     config = load_config(args.config)
+
+    if args.max_samples is not None:
+        config["data"]["max_samples"] = args.max_samples
+    if args.epochs is not None:
+        config["training"]["num_epochs"] = args.epochs
+
+    n_total = config["data"]["max_samples"]
+    n_train = int(n_total * config["data"]["train_ratio"])
+    print(f"  Run config: max_samples={n_total}  (~{n_train} train / {n_total - n_train} val)"
+          f"  epochs={config['training']['num_epochs']}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir = Path(config["training"]["output_dir"])
@@ -103,59 +120,37 @@ def main():
 
     cache_dir = config["data"]["teacher_cache_dir"]
 
-    if args.local:
-        from transformers import AutoTokenizer
-        from src.teacher.local_teacher import LocalTeacherModel
-        _tokenizer = AutoTokenizer.from_pretrained(
-            config["student"]["model_name"], trust_remote_code=True
-        )
-        train_dataset, val_dataset = create_datasets(config, _tokenizer)
-        train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
+    student_tokenizer = AutoTokenizer.from_pretrained(
+        config["student"]["model_name"], trust_remote_code=True
+    )
+    train_dataset, val_dataset = create_datasets(config, student_tokenizer)
 
-        local_path = config["teacher"].get("local_model_path", "cache/teacher-model")
+    if not args.offline:
+        train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
+        train_tests = [train_dataset.get_test_cases(i) for i in range(len(train_dataset))]
+        local_path = config["teacher"]["local_model_path"]
         local_teacher = LocalTeacherModel(
             model_path=f"/workspace/{local_path}",
             max_tokens=config["teacher"]["max_tokens"],
             temperature=config["teacher"]["temperature"],
+            top_p=config["teacher"].get("top_p", 0.95),
             top_logprobs=config["teacher"]["top_logprobs"],
-            student_tokenizer=_tokenizer,
+            student_tokenizer=student_tokenizer,
         )
-        local_teacher.precompute_and_cache(train_prompts, cache_dir)
+        local_teacher.precompute_and_cache(train_prompts, cache_dir,
+                                           test_cases_per_prompt=train_tests)
         del local_teacher
         gc.collect()
         torch.cuda.empty_cache()
         print(f"Local teacher freed. GPU now: {torch.cuda.memory_allocated()/1024**3:.1f} GB. Loading student model...")
-
-        student = StudentModel(
-            model_name=config["student"]["model_name"],
-            max_length=config["student"]["max_length"],
-        )
-        student.to(device)
     else:
-        student = StudentModel(
-            model_name=config["student"]["model_name"],
-            max_length=config["student"]["max_length"],
-        )
-        student.to(device)
+        print("Offline mode: skipping teacher cache build. Using existing cache only.")
 
-        train_dataset, val_dataset = create_datasets(config, student.tokenizer)
-        train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
-
-        if args.offline:
-            print("Offline mode: skipping teacher API. Using existing cache only.")
-        else:
-            api_key_env = config["teacher"].get("api_key_env", "TEACHER_API_KEY")
-            teacher = TeacherModel(
-                api_key=os.environ[api_key_env],
-                model=config["teacher"]["model"],
-                api_base=config["teacher"]["api_base"],
-                max_tokens=config["teacher"]["max_tokens"],
-                temperature=config["teacher"]["temperature"],
-                top_logprobs=config["teacher"]["top_logprobs"],
-                headers=config["teacher"].get("headers") or {},
-                provider=config["teacher"].get("provider", "openrouter"),
-            )
-            teacher.precompute_and_cache(train_prompts, cache_dir)
+    student = StudentModel(
+        model_name=config["student"]["model_name"],
+        max_length=config["student"]["max_length"],
+    )
+    student.to(device)
 
     curriculum_mode = config["training"].get("curriculum", "none")
     if curriculum_mode == "length":
@@ -209,6 +204,9 @@ def main():
     max_grad_norm = config["training"]["max_grad_norm"]
     max_length = config["student"]["max_length"]
     filter_failed_teacher = config["training"].get("filter_failed_teacher", False)
+    test_eval_steps = config["training"].get("test_eval_steps", 0)
+    test_eval_problems = config["training"].get("test_eval_problems", 5)
+    test_eval_max_new_tokens = config["training"].get("test_eval_max_new_tokens", 1024)
 
     global_step = 0
     student.model.gradient_checkpointing_enable()
@@ -233,16 +231,22 @@ def main():
 
             for i in range(len(sample_idxs)):
                 idx = sample_idxs[i].item()
-                cached = TeacherModel.load_cached(cache_dir, idx)
+                cached = LocalTeacherModel.load_cached(cache_dir, idx)
                 if not cached or not cached.get("logprobs"):
                     continue
                 if cached.get("prompt") != train_dataset.get_prompt(idx):
                     continue
                 if filter_failed_teacher:
-                    teacher_code = _extract_teacher_code(cached.get("text", ""))
-                    test_cases = train_dataset.get_test_cases(idx)
-                    if run_test_cases(teacher_code, test_cases)["passed"] < len(test_cases):
-                        continue
+                    cached_passed = cached.get("test_passed")
+                    cached_total = cached.get("test_total")
+                    if cached_passed is not None and cached_total is not None:
+                        if cached_total == 0 or cached_passed < cached_total:
+                            continue
+                    else:
+                        teacher_code = extract_code(cached.get("text", ""))
+                        test_cases = train_dataset.get_test_cases(idx)
+                        if run_test_cases(teacher_code, test_cases)["passed"] < len(test_cases):
+                            continue
                 logprobs = cached["logprobs"]
                 top_k_ids = cached.get("top_k_ids")
                 top_k_vals = cached.get("top_k_vals")
@@ -302,11 +306,24 @@ def main():
                     )
 
                 if global_step % config["training"]["save_steps"] == 0:
-                    student.save(str(output_dir / f"checkpoint-{global_step}"))
+                    student.save(str(output_dir / "final"))
 
                 if global_step % config["training"]["eval_steps"] == 0:
                     val_loss = run_validation(student, val_loader, device)
                     print(f"val_loss={val_loss:.4f} at step {global_step}")
+                    student.train()
+
+                if test_eval_steps > 0 and global_step % test_eval_steps == 0:
+                    stats = run_test_validation(
+                        student, val_dataset, device,
+                        num_problems=test_eval_problems,
+                        max_new_tokens=test_eval_max_new_tokens,
+                    )
+                    print(
+                        f"[TEST-VAL] step={global_step} "
+                        f"solved={stats['problems_solved']}/{stats['problems_total']} "
+                        f"test_pass_rate={stats['test_pass_rate']:.1%}"
+                    )
                     student.train()
 
     student.save(str(output_dir / "final"))

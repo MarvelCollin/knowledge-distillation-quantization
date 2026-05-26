@@ -15,9 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import gc
 import json
-import os
 import re
-import traceback
 import yaml
 import torch
 import argparse
@@ -35,23 +33,9 @@ import numpy as np
 
 from src.data.dataset import PROMPT_TEMPLATE
 from src.evaluation.evaluator import run_test_cases
+from src.utils.reasoning import SYSTEM_PROMPT, extract_code
 
 
-def _extract_function(code: str) -> str:
-    """Keep only the first function definition; strip \\r\\n and trailing test/print code."""
-    code = code.replace('\r\n', '\n').replace('\r', '\n')
-    lines = code.split('\n')
-    result = []
-    for line in lines:
-        if not result:
-            result.append(line)
-        elif not line or line[0] in (' ', '\t'):
-            result.append(line)
-        else:
-            break
-    while result and not result[-1].strip():
-        result.pop()
-    return '\n'.join(result)
 
 
 def _extract_fn_name(test_cases: list) -> str | None:
@@ -64,12 +48,6 @@ def _extract_fn_name(test_cases: list) -> str | None:
             return m.group(1)
     return None
 
-
-_SYSTEM = (
-    "You are a coding assistant. Write a standalone Python function that solves the problem. "
-    "Output ONLY the function definition, nothing else. No class, no explanation, "
-    "no markdown, no triple backticks. Start directly with 'def'."
-)
 
 _INTERMEDIATE = Path("outputs/eval/intermediate")
 
@@ -171,7 +149,7 @@ def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens
         user_content = clean_prompt + f"\n\nName the function `{expected}`."
 
     messages = [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
     fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -181,27 +159,15 @@ def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens
         out = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            top_k=None,
+            do_sample=True,
+            temperature=0.6,
+            top_p=0.95,
             pad_token_id=tokenizer.eos_token_id,
         )
 
     gen = out[0][inputs["input_ids"].shape[1]:]
-    code = tokenizer.decode(gen, skip_special_tokens=True).strip()
-
-    fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', code, re.DOTALL | re.IGNORECASE)
-    if fence:
-        code = fence.group(1).strip()
-
-    m = re.search(r'def \w', code)
-    if m:
-        code = code[m.start():]
-    elif not code.startswith("def "):
-        code = "def " + code.lstrip()
-
-    code = _extract_function(code)
+    raw = tokenizer.decode(gen, skip_special_tokens=True)
+    code = extract_code(raw)
 
     if expected:
         old = re.match(r'def (\w+)\(', code)
@@ -403,79 +369,6 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     print(f"\nGraph saved → {out_path}")
 
 
-def evaluate_api_teacher(label: str, teacher, problems: list, dataset_name: str) -> dict:
-    from src.evaluation.evaluator import run_test_cases
-
-    cached = _load_intermediate(label, dataset_name)
-    if cached and cached.get("num_problems") == len(problems):
-        print(f"\n  Loaded cached results for: {label}")
-        return cached
-
-    print(f"\n{'═' * 62}")
-    print(f"  Evaluating: {label}")
-    print(f"  Provider:   {teacher.provider}  Model: {teacher.model}")
-    print(f"{'═' * 62}")
-
-    results = []
-    for i, prob in enumerate(tqdm(problems, desc=label)):
-        entry_point = prob.get("entry_point")
-        expected = entry_point or _extract_fn_name(prob["test_cases"])
-
-        clean_prompt = PROMPT_TEMPLATE.format(text=prob["text"]).rstrip()
-        if clean_prompt.endswith("def"):
-            clean_prompt = clean_prompt[:-3].rstrip()
-
-        user_content = clean_prompt
-        if expected:
-            user_content = clean_prompt + f"\n\nName the function `{expected}`."
-
-        try:
-            result = teacher.get_response_with_logprobs(user_content)
-            code = (result.get("text") or "").strip()
-        except Exception as exc:
-            tqdm.write(f"  ✗ [{i+1:>2}/{len(problems)}] API error: {type(exc).__name__}: {exc}")
-            for line in traceback.format_exc().splitlines()[-5:]:
-                tqdm.write(f"    {line}")
-            results.append({"idx": i, "passed": 0, "total": len(prob["test_cases"]),
-                            "solved": False, "details": [], "errors": [], "code": ""})
-            continue
-
-        fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', code, re.DOTALL | re.IGNORECASE)
-        if fence:
-            code = fence.group(1).strip()
-
-        m = re.search(r'def \w', code)
-        if m:
-            code = code[m.start():]
-        elif not code.startswith("def "):
-            code = "def " + code.lstrip()
-
-        code = _extract_function(code)
-
-        if expected:
-            old = re.match(r'def (\w+)\(', code)
-            if old and old.group(1) != expected:
-                old_name = re.escape(old.group(1))
-                code = re.sub(r'\b' + old_name + r'\b', expected, code)
-
-        r = run_test_cases(code, prob["test_cases"])
-        solved = r["passed"] == r["total"] and r["total"] > 0
-        results.append({"idx": i, **r, "solved": solved, "code": code})
-        diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
-        tqdm.write(
-            f"  {'✓' if solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
-            f"  {r['passed']}/{r['total']} test cases"
-        )
-        tqdm.write(f"    Code: {code.replace(chr(10), ' | ')[:140]}")
-        if not solved and r["errors"]:
-            first_err = next((e for e in r["errors"] if e), None)
-            if first_err:
-                for line in first_err.splitlines()[-6:]:
-                    tqdm.write(f"    {line}")
-
-    return _finalise(label, results, dataset_name)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Three-way model comparison on LeetCode test split")
     parser.add_argument("--config", default="config/config.yaml")
@@ -488,10 +381,6 @@ def main() -> None:
                         help="Filter problems by difficulty (default: all)")
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation to save time (~1 min/problem)")
-    parser.add_argument("--teacher-model", default=None,
-                        help="Override teacher model name from config")
-    parser.add_argument("--local-teacher", action="store_true",
-                        help="Force local teacher model regardless of config provider")
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--out", default="outputs/eval/comparison.png")
     args = parser.parse_args()
@@ -506,7 +395,6 @@ def main() -> None:
     max_new_tokens = args.max_new_tokens or config["evaluation"]["max_new_tokens"]
     student_model  = config["student"]["model_name"]
     teacher_path   = f"/workspace/{config['teacher']['local_model_path']}"
-    teacher_provider = config["teacher"].get("provider", "local")
 
     dataset_name = config["data"]["dataset_name"]
     problems = load_test_problems(args.num_problems, dataset_name, args.difficulty)
@@ -520,38 +408,17 @@ def main() -> None:
     ))
 
     if not args.skip_teacher:
-        if args.local_teacher or teacher_provider == "local":
-            summaries.append(evaluate_model(
-                "Teacher (14B)", teacher_path,
-                problems, max_new_tokens, device, is_teacher=True,
-                dataset_name=dataset_name,
-            ))
-        else:
-            from src.teacher.teacher_api import TeacherModel
-            api_key_env = config["teacher"].get("api_key_env", "TEACHER_API_KEY")
-            teacher_model_name = args.teacher_model or config["teacher"]["model"]
-            teacher = TeacherModel(
-                api_key=os.environ[api_key_env],
-                model=teacher_model_name,
-                api_base=config["teacher"]["api_base"],
-                max_tokens=max_new_tokens,
-                temperature=config["teacher"]["temperature"],
-                top_logprobs=config["teacher"]["top_logprobs"],
-                headers=config["teacher"].get("headers") or {},
-                provider=teacher_provider,
-            )
-            teacher_label = f"Teacher ({teacher_model_name})"
-            summaries.append(evaluate_api_teacher(teacher_label, teacher, problems, dataset_name))
+        summaries.append(evaluate_model(
+            "Teacher (R1-Distill-Qwen-7B)", teacher_path,
+            problems, max_new_tokens, device, is_teacher=True,
+            dataset_name=dataset_name,
+        ))
 
     distilled_path = args.distilled
     if distilled_path is None:
-        ckpt_dir = Path(config["training"]["output_dir"])
-        checkpoints = sorted(
-            ckpt_dir.glob("checkpoint-*"),
-            key=lambda p: int(p.name.split("-")[1]),
-        )
-        if checkpoints:
-            distilled_path = str(checkpoints[-1])
+        final_dir = Path(config["training"]["output_dir"]) / "final"
+        if (final_dir / "model.safetensors").exists():
+            distilled_path = str(final_dir)
             print(f"\nAuto-detected distilled checkpoint: {distilled_path}")
     if distilled_path:
         summaries.append(evaluate_model(

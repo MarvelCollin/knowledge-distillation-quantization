@@ -25,10 +25,9 @@ class StudentModel(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            top_k=None,
+            do_sample=True,
+            temperature=0.6,
+            top_p=0.95,
             pad_token_id=self.tokenizer.eos_token_id,
         )
 
