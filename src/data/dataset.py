@@ -6,11 +6,17 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
+from src.utils.reasoning import SYSTEM_PROMPT, THINK_END_TAG
+
 PROMPT_TEMPLATE = (
     "Write a solution in Python to solve the following problem.\n"
     "Your answer must be a Python function only. Do not use any other language.\n\n"
     "Problem: {text}\n\n"
 )
+
+_CODE_FENCE_OPEN = "```python"
+_CODE_FENCE_CLOSE = "```"
+_BRIDGE_TOKEN = "\n"
 
 
 def _extract_test_cases(test_str: str, entry_point: str) -> list:
@@ -19,11 +25,86 @@ def _extract_test_cases(test_str: str, entry_point: str) -> list:
     return [test_str + f"\ncheck({entry_point})"]
 
 
+def clean_teacher_cache(cached: dict) -> dict:
+    tokens = cached.get("tokens") or []
+    if not tokens:
+        return cached
+    text = "".join(tokens)
+    close_pos = text.find(THINK_END_TAG)
+    if close_pos < 0:
+        return cached
+    close_end = close_pos + len(THINK_END_TAG)
+    fence_open = text.find(_CODE_FENCE_OPEN, close_end)
+    if fence_open < 0:
+        return cached
+    fence_close = text.find(_CODE_FENCE_CLOSE, fence_open + len(_CODE_FENCE_OPEN))
+    if fence_close < 0:
+        return cached
+    fence_close_end = fence_close + len(_CODE_FENCE_CLOSE)
+
+    keep_end = code_start = code_end = None
+    char_pos = 0
+    for i, tok in enumerate(tokens):
+        if keep_end is None and char_pos >= close_end:
+            keep_end = i
+        if code_start is None and char_pos >= fence_open:
+            code_start = i
+        if code_end is None and char_pos >= fence_close_end:
+            code_end = i
+            break
+        char_pos += len(tok)
+    if code_end is None:
+        code_end = len(tokens)
+    if keep_end is None or code_start is None or keep_end >= code_start:
+        return cached
+
+    logprobs = cached.get("logprobs") or []
+    top_ids = cached.get("top_k_ids")
+    top_vals = cached.get("top_k_vals")
+
+    new_tokens = tokens[:keep_end] + [_BRIDGE_TOKEN] + tokens[code_start:code_end]
+    new_logprobs = logprobs[:keep_end] + [{}] + logprobs[code_start:code_end]
+
+    cleaned = dict(cached)
+    cleaned["tokens"] = new_tokens
+    cleaned["logprobs"] = new_logprobs
+    cleaned["text"] = "".join(new_tokens)
+    if top_ids is not None:
+        cleaned["top_k_ids"] = list(top_ids[:keep_end]) + [[]] + list(top_ids[code_start:code_end])
+    if top_vals is not None:
+        cleaned["top_k_vals"] = list(top_vals[:keep_end]) + [[]] + list(top_vals[code_start:code_end])
+    return cleaned
+
+
+def _load_passing_indices(cache_dir: str, num_problems: int) -> dict:
+    cache_path = Path(cache_dir)
+    passing = {}
+    for i in range(num_problems):
+        f = cache_path / f"{i}.json"
+        if not f.exists():
+            continue
+        d = json.loads(f.read_text())
+        tp = d.get("test_passed")
+        tt = d.get("test_total")
+        if tt is None or tp is None or tt == 0 or tp < tt:
+            continue
+        d = clean_teacher_cache(d)
+        tokens = d.get("tokens") or []
+        text = d.get("text") or ""
+        if not tokens or not text:
+            continue
+        passing[i] = {"text": text, "token_count": len(tokens)}
+    return passing
+
+
 class CodingDataset(Dataset):
-    def __init__(self, problems: list, tokenizer, max_length: int):
+    def __init__(self, problems: list, tokenizer, max_length: int,
+                 teacher_responses: dict, original_indices: list):
         self.problems = problems
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.teacher_responses = teacher_responses
+        self.original_indices = original_indices
 
     def __len__(self) -> int:
         return len(self.problems)
@@ -31,50 +112,55 @@ class CodingDataset(Dataset):
     def get_prompt(self, idx: int) -> str:
         return PROMPT_TEMPLATE.format(text=self.problems[idx]["text"])
 
+    def get_chat_prompt(self, idx: int) -> str:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": self.get_prompt(idx)},
+        ]
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
     def get_reference(self, idx: int) -> str:
-        return self.problems[idx]["code"]
+        return self.teacher_responses[self.original_indices[idx]]["text"]
 
     def get_test_cases(self, idx: int) -> list:
         return self.problems[idx]["test_cases"]
 
-    def curriculum_order(self, cache_dir: str) -> list:
-        cache_path = Path(cache_dir)
+    def curriculum_order(self) -> list:
         scored = []
-        for i in range(len(self.problems)):
-            difficulty = None
-            f = cache_path / f"{i}.json"
-            if f.exists():
-                try:
-                    d = json.loads(f.read_text())
-                    toks = d.get("tokens") or []
-                    if toks:
-                        difficulty = len(toks)
-                except Exception:
-                    difficulty = None
-            if difficulty is None:
-                difficulty = len(self.problems[i]["text"])
-            scored.append((difficulty, i))
+        for i, orig_idx in enumerate(self.original_indices):
+            length = self.teacher_responses[orig_idx]["token_count"]
+            scored.append((length, i))
         scored.sort(key=lambda x: x[0])
         return [i for _, i in scored]
 
     def __getitem__(self, idx: int) -> dict:
-        prompt = self.get_prompt(idx)
-        solution = self.get_reference(idx)
-        full_text = prompt + solution
+        prompt = self.get_chat_prompt(idx)
+        response = self.get_reference(idx)
 
-        full_enc = self.tokenizer(
-            full_text,
-            max_length=self.max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
+        prompt_ids = self.tokenizer(prompt, add_special_tokens=False).input_ids
+        response_ids = self.tokenizer(response, add_special_tokens=False).input_ids
 
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=True)
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is not None:
+            response_ids = response_ids + [eos_id]
+
         prompt_length = min(len(prompt_ids), self.max_length - 1)
+        prompt_ids = prompt_ids[:prompt_length]
+        remaining = self.max_length - len(prompt_ids)
+        response_ids = response_ids[:remaining]
 
-        input_ids = full_enc.input_ids.squeeze(0)
-        attention_mask = full_enc.attention_mask.squeeze(0)
+        combined = prompt_ids + response_ids
+        attn = [1] * len(combined)
+        pad_id = self.tokenizer.pad_token_id
+        if len(combined) < self.max_length:
+            pad_len = self.max_length - len(combined)
+            combined = combined + [pad_id] * pad_len
+            attn = attn + [0] * pad_len
+
+        input_ids = torch.tensor(combined, dtype=torch.long)
+        attention_mask = torch.tensor(attn, dtype=torch.long)
 
         labels = input_ids.clone()
         labels[:prompt_length] = -100
@@ -89,11 +175,9 @@ class CodingDataset(Dataset):
         }
 
 
-def create_datasets(config: dict, tokenizer) -> tuple:
+def load_problems(config: dict) -> list:
     dataset_name = config["data"]["dataset_name"]
     max_samples = config["data"]["max_samples"]
-    train_ratio = config["data"]["train_ratio"]
-    max_length = config["student"]["max_length"]
 
     print(f"Loading {dataset_name}...")
     raw = load_dataset(dataset_name, split="train")
@@ -116,8 +200,26 @@ def create_datasets(config: dict, tokenizer) -> tuple:
         })
 
     print(f"  Loaded {len(problems)} problems with test cases.")
-    split = int(len(problems) * train_ratio)
+    return problems
+
+
+def create_datasets(config: dict, tokenizer, cache_dir: str) -> tuple:
+    max_length = config["student"]["max_length"]
+    train_ratio = config["data"]["train_ratio"]
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    problems = load_problems(config)
+    teacher_responses = _load_passing_indices(cache_dir, len(problems))
+    kept_indices = sorted(teacher_responses.keys())
+    kept_problems = [problems[i] for i in kept_indices]
+    print(f"  Kept {len(kept_problems)} problems with passing teacher responses from cache.")
+
+    split = int(len(kept_problems) * train_ratio)
     return (
-        CodingDataset(problems[:split], tokenizer, max_length),
-        CodingDataset(problems[split:], tokenizer, max_length),
+        CodingDataset(kept_problems[:split], tokenizer, max_length,
+                      teacher_responses, kept_indices[:split]),
+        CodingDataset(kept_problems[split:], tokenizer, max_length,
+                      teacher_responses, kept_indices[split:]),
     )

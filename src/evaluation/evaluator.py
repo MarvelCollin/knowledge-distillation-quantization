@@ -1,8 +1,20 @@
 import ast
 import os
 import re
+import resource
 import subprocess
 import tempfile
+
+
+_MEMORY_LIMIT_BYTES = 1024 ** 3
+_CPU_TIME_LIMIT_SEC = 30
+
+
+def _apply_subprocess_limits() -> None:
+    resource.setrlimit(resource.RLIMIT_AS, (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES))
+    resource.setrlimit(resource.RLIMIT_DATA, (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES))
+    resource.setrlimit(resource.RLIMIT_CPU, (_CPU_TIME_LIMIT_SEC, _CPU_TIME_LIMIT_SEC))
+    resource.setrlimit(resource.RLIMIT_STACK, (64 * 1024 * 1024, 64 * 1024 * 1024))
 
 
 _LEETCODE_PREAMBLE = '''\
@@ -148,6 +160,25 @@ class _DiagAssertRewriter(ast.NodeTransformer):
         ).body
 
 
+def extract_signature(test_str: str, entry_point: str) -> str:
+    if not test_str or not entry_point:
+        return ""
+    try:
+        tree = ast.parse(test_str)
+    except SyntaxError:
+        return ""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "candidate"
+        ):
+            params = [kw.arg for kw in node.keywords if kw.arg]
+            if params:
+                return f"def {entry_point}({', '.join(params)}):"
+    return f"def {entry_point}():"
+
+
 def _prepare_assertion(assertion: str) -> tuple[str | None, str]:
     try:
         tree = ast.parse(assertion)
@@ -197,7 +228,7 @@ def _alias_candidate(code: str, candidate: str | None) -> str:
     return code + f"\n{candidate} = {matched}\n"
 
 
-def execute_assertion(code: str, assertion: str, timeout: int = 5) -> tuple:
+def execute_assertion(code: str, assertion: str, timeout: int = 10) -> tuple:
     candidate, rewritten = _prepare_assertion(assertion)
     code = _alias_candidate(code, candidate)
     full_code = _LEETCODE_PREAMBLE + "\n" + code + "\n\n" + rewritten + "\n"
@@ -211,6 +242,8 @@ def execute_assertion(code: str, assertion: str, timeout: int = 5) -> tuple:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            preexec_fn=_apply_subprocess_limits,
         )
         if result.returncode == 0:
             return "pass", ""
@@ -242,14 +275,36 @@ def _format_error(err: str) -> str:
     return last or err[:200]
 
 
+def _classify(outcome: str, error: str) -> str:
+    if outcome == "pass":
+        return "pass"
+    if outcome == "timeout":
+        return "timeout"
+    if "SyntaxError" in error or "IndentationError" in error:
+        return "syntax_error"
+    if "AssertionError" in error:
+        return "wrong_answer"
+    if "NameError" in error and "not defined" in error:
+        return "missing_function"
+    return "runtime_error"
+
+
 def run_test_cases(code: str, test_cases: list) -> dict:
     passed = 0
     details = []
     errors = []
+    categories = []
     for assertion in test_cases:
         outcome, error = execute_assertion(code, assertion)
         details.append(outcome)
         errors.append(error)
+        categories.append(_classify(outcome, error))
         if outcome == "pass":
             passed += 1
-    return {"passed": passed, "total": len(test_cases), "details": details, "errors": errors}
+    return {
+        "passed": passed,
+        "total": len(test_cases),
+        "details": details,
+        "errors": errors,
+        "categories": categories,
+    }

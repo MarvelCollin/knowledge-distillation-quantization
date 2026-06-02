@@ -1,6 +1,9 @@
 import ast
 import re
 
+import torch
+from transformers import StoppingCriteria, StoppingCriteriaList
+
 
 SYSTEM_PROMPT = (
     "You are a reasoning coding assistant. First think step by step inside <think>...</think>. "
@@ -8,6 +11,69 @@ SYSTEM_PROMPT = (
 )
 
 THINK_END_TAG = "</think>"
+THINK_BUDGET_RATIO = 0.75
+_FULL_PRIMER = "\n</think>\n```python\n"
+_CODE_PRIMER = "\n```python\n"
+
+
+class _StopOnSequence(StoppingCriteria):
+    def __init__(self, sequence_ids: list, prompt_len: int):
+        self.sequence_ids = sequence_ids
+        self.prompt_len = prompt_len
+        self.seq_len = len(sequence_ids)
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        if input_ids.shape[1] - self.prompt_len < self.seq_len:
+            return False
+        tail = input_ids[0, -self.seq_len:].tolist()
+        return tail == self.sequence_ids
+
+
+def generate_with_thinking_cap(model, tokenizer, prompt_text: str,
+                                max_new_tokens: int, **gen_kwargs) -> tuple[str, bool]:
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+    prompt_len = inputs["input_ids"].shape[1]
+    eos_id = tokenizer.eos_token_id
+
+    think_budget = max(1, int(max_new_tokens * THINK_BUDGET_RATIO))
+    code_budget = max(1, max_new_tokens - think_budget)
+
+    think_end_ids = tokenizer.encode(THINK_END_TAG, add_special_tokens=False)
+    stop = StoppingCriteriaList([_StopOnSequence(think_end_ids, prompt_len)])
+
+    with torch.no_grad():
+        phase1 = model.generate(
+            **inputs,
+            max_new_tokens=think_budget,
+            pad_token_id=eos_id,
+            stopping_criteria=stop,
+            **gen_kwargs,
+        )
+
+    phase1_gen = phase1[0][prompt_len:]
+    if phase1_gen.numel() > 0 and phase1_gen[-1].item() == eos_id:
+        return tokenizer.decode(phase1_gen, skip_special_tokens=True), False
+
+    phase1_text = tokenizer.decode(phase1_gen, skip_special_tokens=False)
+    primer = _CODE_PRIMER if THINK_END_TAG in phase1_text else _FULL_PRIMER
+    suffix_ids = tokenizer.encode(primer, add_special_tokens=False, return_tensors="pt").to(model.device)
+    primed = torch.cat([phase1, suffix_ids], dim=1)
+    primed_len = primed.shape[1]
+    attn = torch.ones_like(primed)
+
+    with torch.no_grad():
+        phase2 = model.generate(
+            primed,
+            attention_mask=attn,
+            max_new_tokens=code_budget,
+            pad_token_id=eos_id,
+            **gen_kwargs,
+        )
+
+    gen_tokens = phase2[0][prompt_len:]
+    truncated = (phase2.shape[1] - primed_len) >= code_budget
+    raw = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+    return raw, truncated
 
 
 def strip_thinking(text: str) -> str:
@@ -72,11 +138,10 @@ def extract_code(text: str) -> str:
             return _unwrap_solution(code[m.start():])
         return _unwrap_solution(code)
 
-    m = re.search(r'def \w', text)
-    if m:
-        text = text[m.start():]
-    elif not text.startswith("def "):
-        text = "def " + text.lstrip()
+    m = re.search(r'^(?:def|class) \w', text, re.MULTILINE)
+    if not m:
+        return ""
+    text = text[m.start():]
 
     lines = text.split('\n')
     result = []

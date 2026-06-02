@@ -15,7 +15,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from transformers.optimization import Adafactor
 
-from src.data.dataset import create_datasets
+from src.data.dataset import PROMPT_TEMPLATE, create_datasets, load_problems
 from src.distillation.loss import (
     adaptive_skew_lambda,
     build_teacher_distribution,
@@ -122,11 +122,11 @@ def main():
     student_tokenizer = AutoTokenizer.from_pretrained(
         config["student"]["model_name"], trust_remote_code=True
     )
-    train_dataset, val_dataset = create_datasets(config, student_tokenizer)
 
     if not args.offline:
-        train_prompts = [train_dataset.get_prompt(i) for i in range(len(train_dataset))]
-        train_tests = [train_dataset.get_test_cases(i) for i in range(len(train_dataset))]
+        raw_problems = load_problems(config)
+        raw_prompts = [PROMPT_TEMPLATE.format(text=p["text"]) for p in raw_problems]
+        raw_tests = [p["test_cases"] for p in raw_problems]
         local_path = config["teacher"]["local_model_path"]
         local_teacher = LocalTeacherModel(
             model_path=f"/workspace/{local_path}",
@@ -136,14 +136,16 @@ def main():
             top_logprobs=config["teacher"]["top_logprobs"],
             student_tokenizer=student_tokenizer,
         )
-        local_teacher.precompute_and_cache(train_prompts, cache_dir,
-                                           test_cases_per_prompt=train_tests)
+        local_teacher.precompute_and_cache(raw_prompts, cache_dir,
+                                           test_cases_per_prompt=raw_tests)
         del local_teacher
         gc.collect()
         torch.cuda.empty_cache()
         print(f"Local teacher freed. GPU now: {torch.cuda.memory_allocated()/1024**3:.1f} GB. Loading student model...")
     else:
         print("Offline mode: skipping teacher cache build. Using existing cache only.")
+
+    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir)
 
     student = StudentModel(
         model_name=config["student"]["model_name"],
@@ -153,7 +155,7 @@ def main():
 
     curriculum_mode = config["training"].get("curriculum", "none")
     if curriculum_mode == "length":
-        order = train_dataset.curriculum_order(cache_dir)
+        order = train_dataset.curriculum_order()
         print(f"Curriculum: ordering {len(order)} samples by teacher response length (easy first).")
 
         class _FixedOrderSampler(Sampler):
@@ -185,7 +187,8 @@ def main():
         relative_step=False,
         warmup_init=False,
     )
-    total_steps = len(train_loader) * config["training"]["num_epochs"]
+    optimizer_steps_per_epoch = len(train_loader) // config["training"]["gradient_accumulation_steps"]
+    total_steps = optimizer_steps_per_epoch * config["training"]["num_epochs"]
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=config["training"]["warmup_steps"],
@@ -202,7 +205,6 @@ def main():
     grad_accum = config["training"]["gradient_accumulation_steps"]
     max_grad_norm = config["training"]["max_grad_norm"]
     max_length = config["student"]["max_length"]
-    filter_failed_teacher = config["training"].get("filter_failed_teacher", False)
     test_eval_steps = config["training"].get("test_eval_steps", 0)
     test_eval_problems = config["training"].get("test_eval_problems", 5)
     test_eval_max_new_tokens = config["training"].get("test_eval_max_new_tokens", 1024)
@@ -224,22 +226,18 @@ def main():
             student_logits = student(input_ids, attention_mask)
 
             response_mask = labels != -100
-            qead_weights = compute_qead_weights(student_logits, response_mask)
+            predict_mask = torch.zeros_like(response_mask)
+            predict_mask[:, :-1] = response_mask[:, 1:]
+            qead_weights = compute_qead_weights(student_logits, predict_mask)
 
             teacher_dist = torch.zeros(len(sample_idxs), max_length, vocab_size, device=device)
 
             for i in range(len(sample_idxs)):
-                idx = sample_idxs[i].item()
-                cached = LocalTeacherModel.load_cached(cache_dir, idx)
+                local_idx = sample_idxs[i].item()
+                cache_idx = train_dataset.original_indices[local_idx]
+                cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
                 if not cached or not cached.get("logprobs"):
                     continue
-                if cached.get("prompt") != train_dataset.get_prompt(idx):
-                    continue
-                if filter_failed_teacher:
-                    cached_passed = cached.get("test_passed")
-                    cached_total = cached.get("test_total")
-                    if cached_total is None or cached_passed is None or cached_total == 0 or cached_passed < cached_total:
-                        continue
                 logprobs = cached["logprobs"]
                 top_k_ids = cached.get("top_k_ids")
                 top_k_vals = cached.get("top_k_vals")

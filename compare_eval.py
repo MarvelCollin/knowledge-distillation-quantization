@@ -32,8 +32,8 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 from src.data.dataset import PROMPT_TEMPLATE
-from src.evaluation.evaluator import run_test_cases
-from src.utils.reasoning import SYSTEM_PROMPT, extract_code
+from src.evaluation.evaluator import run_test_cases, extract_signature
+from src.utils.reasoning import SYSTEM_PROMPT, extract_code, generate_with_thinking_cap
 
 
 
@@ -114,60 +114,64 @@ def _load_intermediate(label: str, dataset_name: str) -> dict | None:
     return None
 
 
+_FAILURE_CATEGORIES = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
+
+
 def _finalise(label: str, results: list, dataset_name: str) -> dict:
     tp = sum(r["passed"] for r in results)
     tt = sum(r["total"] for r in results)
     solved = sum(1 for r in results if r["solved"])
+    truncated = sum(1 for r in results if r.get("truncated"))
     n = len(results)
+    failure_counts = {cat: 0 for cat in _FAILURE_CATEGORIES}
+    for r in results:
+        for cat in r.get("categories", []):
+            if cat in failure_counts:
+                failure_counts[cat] += 1
     summary = {
         "name": label,
         "dataset": dataset_name,
+        "pass_at_1": solved / max(n, 1),
         "test_pass_rate": tp / max(tt, 1),
         "problem_solve_rate": solved / max(n, 1),
         "total_passed": tp,
         "total_tests": tt,
         "problems_solved": solved,
         "num_problems": n,
+        "truncated": truncated,
+        "failure_counts": failure_counts,
         "per_problem": results,
     }
-    print(f"\n  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})")
-    print(f"  Problems solved   : {solved}/{n}  ({summary['problem_solve_rate']:.1%})")
+    print(f"\n  pass@1            : {summary['pass_at_1']:.1%}  ({solved}/{n})")
+    print(f"  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})")
+    print(f"  Failure modes     : "
+          + ", ".join(f"{c}={failure_counts[c]}" for c in _FAILURE_CATEGORIES if failure_counts[c]))
+    if truncated:
+        print(f"  ⚠ Truncated       : {truncated}/{n} hit the token cap — raise evaluation.max_new_tokens")
     _save_intermediate(label, summary)
     return summary
 
 
 def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens: int,
-                 entry_point: str | None = None) -> str:
+                 entry_point: str | None = None) -> tuple[str, bool]:
     expected = entry_point or _extract_fn_name(test_cases)
+    signature = extract_signature(test_cases[0], expected) if test_cases else ""
 
     clean_prompt = prompt.rstrip()
     if clean_prompt.endswith("def"):
         clean_prompt = clean_prompt[:-3].rstrip()
 
     user_content = clean_prompt
-    if expected:
-        user_content = clean_prompt + f"\n\nName the function `{expected}`."
+    if signature:
+        user_content = clean_prompt + f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
     fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(fmt, return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        out = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.6,
-            top_p=0.95,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    gen = out[0][inputs["input_ids"].shape[1]:]
-    raw = tokenizer.decode(gen, skip_special_tokens=True)
-    return extract_code(raw)
+    raw, truncated = generate_with_thinking_cap(model, tokenizer, fmt, max_new_tokens, do_sample=False)
+    return extract_code(raw), truncated
 
 
 def evaluate_model(label: str, model_path: str, problems: list,
@@ -196,6 +200,9 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if not is_teacher:
         model = model.to(device)
     model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
+    model.generation_config.do_sample = False
 
     if torch.cuda.is_available():
         print(f"  GPU allocated: {torch.cuda.memory_allocated()/1024**3:.1f} GB")
@@ -204,20 +211,21 @@ def evaluate_model(label: str, model_path: str, problems: list,
     for i, prob in enumerate(tqdm(problems, desc=label)):
         prompt = PROMPT_TEMPLATE.format(text=prob["text"])
         try:
-            code = _run_problem(model, tokenizer, prompt, prob["test_cases"], max_new_tokens, entry_point=prob.get("entry_point"))
+            code, truncated = _run_problem(model, tokenizer, prompt, prob["test_cases"], max_new_tokens, entry_point=prob.get("entry_point"))
         except Exception as exc:
             tqdm.write(f"  ✗ [{i+1:>2}/{len(problems)}] generation error: {exc}")
             results.append({"idx": i, "passed": 0, "total": len(prob["test_cases"]),
-                            "solved": False, "details": [], "code": ""})
+                            "solved": False, "details": [], "code": "", "truncated": False})
             continue
 
         r = run_test_cases(code, prob["test_cases"])
         solved = r["passed"] == r["total"] and r["total"] > 0
-        results.append({"idx": i, **r, "solved": solved, "code": code})
+        results.append({"idx": i, **r, "solved": solved, "code": code, "truncated": truncated})
         diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
+        trunc_tag = " ⚠ TRUNCATED (hit token cap)" if truncated else ""
         tqdm.write(
             f"  {'✓' if solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
-            f"  {r['passed']}/{r['total']} test cases"
+            f"  {r['passed']}/{r['total']} test cases{trunc_tag}"
         )
         tqdm.write(f"    Code: {code.replace(chr(10), ' | ')[:140]}")
         if not solved and r["errors"]:

@@ -1,47 +1,44 @@
+x-gpu-env: &gpu-env
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  TOKENIZERS_PARALLELISM: "false"
+
+x-gpu-deploy: &gpu-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+
 services:
   train:
     build: .
     env_file: .env
+    environment: *gpu-env
     volumes:
       - .:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
     command: python train.py --config config/config.yaml
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    deploy: *gpu-deploy
 
   evaluate:
     build: .
     env_file: .env
+    environment: *gpu-env
     volumes:
       - .:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
     command: python evaluate.py --config config/config.yaml --checkpoint outputs/final
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    deploy: *gpu-deploy
 
   compare_eval:
     build: .
     env_file: .env
+    environment: *gpu-env
     volumes:
       - .:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
     command: python compare_eval.py
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    deploy: *gpu-deploy
 
 volumes: {}

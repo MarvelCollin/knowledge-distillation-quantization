@@ -65,6 +65,8 @@ class LocalTeacherModel:
                 pad_token_id=self.tokenizer.eos_token_id,
                 output_scores=True,
                 return_dict_in_generate=True,
+                repetition_penalty=1.05,
+                no_repeat_ngram_size=6,
             )
 
         generated_ids = output.sequences[0][input_length:]
@@ -296,8 +298,10 @@ class LocalTeacherModel:
 
     @staticmethod
     def load_cached(cache_dir: str, idx: int) -> dict | None:
+        from src.data.dataset import clean_teacher_cache
         file_path = Path(cache_dir) / f"{idx}.json"
         if not file_path.exists():
             return None
         with open(file_path) as f:
-            return json.load(f)
+            data = json.load(f)
+        return clean_teacher_cache(data)

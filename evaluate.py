@@ -12,9 +12,9 @@ import argparse
 from tqdm import tqdm
 
 from src.data.dataset import create_datasets
-from src.evaluation.evaluator import run_test_cases
+from src.evaluation.evaluator import run_test_cases, extract_signature
 from src.student.model import StudentModel
-from src.utils.reasoning import SYSTEM_PROMPT, extract_code
+from src.utils.reasoning import SYSTEM_PROMPT, extract_code, generate_with_thinking_cap
 
 
 def _extract_fn_name(test_cases: list) -> str | None:
@@ -36,14 +36,15 @@ def load_config(path: str) -> dict:
 def generate_solution(student: StudentModel, prompt: str, test_cases: list,
                       max_new_tokens: int, device: torch.device) -> str:
     expected = _extract_fn_name(test_cases)
+    signature = extract_signature(test_cases[0], expected) if test_cases else ""
 
     clean_prompt = prompt.rstrip()
     if clean_prompt.endswith("def"):
         clean_prompt = clean_prompt[:-3].rstrip()
 
     user_content = clean_prompt
-    if expected:
-        user_content = clean_prompt + f"\n\nName the function `{expected}`."
+    if signature:
+        user_content = clean_prompt + f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -52,19 +53,10 @@ def generate_solution(student: StudentModel, prompt: str, test_cases: list,
     fmt = student.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     student.eval()
-    with torch.no_grad():
-        inputs = student.tokenizer(fmt, return_tensors="pt").to(device)
-        out = student.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.6,
-            top_p=0.95,
-            pad_token_id=student.tokenizer.eos_token_id,
-        )
-
-    gen = out[0][inputs["input_ids"].shape[1]:]
-    raw = student.tokenizer.decode(gen, skip_special_tokens=True)
+    raw, _ = generate_with_thinking_cap(
+        student.model, student.tokenizer, fmt, max_new_tokens,
+        do_sample=False,
+    )
     return extract_code(raw)
 
 
@@ -85,7 +77,7 @@ def main():
     )
     student.to(device)
 
-    _, val_dataset = create_datasets(config, student.tokenizer)
+    _, val_dataset = create_datasets(config, student.tokenizer, config["data"]["teacher_cache_dir"])
 
     total_passed = 0
     total_tests = 0
