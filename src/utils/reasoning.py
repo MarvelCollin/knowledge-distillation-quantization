@@ -12,8 +12,13 @@ SYSTEM_PROMPT = (
 
 THINK_END_TAG = "</think>"
 THINK_BUDGET_RATIO = 0.75
-_FULL_PRIMER = "\n</think>\n```python\n"
-_CODE_PRIMER = "\n```python\n"
+
+
+def _build_code_primer(has_think_end: bool, signature: str) -> str:
+    head = "\n```python\n" if has_think_end else "\n</think>\n```python\n"
+    if signature:
+        return f"{head}{signature}\n    "
+    return head
 
 
 class _StopOnSequence(StoppingCriteria):
@@ -30,7 +35,9 @@ class _StopOnSequence(StoppingCriteria):
 
 
 def generate_with_thinking_cap(model, tokenizer, prompt_text: str,
-                                max_new_tokens: int, **gen_kwargs) -> tuple[str, bool]:
+                                max_new_tokens: int,
+                                code_primer_signature: str = "",
+                                **gen_kwargs) -> tuple[str, bool]:
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
     prompt_len = inputs["input_ids"].shape[1]
     eos_id = tokenizer.eos_token_id
@@ -55,7 +62,7 @@ def generate_with_thinking_cap(model, tokenizer, prompt_text: str,
         return tokenizer.decode(phase1_gen, skip_special_tokens=True), False
 
     phase1_text = tokenizer.decode(phase1_gen, skip_special_tokens=False)
-    primer = _CODE_PRIMER if THINK_END_TAG in phase1_text else _FULL_PRIMER
+    primer = _build_code_primer(THINK_END_TAG in phase1_text, code_primer_signature)
     suffix_ids = tokenizer.encode(primer, add_special_tokens=False, return_tensors="pt").to(model.device)
     primed = torch.cat([phase1, suffix_ids], dim=1)
     primed_len = primed.shape[1]

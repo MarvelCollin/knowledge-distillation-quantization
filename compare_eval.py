@@ -170,7 +170,11 @@ def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens
         {"role": "user", "content": user_content},
     ]
     fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    raw, truncated = generate_with_thinking_cap(model, tokenizer, fmt, max_new_tokens, do_sample=False)
+    raw, truncated = generate_with_thinking_cap(
+        model, tokenizer, fmt, max_new_tokens,
+        code_primer_signature=signature,
+        do_sample=False,
+    )
     return extract_code(raw), truncated
 
 

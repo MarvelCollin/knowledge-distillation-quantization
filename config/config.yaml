@@ -1,6 +1,6 @@
 data:
   dataset_name: newfacade/LeetCodeDataset
-  max_samples: 200
+  max_samples: 1000
   teacher_cache_dir: cache/teacher_logprobs_reasoning
   train_ratio: 0.9
 evaluation:
@@ -16,7 +16,7 @@ teacher:
   top_p: 0.95
   top_logprobs: 20
 training:
-  alpha: 0.3
+  alpha: 0.5
   batch_size: 1
   curriculum: length
   distill_temperature: 2.0
@@ -24,12 +24,12 @@ training:
   gradient_accumulation_steps: 4
   learning_rate: 2e-5
   max_grad_norm: 1.0
-  num_epochs: 1
+  num_epochs: 3
   output_dir: outputs
   save_steps: 10
-  skew_lambda: 0.1
+  skew_lambda: 0.2
   skew_lambda_max: 0.5
-  adaptive_skew: false
+  adaptive_skew: true
   teacher_confidence_weight: true
   test_eval_steps: 10
   test_eval_problems: 5

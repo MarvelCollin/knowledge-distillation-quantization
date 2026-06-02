@@ -55,6 +55,7 @@ def generate_solution(student: StudentModel, prompt: str, test_cases: list,
     student.eval()
     raw, _ = generate_with_thinking_cap(
         student.model, student.tokenizer, fmt, max_new_tokens,
+        code_primer_signature=signature,
         do_sample=False,
     )
     return extract_code(raw)
