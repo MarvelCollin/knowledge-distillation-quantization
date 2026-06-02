@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import gc
 import json
+import math
 import re
 import yaml
 import torch
@@ -117,7 +118,13 @@ def _load_intermediate(label: str, dataset_name: str) -> dict | None:
 _FAILURE_CATEGORIES = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
 
 
-def _finalise(label: str, results: list, dataset_name: str) -> dict:
+def _pass_at_k(n: int, c: int, k: int) -> float:
+    if n - c < k:
+        return 1.0
+    return 1.0 - math.prod((1.0 - k / i) for i in range(n - c + 1, n + 1))
+
+
+def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
     tp = sum(r["passed"] for r in results)
     tt = sum(r["total"] for r in results)
     solved = sum(1 for r in results if r["solved"])
@@ -128,10 +135,18 @@ def _finalise(label: str, results: list, dataset_name: str) -> dict:
         for cat in r.get("categories", []):
             if cat in failure_counts:
                 failure_counts[cat] += 1
+
+    n_samples = max((r.get("num_samples", 1) for r in results), default=1)
+    pass1 = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), 1) for r in results) / max(n, 1)
+    passk = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), k) for r in results) / max(n, 1)
+
     summary = {
         "name": label,
         "dataset": dataset_name,
-        "pass_at_1": solved / max(n, 1),
+        "k": k,
+        "num_samples": n_samples,
+        "pass_at_1": pass1,
+        "pass_at_k": passk,
         "test_pass_rate": tp / max(tt, 1),
         "problem_solve_rate": solved / max(n, 1),
         "total_passed": tp,
@@ -142,8 +157,11 @@ def _finalise(label: str, results: list, dataset_name: str) -> dict:
         "failure_counts": failure_counts,
         "per_problem": results,
     }
-    print(f"\n  pass@1            : {summary['pass_at_1']:.1%}  ({solved}/{n})")
-    print(f"  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})")
+    print(f"\n  pass@1            : {pass1:.1%}")
+    if k > 1:
+        print(f"  pass@{k:<2}            : {passk:.1%}")
+    print(f"  Problems solved   : {solved}/{n}  (any of {n_samples} samples)")
+    print(f"  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})  [first sample]")
     print(f"  Failure modes     : "
           + ", ".join(f"{c}={failure_counts[c]}" for c in _FAILURE_CATEGORIES if failure_counts[c]))
     if truncated:
@@ -153,7 +171,8 @@ def _finalise(label: str, results: list, dataset_name: str) -> dict:
 
 
 def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens: int,
-                 entry_point: str | None = None) -> tuple[str, bool]:
+                 entry_point: str | None = None, num_samples: int = 1,
+                 temperature: float = 0.7, top_p: float = 0.95) -> list:
     expected = entry_point or _extract_fn_name(test_cases)
     signature = extract_signature(test_cases[0], expected) if test_cases else ""
 
@@ -170,19 +189,33 @@ def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens
         {"role": "user", "content": user_content},
     ]
     fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    raw, truncated = generate_with_thinking_cap(
-        model, tokenizer, fmt, max_new_tokens,
-        code_primer_signature=signature,
-        do_sample=False,
-    )
-    return extract_code(raw), truncated
+
+    do_sample = num_samples > 1
+    gen_kwargs = {"do_sample": do_sample}
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+        gen_kwargs["top_p"] = top_p
+
+    samples = []
+    for _ in range(num_samples):
+        raw, truncated = generate_with_thinking_cap(
+            model, tokenizer, fmt, max_new_tokens,
+            code_primer_signature=signature,
+            **gen_kwargs,
+        )
+        samples.append((extract_code(raw), truncated))
+    return samples
 
 
 def evaluate_model(label: str, model_path: str, problems: list,
                    max_new_tokens: int, device, is_teacher: bool = False,
-                   dataset_name: str = "") -> dict:
+                   dataset_name: str = "", num_samples: int = 1,
+                   temperature: float = 0.7, top_p: float = 0.95,
+                   k: int = 1) -> dict:
     cached = _load_intermediate(label, dataset_name)
-    if cached and cached.get("num_problems") == len(problems):
+    if (cached and cached.get("num_problems") == len(problems)
+            and cached.get("num_samples", 1) == num_samples
+            and cached.get("k", 1) == k):
         print(f"\n  Loaded cached results for: {label}")
         return cached
 
@@ -215,25 +248,55 @@ def evaluate_model(label: str, model_path: str, problems: list,
     for i, prob in enumerate(tqdm(problems, desc=label)):
         prompt = PROMPT_TEMPLATE.format(text=prob["text"])
         try:
-            code, truncated = _run_problem(model, tokenizer, prompt, prob["test_cases"], max_new_tokens, entry_point=prob.get("entry_point"))
+            samples = _run_problem(
+                model, tokenizer, prompt, prob["test_cases"], max_new_tokens,
+                entry_point=prob.get("entry_point"),
+                num_samples=num_samples, temperature=temperature, top_p=top_p,
+            )
         except Exception as exc:
             tqdm.write(f"  ✗ [{i+1:>2}/{len(problems)}] generation error: {exc}")
-            results.append({"idx": i, "passed": 0, "total": len(prob["test_cases"]),
-                            "solved": False, "details": [], "code": "", "truncated": False})
+            results.append({
+                "idx": i, "passed": 0, "total": len(prob["test_cases"]),
+                "solved": False, "details": [], "errors": [], "categories": [],
+                "code": "", "truncated": False,
+                "samples": [], "num_samples": num_samples, "num_passing": 0,
+            })
             continue
 
-        r = run_test_cases(code, prob["test_cases"])
-        solved = r["passed"] == r["total"] and r["total"] > 0
-        results.append({"idx": i, **r, "solved": solved, "code": code, "truncated": truncated})
+        sample_records = []
+        for code, truncated in samples:
+            r = run_test_cases(code, prob["test_cases"])
+            sample_solved = r["passed"] == r["total"] and r["total"] > 0
+            sample_records.append({**r, "solved": sample_solved, "code": code, "truncated": truncated})
+
+        num_passing = sum(1 for s in sample_records if s["solved"])
+        any_solved = num_passing > 0
+        any_truncated = any(s["truncated"] for s in sample_records)
+        first = sample_records[0]
+
+        results.append({
+            "idx": i,
+            "passed": first["passed"], "total": first["total"],
+            "details": first["details"], "errors": first["errors"], "categories": first["categories"],
+            "solved": any_solved, "code": first["code"], "truncated": any_truncated,
+            "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
+        })
+
         diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
-        trunc_tag = " ⚠ TRUNCATED (hit token cap)" if truncated else ""
-        tqdm.write(
-            f"  {'✓' if solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
-            f"  {r['passed']}/{r['total']} test cases{trunc_tag}"
-        )
-        tqdm.write(f"    Code: {code.replace(chr(10), ' | ')[:140]}")
-        if not solved and r["errors"]:
-            first_err = next((e for e in r["errors"] if e), None)
+        trunc_tag = " ⚠ TRUNCATED" if any_truncated else ""
+        if num_samples > 1:
+            tqdm.write(
+                f"  {'✓' if any_solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
+                f"  {num_passing}/{num_samples} samples solved{trunc_tag}"
+            )
+        else:
+            tqdm.write(
+                f"  {'✓' if any_solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
+                f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
+            )
+        tqdm.write(f"    Code: {first['code'].replace(chr(10), ' | ')[:140]}")
+        if not any_solved and first["errors"]:
+            first_err = next((e for e in first["errors"] if e), None)
             if first_err:
                 for line in first_err.splitlines()[-6:]:
                     tqdm.write(f"    {line}")
@@ -242,7 +305,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
     gc.collect()
     torch.cuda.empty_cache()
 
-    return _finalise(label, results, dataset_name)
+    return _finalise(label, results, dataset_name, k)
 
 
 def _style_ax(ax) -> None:
@@ -260,7 +323,9 @@ def _style_ax(ax) -> None:
 def plot_comparison(summaries: list, out_path: Path) -> None:
     names      = [s["name"] for s in summaries]
     test_rates = [s["test_pass_rate"] for s in summaries]
-    solve_rates= [s["problem_solve_rate"] for s in summaries]
+    k_value    = summaries[0].get("k", 1)
+    solve_rates= [s.get("pass_at_k", s["problem_solve_rate"]) for s in summaries]
+    solve_title = f"pass@{k_value}  (unbiased estimator)" if k_value > 1 else "Problem Solve Rate  (all tests pass)"
     n_problems = summaries[0]["num_problems"]
     matrix     = np.array([[r["solved"] for r in s["per_problem"]] for s in summaries],
                            dtype=float)
@@ -296,7 +361,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     _bar(fig.add_subplot(gs[0, 0]), test_rates,
          "Test-Case Pass Rate", "Pass rate (%)")
     _bar(fig.add_subplot(gs[0, 1]), solve_rates,
-         "Problem Solve Rate  (all tests pass)", "Solved (%)")
+         solve_title, "Solved (%)")
 
     ax_delta = fig.add_subplot(gs[1, :])
     _style_ax(ax_delta)
@@ -349,13 +414,15 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     for lbl in cbar.ax.yaxis.get_ticklabels():
         lbl.set_color("white")
 
+    passk_header = f"pass@{k_value}" if k_value > 1 else "pass@1"
     summary_lines = [
-        f"{'Model':<30}  {'pass@1':>8}  {'test-case':>10}  {'solved':>10}",
-        "─" * 64,
+        f"{'Model':<30}  {'pass@1':>8}  {passk_header:>8}  {'test-case':>10}  {'solved':>10}",
+        "─" * 76,
     ]
     for s in summaries:
         summary_lines.append(
-            f"{s['name']:<30}  {s['problem_solve_rate']:>7.1%}"
+            f"{s['name']:<30}  {s['pass_at_1']:>7.1%}"
+            f"  {s.get('pass_at_k', s['pass_at_1']):>7.1%}"
             f"  {s['test_pass_rate']:>9.1%}"
             f"  {s['problems_solved']:>3}/{s['num_problems']}"
         )
@@ -386,8 +453,17 @@ def main() -> None:
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation to save time (~1 min/problem)")
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--num-samples", type=int, default=1,
+                        help="Samples per problem for pass@k (default: 1 = greedy)")
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--k", type=int, default=None,
+                        help="k for pass@k (defaults to --num-samples)")
     parser.add_argument("--out", default="outputs/eval/comparison.png")
     args = parser.parse_args()
+    k = args.k if args.k is not None else args.num_samples
+    if k > args.num_samples:
+        raise SystemExit(f"--k ({k}) cannot exceed --num-samples ({args.num_samples})")
 
     load_dotenv()
 
@@ -409,6 +485,7 @@ def main() -> None:
         "Student (original)", student_model,
         problems, max_new_tokens, device, is_teacher=False,
         dataset_name=dataset_name,
+        num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
     ))
 
     if not args.skip_teacher:
@@ -416,6 +493,7 @@ def main() -> None:
             "Teacher (R1-Distill-Qwen-7B)", teacher_path,
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
+            num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
         ))
 
     distilled_path = args.distilled
@@ -429,6 +507,7 @@ def main() -> None:
             "Student (distilled)", distilled_path,
             problems, max_new_tokens, device, is_teacher=False,
             dataset_name=dataset_name,
+            num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
@@ -441,15 +520,17 @@ def main() -> None:
     if len(summaries) >= 2:
         plot_comparison(summaries, Path(args.out))
 
-    print(f"\n{'═' * 62}")
-    print(f"  {'Model':<30}  {'pass@1':>8}  {'test-case':>10}")
-    print(f"{'─' * 62}")
+    passk_header = f"pass@{k}" if k > 1 else "pass@1"
+    print(f"\n{'═' * 72}")
+    print(f"  {'Model':<30}  {'pass@1':>8}  {passk_header:>8}  {'test-case':>10}")
+    print(f"{'─' * 72}")
     for s in summaries:
         print(
-            f"  {s['name']:<30}  {s['problem_solve_rate']:>7.1%}"
+            f"  {s['name']:<30}  {s['pass_at_1']:>7.1%}"
+            f"  {s.get('pass_at_k', s['pass_at_1']):>7.1%}"
             f"  {s['test_pass_rate']:>9.1%}"
         )
-    print(f"{'═' * 62}")
+    print(f"{'═' * 72}")
 
 
 if __name__ == "__main__":

@@ -222,7 +222,25 @@ while true; do
             read -r skipteach
             skip_flag=""
             [ "$skipteach" = "y" ] || [ "$skipteach" = "Y" ] && skip_flag="--skip-teacher"
-            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $diff_flag $skip_flag"
+            echo ""
+            echo -e "  ${BOLD}Samples per problem${NC} (pass@k via temperature sampling)"
+            echo "     1      greedy decode  (fast, deterministic — both models may tie)"
+            echo -e "     ${GREEN}5${NC}      ${GREEN}pass@5 standard${NC}   (~5x runtime, surfaces distillation gains)"
+            echo "     10     pass@10        (most reliable signal, ~10x runtime)"
+            echo -n "  num_samples [default: 1]: "
+            read -r nsamp
+            [ -z "$nsamp" ] && nsamp=1
+            sample_flag=""
+            if [ "$nsamp" -gt 1 ]; then
+                echo -n "  temperature [default: 0.7]: "
+                read -r temp
+                [ -z "$temp" ] && temp=0.7
+                echo -n "  top_p       [default: 0.95]: "
+                read -r topp
+                [ -z "$topp" ] && topp=0.95
+                sample_flag="--num-samples $nsamp --temperature $temp --top-p $topp"
+            fi
+            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $diff_flag $skip_flag $sample_flag"
             echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
             ;;
         5)
