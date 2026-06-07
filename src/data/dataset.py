@@ -30,11 +30,8 @@ def clean_teacher_cache(cached: dict) -> dict:
     if not tokens:
         return cached
     text = "".join(tokens)
-    close_pos = text.find(THINK_END_TAG)
-    if close_pos < 0:
-        return cached
-    close_end = close_pos + len(THINK_END_TAG)
-    fence_open = text.find(_CODE_FENCE_OPEN, close_end)
+
+    fence_open = text.find(_CODE_FENCE_OPEN)
     if fence_open < 0:
         return cached
     fence_close = text.find(_CODE_FENCE_CLOSE, fence_open + len(_CODE_FENCE_OPEN))
@@ -42,10 +39,14 @@ def clean_teacher_cache(cached: dict) -> dict:
         return cached
     fence_close_end = fence_close + len(_CODE_FENCE_CLOSE)
 
+    close_pos = text.find(THINK_END_TAG)
+    use_think_path = 0 <= close_pos < fence_open
+    close_end = close_pos + len(THINK_END_TAG) if use_think_path else None
+
     keep_end = code_start = code_end = None
     char_pos = 0
     for i, tok in enumerate(tokens):
-        if keep_end is None and char_pos >= close_end:
+        if use_think_path and keep_end is None and char_pos >= close_end:
             keep_end = i
         if code_start is None and char_pos >= fence_open:
             code_start = i
@@ -55,24 +56,38 @@ def clean_teacher_cache(cached: dict) -> dict:
         char_pos += len(tok)
     if code_end is None:
         code_end = len(tokens)
-    if keep_end is None or code_start is None or keep_end >= code_start:
+    if code_start is None:
         return cached
 
     logprobs = cached.get("logprobs") or []
     top_ids = cached.get("top_k_ids")
     top_vals = cached.get("top_k_vals")
 
-    new_tokens = tokens[:keep_end] + [_BRIDGE_TOKEN] + tokens[code_start:code_end]
-    new_logprobs = logprobs[:keep_end] + [{}] + logprobs[code_start:code_end]
+    if use_think_path and keep_end is not None and keep_end < code_start:
+        new_tokens = tokens[:keep_end] + [_BRIDGE_TOKEN] + tokens[code_start:code_end]
+        new_logprobs = logprobs[:keep_end] + [{}] + logprobs[code_start:code_end]
+        new_top_ids = (
+            list(top_ids[:keep_end]) + [[]] + list(top_ids[code_start:code_end])
+            if top_ids is not None else None
+        )
+        new_top_vals = (
+            list(top_vals[:keep_end]) + [[]] + list(top_vals[code_start:code_end])
+            if top_vals is not None else None
+        )
+    else:
+        new_tokens = tokens[code_start:code_end]
+        new_logprobs = logprobs[code_start:code_end]
+        new_top_ids = list(top_ids[code_start:code_end]) if top_ids is not None else None
+        new_top_vals = list(top_vals[code_start:code_end]) if top_vals is not None else None
 
     cleaned = dict(cached)
     cleaned["tokens"] = new_tokens
     cleaned["logprobs"] = new_logprobs
     cleaned["text"] = "".join(new_tokens)
-    if top_ids is not None:
-        cleaned["top_k_ids"] = list(top_ids[:keep_end]) + [[]] + list(top_ids[code_start:code_end])
-    if top_vals is not None:
-        cleaned["top_k_vals"] = list(top_vals[:keep_end]) + [[]] + list(top_vals[code_start:code_end])
+    if new_top_ids is not None:
+        cleaned["top_k_ids"] = new_top_ids
+    if new_top_vals is not None:
+        cleaned["top_k_vals"] = new_top_vals
     return cleaned
 
 

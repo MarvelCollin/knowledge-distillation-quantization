@@ -21,7 +21,7 @@ show_menu() {
     teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     header
-    echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local R1-Distill-Qwen-7B)${NC}"
+    echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local R1-Distill-Qwen-7B, bf16)${NC}"
     echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
@@ -142,8 +142,21 @@ while true; do
         1)
             header
             REC_SAMPLES=1000
-            REC_EPOCHS=3
-            echo -e "  ${BOLD}Training presets (research-paper standards)${NC}"
+            cfg_epochs=$(grep 'num_epochs' config/config.yaml | awk '{print $2}')
+            cfg_alpha=$(grep 'alpha:' config/config.yaml | awk '{print $2}')
+            cfg_lr=$(grep 'learning_rate' config/config.yaml | awk '{print $2}')
+            cfg_seed=$(grep 'seed:' config/config.yaml | awk '{print $2}')
+            cfg_temp=$(grep 'distill_temperature' config/config.yaml | awk '{print $2}')
+            cfg_alen=$(grep 'max_length' config/config.yaml | awk '{print $2}')
+            echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train)"
+            echo ""
+            echo -e "  ${BOLD}Fixed config${NC} (paper-grade defaults, edit config/config.yaml to change):"
+            echo "    epochs              : ${cfg_epochs}     (Hinton 2015 / DistilBERT standard)"
+            echo "    alpha (distill mix) : ${cfg_alpha}"
+            echo "    distill temperature : ${cfg_temp}"
+            echo "    learning rate       : ${cfg_lr}"
+            echo "    max_length          : ${cfg_alen}"
+            echo "    seed                : ${cfg_seed}"
             echo ""
             echo -e "  ${BOLD}max_samples${NC}  — problems to load (LeetCode train split has ~2,600)"
             echo "     200    quick smoke test          (~2 min teacher cache, low statistical power)"
@@ -151,36 +164,24 @@ while true; do
             echo -e "     ${GREEN}1000${NC}   ${GREEN}recommended for paper${NC}   (~10 min teacher cache, solid n for pass@k)"
             echo "     2600   full dataset              (~25 min teacher cache, best — if you have time)"
             echo ""
-            echo -e "  ${BOLD}epochs${NC}       — full passes over training set"
-            echo "     1      undertrained baseline"
-            echo -e "     ${GREEN}3${NC}      ${GREEN}distillation standard${NC}   (Hinton 2015, DistilBERT, MiniLM)"
-            echo "     5      if val loss still drops at epoch 3"
-            echo "     >5     overfitting risk on small datasets"
-            echo ""
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns
             [ -z "$ns" ] && ns=$REC_SAMPLES
-            echo -n "  epochs      [default: ${REC_EPOCHS}]: "
-            read -r ne
-            [ -z "$ne" ] && ne=$REC_EPOCHS
-            run_cmd "sudo docker compose run --rm train python train.py --max-samples $ns --epochs $ne"
+            run_cmd "sudo docker compose run --rm train python train.py --max-samples $ns"
             ;;
         2)
             header
             REC_SAMPLES=1000
-            REC_EPOCHS=3
-            echo -e "  ${BOLD}Offline training${NC} (skip teacher cache build — uses what is already cached)"
+            cfg_epochs=$(grep 'num_epochs' config/config.yaml | awk '{print $2}')
+            cfg_seed=$(grep 'seed:' config/config.yaml | awk '{print $2}')
+            echo -e "  ${BOLD}Offline training${NC} (skip cache build, use existing cache)"
             echo ""
-            echo -e "  ${BOLD}max_samples${NC}  — only problems already in the teacher cache will train"
-            echo -e "  ${BOLD}epochs${NC}       — ${GREEN}3${NC} is the distillation standard (Hinton 2015, DistilBERT)"
+            echo -e "  Fixed config: epochs=${cfg_epochs}, seed=${cfg_seed} (edit config/config.yaml to change)"
             echo ""
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns
             [ -z "$ns" ] && ns=$REC_SAMPLES
-            echo -n "  epochs      [default: ${REC_EPOCHS}]: "
-            read -r ne
-            [ -z "$ne" ] && ne=$REC_EPOCHS
-            run_cmd "sudo docker compose run --rm train python train.py --offline --max-samples $ns --epochs $ne"
+            run_cmd "sudo docker compose run --rm train python train.py --offline --max-samples $ns"
             ;;
         3)
             header
@@ -202,45 +203,23 @@ while true; do
             header
             echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
             echo ""
-            echo -n "  Number of test problems [default: 30]: "
-            read -r np
-            [ -z "$np" ] && np=30
-            echo -e "  Difficulty filter:"
-            echo "  1) All"
-            echo "  2) Easy only"
-            echo "  3) Medium only"
-            echo "  4) Hard only"
-            echo -n "  Select [default: 1]: "
-            read -r diffchoice
-            case $diffchoice in
-                2) diff_flag="--difficulty easy" ;;
-                3) diff_flag="--difficulty medium" ;;
-                4) diff_flag="--difficulty hard" ;;
-                *) diff_flag="--difficulty all" ;;
-            esac
-            echo -n "  Skip teacher evaluation? (y/n) [default: n]: "
-            read -r skipteach
-            skip_flag=""
-            [ "$skipteach" = "y" ] || [ "$skipteach" = "Y" ] && skip_flag="--skip-teacher"
+            echo -e "  ${BOLD}Fixed eval config${NC} (paper-grade defaults):"
+            echo "    difficulty   : all"
+            echo "    teacher eval : ON (never skipped)"
+            echo "    samples/prob : 5  (pass@5 standard)"
+            echo "    temperature  : 0.7"
+            echo "    top_p        : 0.95"
             echo ""
-            echo -e "  ${BOLD}Samples per problem${NC} (pass@k via temperature sampling)"
-            echo "     1      greedy decode  (fast, deterministic — both models may tie)"
-            echo -e "     ${GREEN}5${NC}      ${GREEN}pass@5 standard${NC}   (~5x runtime, surfaces distillation gains)"
-            echo "     10     pass@10        (most reliable signal, ~10x runtime)"
-            echo -n "  num_samples [default: 1]: "
-            read -r nsamp
-            [ -z "$nsamp" ] && nsamp=1
-            sample_flag=""
-            if [ "$nsamp" -gt 1 ]; then
-                echo -n "  temperature [default: 0.7]: "
-                read -r temp
-                [ -z "$temp" ] && temp=0.7
-                echo -n "  top_p       [default: 0.95]: "
-                read -r topp
-                [ -z "$topp" ] && topp=0.95
-                sample_flag="--num-samples $nsamp --temperature $temp --top-p $topp"
-            fi
-            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np $diff_flag $skip_flag $sample_flag"
+            echo -e "  ${BOLD}num_problems${NC} — test problems to evaluate (LeetCode test split)"
+            echo "     30    quick smoke test          (~10 min, noisy single-run)"
+            echo "     100   ablation/intermediate     (~30 min, reasonable confidence)"
+            echo -e "     ${GREEN}164${NC}   ${GREEN}HumanEval-comparable n${NC}  (~50 min, paper-grade)"
+            echo "     full  entire test split        (~hours, most reliable)"
+            echo ""
+            echo -n "  num_problems [default: 100]: "
+            read -r np
+            [ -z "$np" ] && np=100
+            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np --difficulty all --num-samples 5 --temperature 0.7 --top-p 0.95"
             echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
             ;;
         5)

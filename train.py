@@ -6,6 +6,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import yaml
 import torch
 import argparse
+import random
+import time
+import numpy as np
 import torch.nn.functional as F
 
 from dotenv import load_dotenv
@@ -98,6 +101,8 @@ def main():
                         help="Override data.max_samples from config (total problems loaded before train/val split).")
     parser.add_argument("--epochs", type=int, default=None,
                         help="Override training.num_epochs from config.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Override training.seed for multi-seed runs.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -107,6 +112,15 @@ def main():
         config["data"]["max_samples"] = args.max_samples
     if args.epochs is not None:
         config["training"]["num_epochs"] = args.epochs
+    if args.seed is not None:
+        config["training"]["seed"] = args.seed
+
+    seed = config["training"].get("seed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    print(f"  Seed locked: {seed}")
 
     n_total = config["data"]["max_samples"]
     n_train = int(n_total * config["data"]["train_ratio"])
@@ -135,6 +149,7 @@ def main():
             top_p=config["teacher"].get("top_p", 0.95),
             top_logprobs=config["teacher"]["top_logprobs"],
             student_tokenizer=student_tokenizer,
+            load_in_8bit=config["teacher"].get("load_in_8bit", False),
         )
         local_teacher.precompute_and_cache(raw_prompts, cache_dir,
                                            test_cases_per_prompt=raw_tests)
@@ -173,12 +188,27 @@ def main():
             batch_size=config["training"]["batch_size"],
             sampler=_FixedOrderSampler(order),
             drop_last=True,
+            num_workers=2,
+            persistent_workers=True,
+            pin_memory=True,
         )
     else:
         train_loader = DataLoader(
-            train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, drop_last=True
+            train_dataset,
+            batch_size=config["training"]["batch_size"],
+            shuffle=True,
+            drop_last=True,
+            num_workers=2,
+            persistent_workers=True,
+            pin_memory=True,
         )
-    val_loader = DataLoader(val_dataset, batch_size=config["training"]["batch_size"])
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config["training"]["batch_size"],
+        num_workers=2,
+        persistent_workers=True,
+        pin_memory=True,
+    )
 
     optimizer = Adafactor(
         student.parameters(),
@@ -210,6 +240,8 @@ def main():
     test_eval_max_new_tokens = config["training"].get("test_eval_max_new_tokens", 1024)
 
     global_step = 0
+    best_val_loss = float("inf")
+    train_start = time.time()
     student.model.gradient_checkpointing_enable()
 
     for epoch in range(config["training"]["num_epochs"]):
@@ -296,12 +328,14 @@ def main():
                         f"task={l_task.item():.4f}"
                     )
 
-                if global_step % config["training"]["save_steps"] == 0:
-                    student.save(str(output_dir / "final"))
-
                 if global_step % config["training"]["eval_steps"] == 0:
                     val_loss = run_validation(student, val_loader, device)
-                    print(f"val_loss={val_loss:.4f} at step {global_step}")
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        student.save(str(output_dir / "final"))
+                        print(f"val_loss={val_loss:.4f} at step {global_step}  ✓ saved best")
+                    else:
+                        print(f"val_loss={val_loss:.4f} at step {global_step}  (best={best_val_loss:.4f})")
                     student.train()
 
                 if test_eval_steps > 0 and global_step % test_eval_steps == 0:
@@ -317,7 +351,21 @@ def main():
                     )
                     student.train()
 
-    student.save(str(output_dir / "final"))
+    if best_val_loss == float("inf"):
+        student.save(str(output_dir / "final"))
+        print("No validation eval ran during training — saved final-state checkpoint.")
+    else:
+        print(f"Training complete. Best val_loss={best_val_loss:.4f} saved at outputs/final.")
+
+    elapsed = time.time() - train_start
+    hours = int(elapsed // 3600)
+    minutes = int((elapsed % 3600) // 60)
+    seconds = int(elapsed % 60)
+    samples_seen = global_step * config["training"]["gradient_accumulation_steps"]
+    print(f"  Wall-clock        : {hours}h {minutes:02d}m {seconds:02d}s")
+    print(f"  Optimizer steps   : {global_step}")
+    print(f"  Samples processed : {samples_seen}")
+    print(f"  Seed              : {seed}")
 
 
 if __name__ == "__main__":

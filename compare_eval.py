@@ -53,9 +53,9 @@ def _extract_fn_name(test_cases: list) -> str | None:
 _INTERMEDIATE = Path("outputs/eval/intermediate")
 
 COLORS = {
-    "Student (original)":  "#4e79a7",
-    "Teacher (14B)":       "#f28e2b",
-    "Student (distilled)": "#59a14f",
+    "Student (original)":            "#4e79a7",
+    "Teacher (R1-Distill-Qwen-7B)":  "#f28e2b",
+    "Student (distilled)":           "#59a14f",
 }
 FALLBACK_COLOR = "#888888"
 
@@ -230,7 +230,11 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    load_kwargs = dict(torch_dtype=torch.bfloat16, trust_remote_code=True)
+    load_kwargs = dict(
+        torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+        trust_remote_code=True,
+    )
     if is_teacher:
         load_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)

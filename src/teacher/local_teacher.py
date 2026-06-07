@@ -7,7 +7,7 @@ import time
 import torch
 import torch.nn.functional as F
 from pathlib import Path
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from src.utils.reasoning import SYSTEM_PROMPT, extract_code
 from src.evaluation.evaluator import run_test_cases, _format_error
@@ -22,6 +22,7 @@ class LocalTeacherModel:
         top_logprobs: int,
         student_tokenizer=None,
         top_p: float = 0.95,
+        load_in_8bit: bool = False,
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -29,14 +30,18 @@ class LocalTeacherModel:
         self.top_logprobs = top_logprobs
         self.student_tokenizer = student_tokenizer
 
-        print(f"Loading local teacher from {model_path}...")
+        print(f"Loading local teacher from {model_path} (INT8={load_in_8bit})...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
+        load_kwargs = dict(
             device_map="auto",
+            attn_implementation="sdpa",
             trust_remote_code=True,
         )
+        if load_in_8bit:
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        else:
+            load_kwargs["torch_dtype"] = torch.bfloat16
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
         self.model.eval()
 
         gpu_mem = torch.cuda.memory_allocated() / 1024 ** 3 if torch.cuda.is_available() else 0

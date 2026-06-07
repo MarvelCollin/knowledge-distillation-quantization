@@ -11,6 +11,7 @@ class StudentModel(nn.Module):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
             trust_remote_code=True,
         )
         if self.tokenizer.pad_token is None:

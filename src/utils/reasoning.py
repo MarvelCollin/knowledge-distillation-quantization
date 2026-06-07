@@ -10,6 +10,12 @@ SYSTEM_PROMPT = (
     "After </think>, output the final Python function inside ```python ... ``` and nothing else."
 )
 
+TEACHER_CODE_SYSTEM_PROMPT = (
+    "You are an expert Python programmer. "
+    "Output only the final Python function inside ```python ... ``` and nothing else. "
+    "Do not include explanations, examples, or commentary."
+)
+
 THINK_END_TAG = "</think>"
 THINK_BUDGET_RATIO = 0.75
 
