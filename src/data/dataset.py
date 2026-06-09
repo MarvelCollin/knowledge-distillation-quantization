@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 from pathlib import Path
@@ -22,7 +23,27 @@ _BRIDGE_TOKEN = "\n"
 def _extract_test_cases(test_str: str, entry_point: str) -> list:
     if not test_str.strip() or not entry_point:
         return []
-    return [test_str + f"\ncheck({entry_point})"]
+    tree = ast.parse(test_str)
+    check_func = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "check"
+    )
+    other_top_level = [n for n in tree.body if n is not check_func]
+    cases = []
+    for stmt in check_func.body:
+        single_check = ast.FunctionDef(
+            name="check",
+            args=check_func.args,
+            body=[stmt],
+            decorator_list=[],
+            returns=None,
+            type_comment=None,
+        )
+        module = ast.Module(body=other_top_level + [single_check], type_ignores=[])
+        ast.fix_missing_locations(module)
+        src = ast.unparse(module)
+        cases.append(src + f"\ncheck({entry_point})")
+    return cases
 
 
 def clean_teacher_cache(cached: dict) -> dict:

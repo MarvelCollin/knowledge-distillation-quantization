@@ -32,7 +32,7 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
     echo "  5) View cached teacher responses"
-    echo "  6) Reset teacher cache (delete all cached responses)"
+    echo "  6) Reset teacher cache (delete all OR failed-only)"
     echo ""
     echo -e "  ${BOLD}Docker${NC}"
     echo "  7) Build Docker image"
@@ -230,25 +230,85 @@ while true; do
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
             cache_dir=${cache_dir:-cache/teacher_logprobs_reasoning}
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
+            stats=$(python3 - "$cache_dir" <<'PYEOF'
+import json, glob, os, sys
+files = glob.glob(os.path.join(sys.argv[1], '*.json'))
+passed = failed = 0
+for f in files:
+    try:
+        d = json.load(open(f))
+        tp, tt = d.get('test_passed'), d.get('test_total')
+        if tt and tp == tt:
+            passed += 1
+        else:
+            failed += 1
+    except Exception:
+        failed += 1
+print(f'{passed} {failed}')
+PYEOF
+            )
+            pass_count=$(echo "$stats" | awk '{print $1}')
+            fail_count=$(echo "$stats" | awk '{print $2}')
             echo -e "  Cache directory: ${YELLOW}${cache_dir}${NC}"
-            echo -e "  Files found:     ${YELLOW}${count}${NC}"
+            echo -e "  Total files:     ${YELLOW}${count}${NC}  (${GREEN}${pass_count} passing${NC}, ${RED}${fail_count} failed${NC})"
             echo ""
             if [ "$count" -eq 0 ]; then
                 echo -e "  ${GREEN}Cache is already empty.${NC}"
                 echo ""
                 read -rp "Press Enter to return to menu..."
             else
-                echo -e "  ${RED}This will delete all $count cached response files.${NC}"
-                echo -n "  Are you sure? (yes/n): "
-                read -r ans
-                if [ "$ans" = "yes" ]; then
-                    sudo rm -f "${cache_dir}"/*.json
-                    echo ""
-                    echo -e "  ${GREEN}✓ Cache cleared.${NC}"
-                else
-                    echo ""
-                    echo -e "  Cancelled."
-                fi
+                echo "  1) Delete ALL cached responses ($count files)"
+                echo "  2) Delete FAILED only, keep passing ($fail_count files)"
+                echo "  q) Cancel"
+                echo ""
+                echo -n "  Select option: "
+                read -r reset_choice
+                case "$reset_choice" in
+                    1)
+                        echo ""
+                        echo -e "  ${RED}This will delete all $count cached response files.${NC}"
+                        echo -n "  Are you sure? (yes/n): "
+                        read -r ans
+                        if [ "$ans" = "yes" ]; then
+                            sudo rm -f "${cache_dir}"/*.json
+                            echo ""
+                            echo -e "  ${GREEN}✓ All cache cleared.${NC}"
+                        else
+                            echo ""
+                            echo -e "  Cancelled."
+                        fi
+                        ;;
+                    2)
+                        echo ""
+                        echo -e "  ${RED}This will delete $fail_count failed cached files, keep $pass_count passing.${NC}"
+                        echo -n "  Are you sure? (yes/n): "
+                        read -r ans
+                        if [ "$ans" = "yes" ]; then
+                            sudo python3 - "$cache_dir" <<'PYEOF'
+import json, glob, os, sys
+deleted = 0
+for f in sorted(glob.glob(os.path.join(sys.argv[1], '*.json'))):
+    try:
+        d = json.load(open(f))
+        tp, tt = d.get('test_passed'), d.get('test_total')
+        if not tt or tp is None or tp < tt:
+            os.remove(f); deleted += 1
+    except Exception:
+        os.remove(f); deleted += 1
+print(f'  deleted {deleted} failed files')
+PYEOF
+                            echo ""
+                            echo -e "  ${GREEN}✓ Failed cache cleared.${NC}"
+                        else
+                            echo ""
+                            echo -e "  Cancelled."
+                        fi
+                        ;;
+                    *)
+                        echo ""
+                        echo -e "  Cancelled."
+                        ;;
+                esac
                 echo ""
                 read -rp "Press Enter to return to menu..."
             fi

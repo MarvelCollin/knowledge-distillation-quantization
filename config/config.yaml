@@ -16,6 +16,9 @@ teacher:
   top_p: 0.95
   top_logprobs: 20
   load_in_8bit: false
+  gpu_memory_utilization: 0.92
+  max_model_len: 10240
+  cache_chunk_size: 16
 training:
   alpha: 0.5
   batch_size: 1

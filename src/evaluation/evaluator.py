@@ -20,7 +20,7 @@ def _apply_subprocess_limits() -> None:
 _LEETCODE_PREAMBLE = '''\
 from typing import *
 from collections import *
-import heapq, math, itertools, functools
+import heapq, math, itertools, functools, bisect, string, re, random, operator, copy
 
 
 class ListNode:
@@ -308,3 +308,4 @@ def run_test_cases(code: str, test_cases: list) -> dict:
         "errors": errors,
         "categories": categories,
     }
+    

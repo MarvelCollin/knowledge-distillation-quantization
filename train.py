@@ -150,13 +150,18 @@ def main():
             top_logprobs=config["teacher"]["top_logprobs"],
             student_tokenizer=student_tokenizer,
             load_in_8bit=config["teacher"].get("load_in_8bit", False),
+            gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
+            max_model_len=config["teacher"].get("max_model_len", 10240),
         )
+        chunk_size = config["teacher"].get("cache_chunk_size", 64)
         local_teacher.precompute_and_cache(raw_prompts, cache_dir,
-                                           test_cases_per_prompt=raw_tests)
+                                           test_cases_per_prompt=raw_tests,
+                                           chunk_size=chunk_size)
+        local_teacher.shutdown()
         del local_teacher
         gc.collect()
         torch.cuda.empty_cache()
-        print(f"Local teacher freed. GPU now: {torch.cuda.memory_allocated()/1024**3:.1f} GB. Loading student model...")
+        print(f"Local teacher freed. Loading student model...")
     else:
         print("Offline mode: skipping teacher cache build. Using existing cache only.")
 
