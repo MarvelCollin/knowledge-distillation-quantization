@@ -21,11 +21,11 @@ teacher:
   cache_chunk_size: 16
 training:
   alpha: 0.5
-  batch_size: 1
+  batch_size: 2
   curriculum: none
   distill_temperature: 2.0
   eval_steps: 5
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
   learning_rate: 5e-6
   max_grad_norm: 1.0
   num_epochs: 3

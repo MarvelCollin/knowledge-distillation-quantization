@@ -230,6 +230,26 @@ def main():
         num_training_steps=total_steps,
     )
 
+    import os
+    n_cache_files = len(list(Path(cache_dir).glob("*.json"))) if os.path.isdir(cache_dir) else 0
+    n_train_samples = len(train_dataset)
+    n_val_samples = len(val_dataset)
+    effective_batch = config["training"]["batch_size"] * config["training"]["gradient_accumulation_steps"]
+    print()
+    print("═" * 60)
+    print("  Training data breakdown")
+    print("═" * 60)
+    print(f"  Teacher cache files       : {n_cache_files}")
+    print(f"  Passing tests (usable)    : {n_train_samples + n_val_samples}  ({(n_train_samples + n_val_samples) / max(n_cache_files, 1):.1%} of cache)")
+    print(f"  Train split (90%)         : {n_train_samples}")
+    print(f"  Val split (10%)           : {n_val_samples}")
+    print(f"  batch_size × grad_accum   : {config['training']['batch_size']} × {config['training']['gradient_accumulation_steps']} = {effective_batch} effective")
+    print(f"  Optimizer steps / epoch   : {optimizer_steps_per_epoch}")
+    print(f"  Total epochs              : {config['training']['num_epochs']}")
+    print(f"  Total optimizer steps     : {total_steps}")
+    print("═" * 60)
+    print()
+
     vocab_size = student.model.config.vocab_size
     alpha = config["training"]["alpha"]
     skew_lambda = config["training"]["skew_lambda"]
@@ -245,6 +265,7 @@ def main():
     test_eval_max_new_tokens = config["training"].get("test_eval_max_new_tokens", 1024)
 
     global_step = 0
+    samples_seen = 0
     best_val_loss = float("inf")
     train_start = time.time()
     student.model.gradient_checkpointing_enable()
@@ -252,8 +273,10 @@ def main():
     for epoch in range(config["training"]["num_epochs"]):
         student.train()
         optimizer.zero_grad()
+        epoch_start = time.time()
+        epoch_samples_seen = 0
 
-        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}")):
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config['training']['num_epochs']}")):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
@@ -318,6 +341,9 @@ def main():
 
             (total / grad_accum).backward()
 
+            samples_seen += len(sample_idxs)
+            epoch_samples_seen += len(sample_idxs)
+
             if (step + 1) % grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(student.parameters(), max_grad_norm)
                 optimizer.step()
@@ -326,8 +352,12 @@ def main():
                 global_step += 1
 
                 if global_step % 10 == 0:
+                    epoch_pct = epoch_samples_seen / max(n_train_samples, 1) * 100
+                    total_pct = global_step / max(total_steps, 1) * 100
                     print(
-                        f"step={global_step} "
+                        f"[ep {epoch + 1}/{config['training']['num_epochs']}] "
+                        f"step={global_step}/{total_steps} ({total_pct:.0f}%) "
+                        f"samples={epoch_samples_seen}/{n_train_samples} ({epoch_pct:.0f}% of epoch) "
                         f"total={total.item():.4f} "
                         f"distill={l_distill.item():.4f} "
                         f"task={l_task.item():.4f}"

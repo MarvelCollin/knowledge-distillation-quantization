@@ -20,6 +20,7 @@ import re
 import yaml
 import torch
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -34,7 +35,7 @@ import numpy as np
 
 from src.data.dataset import PROMPT_TEMPLATE
 from src.evaluation.evaluator import run_test_cases, extract_signature
-from src.utils.reasoning import SYSTEM_PROMPT, extract_code, generate_with_thinking_cap
+from src.utils.reasoning import SYSTEM_PROMPT, extract_code
 
 
 
@@ -170,41 +171,28 @@ def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
     return summary
 
 
-def _run_problem(model, tokenizer, prompt: str, test_cases: list, max_new_tokens: int,
-                 entry_point: str | None = None, num_samples: int = 1,
-                 temperature: float = 0.7, top_p: float = 0.95) -> list:
-    expected = entry_point or _extract_fn_name(test_cases)
-    signature = extract_signature(test_cases[0], expected) if test_cases else ""
+def _build_eval_prompts(problems: list, tokenizer) -> list:
+    formatted = []
+    for prob in problems:
+        prompt = PROMPT_TEMPLATE.format(text=prob["text"])
+        expected = prob.get("entry_point") or _extract_fn_name(prob["test_cases"])
+        signature = extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
 
-    clean_prompt = prompt.rstrip()
-    if clean_prompt.endswith("def"):
-        clean_prompt = clean_prompt[:-3].rstrip()
+        clean_prompt = prompt.rstrip()
+        if clean_prompt.endswith("def"):
+            clean_prompt = clean_prompt[:-3].rstrip()
 
-    user_content = clean_prompt
-    if signature:
-        user_content = clean_prompt + f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
+        user_content = clean_prompt
+        if signature:
+            user_content = clean_prompt + f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-    do_sample = num_samples > 1
-    gen_kwargs = {"do_sample": do_sample}
-    if do_sample:
-        gen_kwargs["temperature"] = temperature
-        gen_kwargs["top_p"] = top_p
-
-    samples = []
-    for _ in range(num_samples):
-        raw, truncated = generate_with_thinking_cap(
-            model, tokenizer, fmt, max_new_tokens,
-            code_primer_signature=signature,
-            **gen_kwargs,
-        )
-        samples.append((extract_code(raw), truncated))
-    return samples
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+        fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        formatted.append(fmt)
+    return formatted
 
 
 def evaluate_model(label: str, model_path: str, problems: list,
@@ -219,7 +207,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
         print(f"\n  Loaded cached results for: {label}")
         return cached
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from vllm import LLM, SamplingParams
+    from transformers import AutoTokenizer
 
     print(f"\n{'═' * 62}")
     print(f"  Evaluating: {label}")
@@ -230,49 +219,58 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    load_kwargs = dict(
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        trust_remote_code=True,
-    )
-    if is_teacher:
-        load_kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
-    if not is_teacher:
-        model = model.to(device)
-    model.eval()
-    model.generation_config.temperature = None
-    model.generation_config.top_p = None
-    model.generation_config.do_sample = False
+    gpu_mem_util = 0.85 if is_teacher else 0.70
+    max_model_len = max_new_tokens + 2048
 
-    if torch.cuda.is_available():
-        print(f"  GPU allocated: {torch.cuda.memory_allocated()/1024**3:.1f} GB")
+    print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util}, max_model_len={max_model_len})...")
+    llm = LLM(
+        model=model_path,
+        dtype="bfloat16",
+        gpu_memory_utilization=gpu_mem_util,
+        max_model_len=max_model_len,
+        trust_remote_code=True,
+        enforce_eager=False,
+    )
+
+    do_sample = num_samples > 1
+    sampling_params = SamplingParams(
+        temperature=temperature if do_sample else 0.0,
+        top_p=top_p if do_sample else 1.0,
+        max_tokens=max_new_tokens,
+        n=num_samples,
+    )
+
+    formatted_prompts = _build_eval_prompts(problems, tokenizer)
+
+    print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM continuous batching...")
+    outputs = llm.generate(formatted_prompts, sampling_params, use_tqdm=True)
+
+    print(f"  Running {len(problems) * num_samples} test executions in parallel (max 8 workers)...")
+    eval_tasks = []
+    for i, (prob, output) in enumerate(zip(problems, outputs)):
+        for j, gen in enumerate(output.outputs):
+            raw = gen.text
+            truncated = gen.finish_reason == "length"
+            code = extract_code(raw)
+            eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
+
+    def _run_one(task):
+        i, j, code, truncated, tcs = task
+        r = run_test_cases(code, tcs)
+        return i, j, code, truncated, r
+
+    sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
+            i, j, code, truncated, r = fut
+            sample_solved = r["passed"] == r["total"] and r["total"] > 0
+            sample_records_by_problem[i][j] = {
+                **r, "solved": sample_solved, "code": code, "truncated": truncated,
+            }
 
     results = []
-    for i, prob in enumerate(tqdm(problems, desc=label)):
-        prompt = PROMPT_TEMPLATE.format(text=prob["text"])
-        try:
-            samples = _run_problem(
-                model, tokenizer, prompt, prob["test_cases"], max_new_tokens,
-                entry_point=prob.get("entry_point"),
-                num_samples=num_samples, temperature=temperature, top_p=top_p,
-            )
-        except Exception as exc:
-            tqdm.write(f"  ✗ [{i+1:>2}/{len(problems)}] generation error: {exc}")
-            results.append({
-                "idx": i, "passed": 0, "total": len(prob["test_cases"]),
-                "solved": False, "details": [], "errors": [], "categories": [],
-                "code": "", "truncated": False,
-                "samples": [], "num_samples": num_samples, "num_passing": 0,
-            })
-            continue
-
-        sample_records = []
-        for code, truncated in samples:
-            r = run_test_cases(code, prob["test_cases"])
-            sample_solved = r["passed"] == r["total"] and r["total"] > 0
-            sample_records.append({**r, "solved": sample_solved, "code": code, "truncated": truncated})
-
+    for i, prob in enumerate(problems):
+        sample_records = sample_records_by_problem[i]
         num_passing = sum(1 for s in sample_records if s["solved"])
         any_solved = num_passing > 0
         any_truncated = any(s["truncated"] for s in sample_records)
@@ -289,23 +287,26 @@ def evaluate_model(label: str, model_path: str, problems: list,
         diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
         trunc_tag = " ⚠ TRUNCATED" if any_truncated else ""
         if num_samples > 1:
-            tqdm.write(
-                f"  {'✓' if any_solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
+            print(
+                f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
                 f"  {num_passing}/{num_samples} samples solved{trunc_tag}"
             )
         else:
-            tqdm.write(
-                f"  {'✓' if any_solved else '✗'} [{i+1:>2}/{len(problems)}] {diff_tag}"
+            print(
+                f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
                 f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
             )
-        tqdm.write(f"    Code: {first['code'].replace(chr(10), ' | ')[:140]}")
-        if not any_solved and first["errors"]:
-            first_err = next((e for e in first["errors"] if e), None)
-            if first_err:
-                for line in first_err.splitlines()[-6:]:
-                    tqdm.write(f"    {line}")
 
-    del model, tokenizer
+    try:
+        from vllm.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+        destroy_model_parallel()
+        destroy_distributed_environment()
+    except Exception as exc:
+        print(f"  vLLM cleanup warning: {exc}")
+    del llm, tokenizer
     gc.collect()
     torch.cuda.empty_cache()
 
