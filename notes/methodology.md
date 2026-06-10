@@ -12,7 +12,7 @@ Rejection filtering (DeepSeek-R1, arXiv 2501.12948)
 → buang teacher response yang gagal unit test, sisakan yang lulus saja
 
 Curriculum ordering (Self-Paced KD for Lightweight Code LLMs, arXiv 2408.03680) — DISABLED
-→ sort sample dari response pendek ke panjang. Disabled di config (curriculum: none); akan di-revisit setelah cache R1-14B selesai (lihat distribusi panjang response).
+→ sort sample dari response pendek ke panjang. Disabled di config (curriculum: none); akan di-revisit setelah cache R1-7B selesai (lihat distribusi panjang response).
 
 Teacher model: DeepSeek-R1-Distill-Qwen-7B bf16 (DeepSeek-R1, arXiv 2501.12948)
 → reasoning teacher (handle both reasoning chain + code generation), 7B params (vs 1.5B student → 4.6× scale). Pure bf16 no quantization (~15GB VRAM, fit 20GB constraint). Same Qwen2.5 family dengan student → tokenizer compatible untuk top-k logit transfer. Trade-off vs 14B INT8: smaller model tapi pure precision, hindari distillation noise dari quantization teacher.
@@ -36,7 +36,7 @@ Task cross-entropy loss (standard SFT)
 → standard CE student logits vs reference solution text
 
 Convex mix (Hinton et al., NeurIPS 2015)
-→ L_total = α · L_distill + (1 − α) · L_task dengan α = 0.5 (sebelumnya 0.3; naikkan distill weight setelah teacher swap ke Qwen2.5-Coder)
+→ L_total = α · L_distill + (1 − α) · L_task dengan α = 0.5 (sebelumnya 0.3; naikkan distill weight setelah teacher swap ke R1-Distill-Qwen-7B)
 
 Adafactor optimizer (Shazeer & Stern, ICML 2018, arXiv 1804.04235)
 → memory-efficient optimizer (gak simpan momentum penuh kayak AdamW)
