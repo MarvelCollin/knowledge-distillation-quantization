@@ -148,6 +148,7 @@ while true; do
             cfg_seed=$(grep 'seed:' config/config.yaml | awk '{print $2}')
             cfg_temp=$(grep 'distill_temperature' config/config.yaml | awk '{print $2}')
             cfg_alen=$(grep 'max_length' config/config.yaml | awk '{print $2}')
+            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
             echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train)"
             echo ""
             echo -e "  ${BOLD}Fixed config${NC} (paper-grade defaults, edit config/config.yaml to change):"
@@ -157,6 +158,40 @@ while true; do
             echo "    learning rate       : ${cfg_lr}"
             echo "    max_length          : ${cfg_alen}"
             echo "    seed                : ${cfg_seed}"
+            echo ""
+            echo -e "  ${BOLD}Teacher cache status${NC} (${cache_dir})"
+            if [ -d "$cache_dir" ]; then
+                total_cached=$(find "$cache_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
+                if [ "$total_cached" -gt 0 ]; then
+                    echo -e "    Total cached files   : ${GREEN}${total_cached}${NC}"
+                    pass_stats=$(timeout 3 python3 -c "
+import json, glob, random
+files = glob.glob('$cache_dir/*.json')
+sample = random.sample(files, min(50, len(files)))
+total = passed = 0
+for f in sample:
+    try:
+        d = json.load(open(f))
+        tp, tt = d.get('test_passed'), d.get('test_total')
+        if tp is not None and tt is not None and tt > 0:
+            total += 1
+            if tp == tt: passed += 1
+    except Exception: pass
+print(f'{passed},{total}')
+" 2>/dev/null)
+                    IFS=',' read -r passed total <<< "$pass_stats"
+                    if [ -n "$total" ] && [ "$total" -gt 0 ]; then
+                        pct=$((passed * 100 / total))
+                        echo -e "    Sample pass rate     : ${GREEN}${passed}/${total}${NC} (${pct}% from random 50-file sample)"
+                    else
+                        echo -e "    Pass rate            : (skipped — files being written)"
+                    fi
+                else
+                    echo -e "    ${YELLOW}No cached files yet${NC} — fresh generation will run"
+                fi
+            else
+                echo -e "    ${YELLOW}Cache dir not found${NC} — fresh generation will run"
+            fi
             echo ""
             echo -e "  ${BOLD}max_samples${NC}  — problems to load (LeetCode train split has ~2,600)"
             echo "     200    quick smoke test          (~2 min teacher cache, low statistical power)"
@@ -174,9 +209,41 @@ while true; do
             REC_SAMPLES=1000
             cfg_epochs=$(grep 'num_epochs' config/config.yaml | awk '{print $2}')
             cfg_seed=$(grep 'seed:' config/config.yaml | awk '{print $2}')
+            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
             echo -e "  ${BOLD}Offline training${NC} (skip cache build, use existing cache)"
             echo ""
             echo -e "  Fixed config: epochs=${cfg_epochs}, seed=${cfg_seed} (edit config/config.yaml to change)"
+            echo ""
+            echo -e "  ${BOLD}Teacher cache status${NC} (${cache_dir})"
+            if [ -d "$cache_dir" ]; then
+                total_cached=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
+                if [ "$total_cached" -gt 0 ]; then
+                    pass_stats=$(python3 -c "
+import json, glob
+total = passed = 0
+for f in glob.glob('$cache_dir/*.json'):
+    try:
+        d = json.load(open(f))
+        tp = d.get('test_passed')
+        tt = d.get('test_total')
+        if tp is not None and tt is not None and tt > 0:
+            total += 1
+            if tp == tt: passed += 1
+    except Exception: pass
+print(f'{passed},{total}')
+" 2>/dev/null)
+                    IFS=',' read -r passed total <<< "$pass_stats"
+                    if [ -n "$total" ] && [ "$total" -gt 0 ]; then
+                        pct=$((passed * 100 / total))
+                        echo -e "    Total cached files   : ${GREEN}${total_cached}${NC}"
+                        echo -e "    Passing all tests    : ${GREEN}${passed}/${total}${NC} (${pct}%) — these are usable for training"
+                    fi
+                else
+                    echo -e "    ${RED}No cached files — offline training will fail${NC}"
+                fi
+            else
+                echo -e "    ${RED}Cache dir not found — offline training will fail${NC}"
+            fi
             echo ""
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns

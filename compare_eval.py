@@ -17,12 +17,87 @@ import gc
 import json
 import math
 import re
+import subprocess
+import time
 import yaml
 import torch
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
+
+
+def _gpu_used_gb() -> float:
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip().splitlines()[0]
+        return int(out) / 1024.0
+    except Exception:
+        return 0.0
+
+
+def _gpu_total_gb() -> float:
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip().splitlines()[0]
+        return int(out) / 1024.0
+    except Exception:
+        return 24.0
+
+
+def _cleanup_vllm(llm_obj) -> None:
+    try:
+        from vllm.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+        destroy_model_parallel()
+        destroy_distributed_environment()
+    except Exception as exc:
+        print(f"  vLLM destroy_model_parallel warning: {exc}")
+
+    if llm_obj is not None and hasattr(llm_obj, "llm_engine"):
+        try:
+            engine = llm_obj.llm_engine
+            if hasattr(engine, "model_executor") and hasattr(engine.model_executor, "shutdown"):
+                engine.model_executor.shutdown()
+        except Exception as exc:
+            print(f"  vLLM model_executor.shutdown warning: {exc}")
+
+    if llm_obj is not None:
+        del llm_obj
+
+    for _ in range(3):
+        gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def _wait_for_gpu_freed(target_free_gb: float, max_retries: int = 5, retry_sleep: float = 3.0) -> float:
+    total_gb = _gpu_total_gb()
+    for retry in range(max_retries):
+        used_gb = _gpu_used_gb()
+        free_gb = total_gb - used_gb
+        if free_gb >= target_free_gb:
+            return free_gb
+        print(f"  GPU memory: {used_gb:.1f}GB used / {total_gb:.1f}GB total  (free {free_gb:.1f}GB, need {target_free_gb:.1f}GB)  retry {retry+1}/{max_retries}...")
+        for _ in range(3):
+            gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        time.sleep(retry_sleep)
+    return _gpu_total_gb() - _gpu_used_gb()
 
 from datasets import load_dataset
 from tqdm import tqdm
@@ -215,102 +290,128 @@ def evaluate_model(label: str, model_path: str, problems: list,
     print(f"  Model path: {model_path}")
     print(f"{'═' * 62}")
 
+    total_gb = _gpu_total_gb()
+    pre_used = _gpu_used_gb()
+    print(f"  GPU before load: {pre_used:.1f}GB used / {total_gb:.1f}GB total")
+
+    required_gb = 20.0
+    free_gb = total_gb - pre_used
+    if free_gb < required_gb:
+        print(f"  WARNING: only {free_gb:.1f}GB free, need ≥{required_gb:.1f}GB. Forcing cleanup...")
+        free_gb = _wait_for_gpu_freed(target_free_gb=required_gb, max_retries=5, retry_sleep=3.0)
+        if free_gb < required_gb:
+            print(f"  ERROR: GPU still has only {free_gb:.1f}GB free after retries. Memory leak suspected.")
+            raise RuntimeError(f"Insufficient GPU memory: need {required_gb:.1f}GB, have {free_gb:.1f}GB")
+
+    available_for_vllm = free_gb / total_gb
+    safety_margin = 0.05
+    base_util = 0.85
+    gpu_mem_util = min(base_util, available_for_vllm - safety_margin)
+    gpu_mem_util = max(gpu_mem_util, 0.30)
+    max_model_len = max_new_tokens + 2048
+
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    gpu_mem_util = 0.85 if is_teacher else 0.70
-    max_model_len = max_new_tokens + 2048
-
-    print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util}, max_model_len={max_model_len})...")
-    llm = LLM(
-        model=model_path,
-        dtype="bfloat16",
-        gpu_memory_utilization=gpu_mem_util,
-        max_model_len=max_model_len,
-        trust_remote_code=True,
-        enforce_eager=False,
-    )
-
-    do_sample = num_samples > 1
-    sampling_params = SamplingParams(
-        temperature=temperature if do_sample else 0.0,
-        top_p=top_p if do_sample else 1.0,
-        max_tokens=max_new_tokens,
-        n=num_samples,
-    )
-
-    formatted_prompts = _build_eval_prompts(problems, tokenizer)
-
-    print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM continuous batching...")
-    outputs = llm.generate(formatted_prompts, sampling_params, use_tqdm=True)
-
-    print(f"  Running {len(problems) * num_samples} test executions in parallel (max 8 workers)...")
-    eval_tasks = []
-    for i, (prob, output) in enumerate(zip(problems, outputs)):
-        for j, gen in enumerate(output.outputs):
-            raw = gen.text
-            truncated = gen.finish_reason == "length"
-            code = extract_code(raw)
-            eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
-
-    def _run_one(task):
-        i, j, code, truncated, tcs = task
-        r = run_test_cases(code, tcs)
-        return i, j, code, truncated, r
-
-    sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
-            i, j, code, truncated, r = fut
-            sample_solved = r["passed"] == r["total"] and r["total"] > 0
-            sample_records_by_problem[i][j] = {
-                **r, "solved": sample_solved, "code": code, "truncated": truncated,
-            }
-
-    results = []
-    for i, prob in enumerate(problems):
-        sample_records = sample_records_by_problem[i]
-        num_passing = sum(1 for s in sample_records if s["solved"])
-        any_solved = num_passing > 0
-        any_truncated = any(s["truncated"] for s in sample_records)
-        first = sample_records[0]
-
-        results.append({
-            "idx": i,
-            "passed": first["passed"], "total": first["total"],
-            "details": first["details"], "errors": first["errors"], "categories": first["categories"],
-            "solved": any_solved, "code": first["code"], "truncated": any_truncated,
-            "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
-        })
-
-        diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
-        trunc_tag = " ⚠ TRUNCATED" if any_truncated else ""
-        if num_samples > 1:
-            print(
-                f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
-                f"  {num_passing}/{num_samples} samples solved{trunc_tag}"
-            )
-        else:
-            print(
-                f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
-                f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
-            )
-
+    print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util:.2f}, max_model_len={max_model_len})...")
+    llm = None
     try:
-        from vllm.distributed.parallel_state import (
-            destroy_distributed_environment,
-            destroy_model_parallel,
+        llm = LLM(
+            model=model_path,
+            dtype="bfloat16",
+            gpu_memory_utilization=gpu_mem_util,
+            max_model_len=max_model_len,
+            trust_remote_code=True,
+            enforce_eager=False,
         )
-        destroy_model_parallel()
-        destroy_distributed_environment()
-    except Exception as exc:
-        print(f"  vLLM cleanup warning: {exc}")
-    del llm, tokenizer
-    gc.collect()
-    torch.cuda.empty_cache()
 
-    return _finalise(label, results, dataset_name, k)
+        do_sample = num_samples > 1
+        sampling_params = SamplingParams(
+            temperature=temperature if do_sample else 0.0,
+            top_p=top_p if do_sample else 1.0,
+            max_tokens=max_new_tokens,
+            n=num_samples,
+        )
+
+        formatted_prompts = _build_eval_prompts(problems, tokenizer)
+
+        post_load = _gpu_used_gb()
+        print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
+        print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM continuous batching...")
+        outputs = llm.generate(formatted_prompts, sampling_params, use_tqdm=True)
+
+        print(f"  Running {len(problems) * num_samples} test executions in parallel (max 8 workers)...")
+        eval_tasks = []
+        for i, (prob, output) in enumerate(zip(problems, outputs)):
+            for j, gen in enumerate(output.outputs):
+                raw = gen.text
+                truncated = gen.finish_reason == "length"
+                code = extract_code(raw)
+                eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
+
+        def _run_one(task):
+            i, j, code, truncated, tcs = task
+            r = run_test_cases(code, tcs)
+            return i, j, code, truncated, r
+
+        sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
+                i, j, code, truncated, r = fut
+                sample_solved = r["passed"] == r["total"] and r["total"] > 0
+                sample_records_by_problem[i][j] = {
+                    **r, "solved": sample_solved, "code": code, "truncated": truncated,
+                }
+
+        results = []
+        for i, prob in enumerate(problems):
+            sample_records = sample_records_by_problem[i]
+            num_passing = sum(1 for s in sample_records if s["solved"])
+            any_solved = num_passing > 0
+            any_truncated = any(s["truncated"] for s in sample_records)
+            first = sample_records[0]
+
+            results.append({
+                "idx": i,
+                "passed": first["passed"], "total": first["total"],
+                "details": first["details"], "errors": first["errors"], "categories": first["categories"],
+                "solved": any_solved, "code": first["code"], "truncated": any_truncated,
+                "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
+            })
+
+            diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
+            trunc_tag = " ⚠ TRUNCATED" if any_truncated else ""
+            if num_samples > 1:
+                print(
+                    f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
+                    f"  {num_passing}/{num_samples} samples solved{trunc_tag}"
+                )
+            else:
+                print(
+                    f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
+                    f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
+                )
+
+        summary = _finalise(label, results, dataset_name, k)
+
+    finally:
+        print(f"  Cleaning up vLLM...")
+        _cleanup_vllm(llm)
+        del tokenizer
+        for _ in range(3):
+            gc.collect()
+        torch.cuda.empty_cache()
+        time.sleep(2)
+        post_cleanup = _gpu_used_gb()
+        freed_gb = pre_used + (post_load - pre_used) - (post_cleanup - pre_used) if 'post_load' in dir() else 0
+        print(f"  GPU after cleanup: {post_cleanup:.1f}GB used  (started at {pre_used:.1f}GB)")
+        residual = post_cleanup - pre_used
+        if residual > 1.0:
+            print(f"  ⚠ Residual leak detected: +{residual:.1f}GB above baseline. Forcing extra cleanup...")
+            _wait_for_gpu_freed(target_free_gb=total_gb - pre_used - 1.0, max_retries=3, retry_sleep=2.0)
+
+    return summary
 
 
 def _style_ax(ax) -> None:

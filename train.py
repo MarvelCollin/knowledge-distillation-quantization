@@ -386,6 +386,16 @@ def main():
                     )
                     student.train()
 
+        epoch_elapsed = time.time() - epoch_start
+        epoch_m, epoch_s = divmod(int(epoch_elapsed), 60)
+        print()
+        print(f"[epoch {epoch + 1}/{config['training']['num_epochs']} done] "
+              f"samples seen: {epoch_samples_seen}/{n_train_samples}  "
+              f"cumulative: {samples_seen}  "
+              f"time: {epoch_m}m {epoch_s:02d}s  "
+              f"best_val: {best_val_loss:.4f}")
+        print()
+
     if best_val_loss == float("inf"):
         student.save(str(output_dir / "final"))
         print("No validation eval ran during training — saved final-state checkpoint.")
@@ -396,10 +406,10 @@ def main():
     hours = int(elapsed // 3600)
     minutes = int((elapsed % 3600) // 60)
     seconds = int(elapsed % 60)
-    samples_seen = global_step * config["training"]["gradient_accumulation_steps"]
     print(f"  Wall-clock        : {hours}h {minutes:02d}m {seconds:02d}s")
     print(f"  Optimizer steps   : {global_step}")
-    print(f"  Samples processed : {samples_seen}")
+    print(f"  Samples processed : {samples_seen} (across {config['training']['num_epochs']} epochs)")
+    print(f"  Cache files used  : {n_train_samples + n_val_samples} of {n_cache_files} total")
     print(f"  Seed              : {seed}")
 
 
