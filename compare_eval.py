@@ -305,7 +305,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
     available_for_vllm = free_gb / total_gb
     safety_margin = 0.05
-    base_util = 0.85
+    base_util = 0.82
     gpu_mem_util = min(base_util, available_for_vllm - safety_margin)
     gpu_mem_util = max(gpu_mem_util, 0.30)
     max_model_len = max_new_tokens + 2048
@@ -324,6 +324,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             max_model_len=max_model_len,
             trust_remote_code=True,
             enforce_eager=False,
+            enable_prefix_caching=True,
         )
 
         do_sample = num_samples > 1
@@ -338,10 +339,27 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
         post_load = _gpu_used_gb()
         print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
-        print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM continuous batching...")
-        outputs = llm.generate(formatted_prompts, sampling_params, use_tqdm=True)
 
-        print(f"  Running {len(problems) * num_samples} test executions in parallel (max 8 workers)...")
+        eval_chunk_size = 3 if is_teacher else 10
+        total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
+        print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM (chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
+        outputs = []
+        for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
+            chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
+            chunk_idx = chunk_start // eval_chunk_size + 1
+            chunk_t0 = time.time()
+            print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
+            chunk_outputs = llm.generate(chunk, sampling_params, use_tqdm=True)
+            outputs.extend(chunk_outputs)
+            chunk_elapsed = time.time() - chunk_t0
+            done = chunk_start + len(chunk)
+            avg = chunk_elapsed / len(chunk)
+            eta_remaining = avg * (len(formatted_prompts) - done) * 1.05
+            eta_m, eta_s = divmod(int(eta_remaining), 60)
+            eta_h, eta_m = divmod(eta_m, 60)
+            print(f"    chunk done in {chunk_elapsed:.1f}s ({avg:.1f}s/prompt avg)  |  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  |  GPU {_gpu_used_gb():.1f}GB")
+
+        print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
         eval_tasks = []
         for i, (prob, output) in enumerate(zip(problems, outputs)):
             for j, gen in enumerate(output.outputs):
@@ -356,7 +374,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             return i, j, code, truncated, r
 
         sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=16) as ex:
             for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
                 i, j, code, truncated, r = fut
                 sample_solved = r["passed"] == r["total"] and r["total"] > 0

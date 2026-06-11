@@ -96,7 +96,7 @@ Selective activation recomputation (Korthikanti et al., NVIDIA Megatron-LM, arXi
 
 Sparse top-k KL loss (GKD, Agarwal et al., arXiv 2306.13649 — ICLR 2024; exploit sparsity dari arXiv 2503.16870)
 → teacher distribution non-zero cuma di ≤20 indices per posisi, tapi current `skew_kld_loss` compute full-vocab softmax + KL (152064 ops × seq × batch). Alternatif: KL di union top-k indices teacher + sample student top-k → ~50 indices, 3000× lebih sedikit ops. Custom refactor besar, perlu test compatibility dengan QEAD weights. Defer.
-
+    
 QLoRA / LoRA fine-tuning (Hu et al., arXiv 2106.09685 — ICLR 2022; Dettmers et al., arXiv 2305.14314 — NeurIPS 2023)
 → train rank-r adapter (r=32-64), freeze base → ~5× speedup. Tapi changes experiment dari full FT ke PEFT. Defer sampai full-FT baseline jelas.
 

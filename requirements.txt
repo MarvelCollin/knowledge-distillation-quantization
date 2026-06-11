@@ -3,7 +3,6 @@ transformers>=4.40.0,<4.47.0
 datasets>=2.14.0
 openai>=1.30.0
 accelerate>=0.28.0
-bitsandbytes>=0.43.0
 vllm>=0.6.3,<0.7.0
 tqdm>=4.66.0
 pyyaml>=6.0

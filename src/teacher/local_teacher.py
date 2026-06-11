@@ -31,7 +31,6 @@ class LocalTeacherModel:
         top_logprobs: int,
         student_tokenizer=None,
         top_p: float = 0.95,
-        load_in_8bit: bool = False,
         gpu_memory_utilization: float = 0.85,
         max_model_len: int = 10240,
     ):
@@ -40,9 +39,6 @@ class LocalTeacherModel:
         self.top_p = top_p
         self.top_logprobs = top_logprobs
         self.student_tokenizer = student_tokenizer
-
-        if load_in_8bit:
-            print("  WARNING: load_in_8bit=True ignored (vLLM uses GPTQ/AWQ, not bitsandbytes). Using bf16.")
 
         from vllm import LLM, SamplingParams
 
@@ -239,17 +235,14 @@ class LocalTeacherModel:
                   f"{pass_count}/{tested} pass all tests ({rate:.1%}).")
 
     def shutdown(self) -> None:
-        try:
-            from vllm.distributed.parallel_state import (
-                destroy_distributed_environment,
-                destroy_model_parallel,
-            )
-            destroy_model_parallel()
-            destroy_distributed_environment()
-        except Exception as exc:
-            print(f"  vLLM cleanup warning: {exc}")
-        if hasattr(self, "llm"):
-            del self.llm
+        from vllm.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        del self.llm.llm_engine.model_executor
+        del self.llm
         gc.collect()
         torch.cuda.empty_cache()
         gpu_after = _gpu_mem_used_gb()

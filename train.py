@@ -149,7 +149,6 @@ def main():
             top_p=config["teacher"].get("top_p", 0.95),
             top_logprobs=config["teacher"]["top_logprobs"],
             student_tokenizer=student_tokenizer,
-            load_in_8bit=config["teacher"].get("load_in_8bit", False),
             gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
             max_model_len=config["teacher"].get("max_model_len", 10240),
         )

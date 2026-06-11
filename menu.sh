@@ -46,7 +46,7 @@ show_menu() {
     echo -n "  Select option: "
 }
 
-run_cmd() {
+run_cmd_noprompt() {
     echo -e "${YELLOW}▶ $*${NC}"
     echo ""
     eval "$@"
@@ -57,6 +57,70 @@ run_cmd() {
     else
         echo -e "${RED}✗ Failed (exit $code)${NC}"
     fi
+    return $code
+}
+
+run_cmd() {
+    run_cmd_noprompt "$@"
+    local code=$?
+    echo ""
+    read -rp "Press Enter to return to menu..."
+    return $code
+}
+
+run_compare_eval() {
+    header
+    echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
+    echo ""
+    echo -e "  ${BOLD}Fixed eval config${NC} (paper-grade defaults):"
+    echo "    difficulty   : all"
+    echo "    samples/prob : 5  (pass@5 standard)"
+    echo "    temperature  : 0.7"
+    echo "    top_p        : 0.95"
+    echo "    chunk_size   : 10 student / 3 teacher   (scaled for 24576 budget)"
+    echo "    max_tokens   : 24576  (paper-grade, target ~20% truncation)"
+    echo ""
+    echo -e "  ${BOLD}Include teacher in comparison?${NC}"
+    echo -e "    ${GREEN}y${NC}  ALL 3 models (paper-grade comparison, ~3-4.5h total)"
+    echo "    n  Student-only (skip teacher, ~1.5-2.5h, quick iteration)"
+    echo ""
+    echo -n "  Include teacher? (y/n) [default: y]: "
+    read -r incl_teacher
+    local skip_flag=""
+    if [ "$incl_teacher" = "n" ] || [ "$incl_teacher" = "N" ]; then
+        skip_flag="--skip-teacher"
+        echo -e "  ${YELLOW}→ Teacher SKIPPED. Eval will compare Student (original) vs Student (distilled) only.${NC}"
+    else
+        echo -e "  ${GREEN}→ Teacher INCLUDED. 3-way comparison.${NC}"
+    fi
+    echo ""
+    echo -e "  ${BOLD}num_problems${NC} — test problems to evaluate (LeetCode test split)"
+    echo "     30    quick smoke test          (~15 min, noisy single-run)"
+    echo "     100   ablation/intermediate     (~45 min, reasonable confidence)"
+    echo -e "     ${GREEN}164${NC}   ${GREEN}HumanEval-comparable n${NC}  (~75 min, paper-grade)"
+    echo "     full  entire test split        (~hours, most reliable)"
+    echo ""
+    echo -n "  num_problems [default: 100]: "
+    read -r np
+    [ -z "$np" ] && np=100
+    run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np --difficulty all --num-samples 5 --temperature 0.7 --top-p 0.95 $skip_flag"
+    echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
+}
+
+run_training_then_optionally_compare() {
+    local train_cmd="$1"
+    run_cmd_noprompt "$train_cmd"
+    local code=$?
+    echo ""
+    if [ $code -eq 0 ]; then
+        echo -n "  ${BOLD}Training complete!${NC} Run compare eval now? (y/n) [default: y]: "
+        read -r run_cmp
+        if [ "$run_cmp" != "n" ] && [ "$run_cmp" != "N" ]; then
+            echo ""
+            run_compare_eval
+            return
+        fi
+    fi
     echo ""
     read -rp "Press Enter to return to menu..."
 }
@@ -64,7 +128,7 @@ run_cmd() {
 view_cache() {
     local cache_dir
     cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-    cache_dir=${cache_dir:-cache/teacher_logprobs_reasoning}
+    cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
     header
     local total
     total=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
@@ -202,7 +266,7 @@ print(f'{passed},{total}')
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns
             [ -z "$ns" ] && ns=$REC_SAMPLES
-            run_cmd "sudo docker compose run --rm train python train.py --max-samples $ns"
+            run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --max-samples $ns"
             ;;
         2)
             header
@@ -248,7 +312,7 @@ print(f'{passed},{total}')
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns
             [ -z "$ns" ] && ns=$REC_SAMPLES
-            run_cmd "sudo docker compose run --rm train python train.py --offline --max-samples $ns"
+            run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --offline --max-samples $ns"
             ;;
         3)
             header
@@ -267,27 +331,7 @@ print(f'{passed},{total}')
             fi
             ;;
         4)
-            header
-            echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
-            echo ""
-            echo -e "  ${BOLD}Fixed eval config${NC} (paper-grade defaults):"
-            echo "    difficulty   : all"
-            echo "    teacher eval : ON (never skipped)"
-            echo "    samples/prob : 5  (pass@5 standard)"
-            echo "    temperature  : 0.7"
-            echo "    top_p        : 0.95"
-            echo ""
-            echo -e "  ${BOLD}num_problems${NC} — test problems to evaluate (LeetCode test split)"
-            echo "     30    quick smoke test          (~10 min, noisy single-run)"
-            echo "     100   ablation/intermediate     (~30 min, reasonable confidence)"
-            echo -e "     ${GREEN}164${NC}   ${GREEN}HumanEval-comparable n${NC}  (~50 min, paper-grade)"
-            echo "     full  entire test split        (~hours, most reliable)"
-            echo ""
-            echo -n "  num_problems [default: 100]: "
-            read -r np
-            [ -z "$np" ] && np=100
-            run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np --difficulty all --num-samples 5 --temperature 0.7 --top-p 0.95"
-            echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
+            run_compare_eval
             ;;
         5)
             view_cache
@@ -295,7 +339,7 @@ print(f'{passed},{total}')
         6)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_reasoning}
+            cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
             stats=$(python3 - "$cache_dir" <<'PYEOF'
 import json, glob, os, sys
