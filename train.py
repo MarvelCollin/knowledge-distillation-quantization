@@ -1,7 +1,10 @@
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import yaml
 import torch
@@ -34,6 +37,12 @@ from evaluate import generate_solution
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def run_validation(student: StudentModel, val_loader: DataLoader, device: torch.device) -> float:
@@ -172,6 +181,9 @@ def main():
     )
     student.to(device)
 
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(seed)
+
     curriculum_mode = config["training"].get("curriculum", "none")
     if curriculum_mode == "length":
         order = train_dataset.curriculum_order()
@@ -195,6 +207,8 @@ def main():
             num_workers=2,
             persistent_workers=True,
             pin_memory=True,
+            worker_init_fn=seed_worker,
+            generator=loader_generator,
         )
     else:
         train_loader = DataLoader(
@@ -205,6 +219,8 @@ def main():
             num_workers=2,
             persistent_workers=True,
             pin_memory=True,
+            worker_init_fn=seed_worker,
+            generator=loader_generator,
         )
     val_loader = DataLoader(
         val_dataset,
@@ -212,6 +228,7 @@ def main():
         num_workers=2,
         persistent_workers=True,
         pin_memory=True,
+        worker_init_fn=seed_worker,
     )
 
     optimizer = Adafactor(
@@ -229,7 +246,6 @@ def main():
         num_training_steps=total_steps,
     )
 
-    import os
     n_cache_files = len(list(Path(cache_dir).glob("*.json"))) if os.path.isdir(cache_dir) else 0
     n_train_samples = len(train_dataset)
     n_val_samples = len(val_dataset)
@@ -295,27 +311,21 @@ def main():
                 local_idx = sample_idxs[i].item()
                 cache_idx = train_dataset.original_indices[local_idx]
                 cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
-                if not cached or not cached.get("logprobs"):
+                if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
                     continue
-                logprobs = cached["logprobs"]
-                top_k_ids = cached.get("top_k_ids")
-                top_k_vals = cached.get("top_k_vals")
+                top_k_ids = cached["top_k_ids"]
+                top_k_vals = cached["top_k_vals"]
                 pl = prompt_lengths[i].item()
                 dist_start = pl - 1
-                aligned_len = min(len(logprobs), max_length - dist_start)
+                aligned_len = min(len(top_k_ids), max_length - dist_start)
                 if aligned_len <= 0:
                     continue
-                kwargs = {}
-                if top_k_ids is not None and top_k_vals is not None:
-                    kwargs["top_k_ids"] = top_k_ids[:aligned_len]
-                    kwargs["top_k_vals"] = top_k_vals[:aligned_len]
                 partial = build_teacher_distribution(
-                    logprobs[:aligned_len],
-                    student.tokenizer,
+                    top_k_ids[:aligned_len],
+                    top_k_vals[:aligned_len],
                     vocab_size,
                     device,
                     distill_temp,
-                    **kwargs,
                 )
                 teacher_dist[i, dist_start : dist_start + aligned_len] = partial
 

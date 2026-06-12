@@ -4,7 +4,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
-import re
 import yaml
 import torch
 import argparse
@@ -14,18 +13,13 @@ from tqdm import tqdm
 from src.data.dataset import create_datasets
 from src.evaluation.evaluator import run_test_cases, extract_signature
 from src.student.model import StudentModel
-from src.utils.reasoning import SYSTEM_PROMPT, extract_code, generate_with_thinking_cap
-
-
-def _extract_fn_name(test_cases: list) -> str | None:
-    for tc in test_cases:
-        for name in re.findall(r'\bcheck\((\w+)\)', tc):
-            if name != 'candidate':
-                return name
-        m = re.search(r'\bassert\s+(\w+)\s*\(', tc)
-        if m and m.group(1) != 'candidate':
-            return m.group(1)
-    return None
+from src.utils.reasoning import (
+    SYSTEM_PROMPT,
+    build_signature_user_content,
+    extract_code,
+    extract_fn_name,
+    generate_with_thinking_cap,
+)
 
 
 def load_config(path: str) -> dict:
@@ -35,16 +29,9 @@ def load_config(path: str) -> dict:
 
 def generate_solution(student: StudentModel, prompt: str, test_cases: list,
                       max_new_tokens: int, device: torch.device) -> str:
-    expected = _extract_fn_name(test_cases)
+    expected = extract_fn_name(test_cases)
     signature = extract_signature(test_cases[0], expected) if test_cases else ""
-
-    clean_prompt = prompt.rstrip()
-    if clean_prompt.endswith("def"):
-        clean_prompt = clean_prompt[:-3].rstrip()
-
-    user_content = clean_prompt
-    if signature:
-        user_content = clean_prompt + f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
+    user_content = build_signature_user_content(prompt, signature)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

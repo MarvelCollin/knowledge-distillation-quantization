@@ -1,20 +1,24 @@
 import ast
 import os
 import re
-import resource
+import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 
 
 _MEMORY_LIMIT_BYTES = 1024 ** 3
 _CPU_TIME_LIMIT_SEC = 30
+_STACK_LIMIT_BYTES = 64 * 1024 * 1024
 
-
-def _apply_subprocess_limits() -> None:
-    resource.setrlimit(resource.RLIMIT_AS, (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES))
-    resource.setrlimit(resource.RLIMIT_DATA, (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES))
-    resource.setrlimit(resource.RLIMIT_CPU, (_CPU_TIME_LIMIT_SEC, _CPU_TIME_LIMIT_SEC))
-    resource.setrlimit(resource.RLIMIT_STACK, (64 * 1024 * 1024, 64 * 1024 * 1024))
+_LIMIT_BOOTSTRAP = (
+    "import resource as _r; "
+    f"_r.setrlimit(_r.RLIMIT_AS, ({_MEMORY_LIMIT_BYTES}, {_MEMORY_LIMIT_BYTES})); "
+    f"_r.setrlimit(_r.RLIMIT_DATA, ({_MEMORY_LIMIT_BYTES}, {_MEMORY_LIMIT_BYTES})); "
+    f"_r.setrlimit(_r.RLIMIT_CPU, ({_CPU_TIME_LIMIT_SEC}, {_CPU_TIME_LIMIT_SEC})); "
+    f"_r.setrlimit(_r.RLIMIT_STACK, ({_STACK_LIMIT_BYTES}, {_STACK_LIMIT_BYTES}))\n"
+)
 
 
 _LEETCODE_PREAMBLE = '''\
@@ -231,31 +235,33 @@ def _alias_candidate(code: str, candidate: str | None) -> str:
 def execute_assertion(code: str, assertion: str, timeout: int = 10) -> tuple:
     candidate, rewritten = _prepare_assertion(assertion)
     code = _alias_candidate(code, candidate)
-    full_code = _LEETCODE_PREAMBLE + "\n" + code + "\n\n" + rewritten + "\n"
-    tmp = None
+    full_code = _LIMIT_BOOTSTRAP + _LEETCODE_PREAMBLE + "\n" + code + "\n\n" + rewritten + "\n"
+    workdir = tempfile.mkdtemp(prefix="exec_")
+    script = os.path.join(workdir, "solution.py")
+    with open(script, "w") as f:
+        f.write(full_code)
+    proc = subprocess.Popen(
+        [sys.executable, script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        cwd=workdir,
+        env={"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
+        start_new_session=True,
+    )
     try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(full_code)
-            tmp = f.name
-        result = subprocess.run(
-            ["python3", tmp],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            preexec_fn=_apply_subprocess_limits,
-        )
-        if result.returncode == 0:
-            return "pass", ""
-        out = result.stdout.rstrip()
-        err = result.stderr.rstrip()
-        combined = "\n".join(p for p in (out, err) if p)
-        return "fail", combined
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.communicate()
         return "timeout", "execution timed out"
     finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
+        shutil.rmtree(workdir, ignore_errors=True)
+    if proc.returncode == 0:
+        return "pass", ""
+    combined = "\n".join(p for p in (out.rstrip(), err.rstrip()) if p)
+    return "fail", combined
 
 
 def _format_error(err: str) -> str:

@@ -10,12 +10,6 @@ SYSTEM_PROMPT = (
     "After </think>, output the final Python function inside ```python ... ``` and nothing else."
 )
 
-TEACHER_CODE_SYSTEM_PROMPT = (
-    "You are an expert Python programmer. "
-    "Output only the final Python function inside ```python ... ``` and nothing else. "
-    "Do not include explanations, examples, or commentary."
-)
-
 THINK_END_TAG = "</think>"
 THINK_BUDGET_RATIO = 0.75
 
@@ -87,6 +81,24 @@ def generate_with_thinking_cap(model, tokenizer, prompt_text: str,
     truncated = (phase2.shape[1] - primed_len) >= code_budget
     raw = tokenizer.decode(gen_tokens, skip_special_tokens=True)
     return raw, truncated
+
+
+def extract_fn_name(test_cases: list) -> str | None:
+    for tc in test_cases:
+        for name in re.findall(r'\bcheck\((\w+)\)', tc):
+            if name != 'candidate':
+                return name
+        m = re.search(r'\bassert\s+(\w+)\s*\(', tc)
+        if m and m.group(1) != 'candidate':
+            return m.group(1)
+    return None
+
+
+def build_signature_user_content(base_prompt: str, signature: str) -> str:
+    content = base_prompt.rstrip()
+    if signature:
+        content += f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
+    return content
 
 
 def strip_thinking(text: str) -> str:

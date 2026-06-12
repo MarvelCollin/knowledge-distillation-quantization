@@ -248,9 +248,31 @@ def create_datasets(config: dict, tokenizer, cache_dir: str) -> tuple:
 
     problems = load_problems(config)
     teacher_responses = _load_passing_indices(cache_dir, len(problems))
-    kept_indices = sorted(teacher_responses.keys())
+
+    kept_indices = []
+    misaligned = 0
+    for i in sorted(teacher_responses.keys()):
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": PROMPT_TEMPLATE.format(text=problems[i]["text"])},
+        ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompt_len = min(len(tokenizer(prompt, add_special_tokens=False).input_ids), max_length - 1)
+        student_resp_len = len(tokenizer(teacher_responses[i]["text"], add_special_tokens=False).input_ids)
+        if student_resp_len != teacher_responses[i]["token_count"]:
+            misaligned += 1
+        if prompt_len + student_resp_len + 1 <= max_length:
+            kept_indices.append(i)
+
+    dropped = len(teacher_responses) - len(kept_indices)
     kept_problems = [problems[i] for i in kept_indices]
-    print(f"  Kept {len(kept_problems)} problems with passing teacher responses from cache.")
+    print(f"  Kept {len(kept_problems)} problems with passing teacher responses from cache "
+          f"({dropped} dropped: prompt+response exceeds max_length={max_length}).")
+    if misaligned:
+        pct = misaligned / max(len(teacher_responses), 1) * 100
+        print(f"  ⚠ Teacher/student token-count mismatch on {misaligned}/{len(teacher_responses)} "
+              f"({pct:.1f}%) responses — teacher logprobs may be positionally misaligned with the "
+              f"student tokens on those samples.")
 
     split = int(len(kept_problems) * train_ratio)
     return (

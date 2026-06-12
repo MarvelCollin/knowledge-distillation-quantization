@@ -5,7 +5,7 @@ Uses the LeetCodeDataset *test* split — never seen during training.
 
 Usage (inside Docker):
     python compare_eval.py
-    python compare_eval.py --distilled outputs/checkpoint-20
+    python compare_eval.py --distilled outputs/final
     python compare_eval.py --num-problems 30 --skip-teacher
 """
 import sys
@@ -108,22 +108,14 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 
-from src.data.dataset import PROMPT_TEMPLATE
+from src.data.dataset import PROMPT_TEMPLATE, _extract_test_cases
 from src.evaluation.evaluator import run_test_cases, extract_signature
-from src.utils.reasoning import SYSTEM_PROMPT, extract_code
-
-
-
-
-def _extract_fn_name(test_cases: list) -> str | None:
-    for tc in test_cases:
-        for name in re.findall(r'\bcheck\((\w+)\)', tc):
-            if name != 'candidate':
-                return name
-        m = re.search(r'\bassert\s+(\w+)\s*\(', tc)
-        if m and m.group(1) != 'candidate':
-            return m.group(1)
-    return None
+from src.utils.reasoning import (
+    SYSTEM_PROMPT,
+    build_signature_user_content,
+    extract_code,
+    extract_fn_name,
+)
 
 
 _INTERMEDIATE = Path("outputs/eval/intermediate")
@@ -154,7 +146,7 @@ def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> li
         ep_clean = re.search(r'(\w+)$', entry_point)
         entry_point = ep_clean.group(1) if ep_clean else entry_point
         test_str = item.get("test") or ""
-        cases = [test_str + f"\ncheck({entry_point})"] if test_str.strip() and entry_point else []
+        cases = _extract_test_cases(test_str, entry_point) if test_str.strip() and entry_point else []
         code = (item.get("response") or "").strip()
         text = (item.get("problem_description") or "").strip()
         if not cases or not code or not text:
@@ -250,16 +242,9 @@ def _build_eval_prompts(problems: list, tokenizer) -> list:
     formatted = []
     for prob in problems:
         prompt = PROMPT_TEMPLATE.format(text=prob["text"])
-        expected = prob.get("entry_point") or _extract_fn_name(prob["test_cases"])
+        expected = prob.get("entry_point") or extract_fn_name(prob["test_cases"])
         signature = extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
-
-        clean_prompt = prompt.rstrip()
-        if clean_prompt.endswith("def"):
-            clean_prompt = clean_prompt[:-3].rstrip()
-
-        user_content = clean_prompt
-        if signature:
-            user_content = clean_prompt + f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
+        user_content = build_signature_user_content(prompt, signature)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -416,13 +401,13 @@ def evaluate_model(label: str, model_path: str, problems: list,
     finally:
         print(f"  Cleaning up vLLM...")
         _cleanup_vllm(llm)
+        llm = None
         del tokenizer
         for _ in range(3):
             gc.collect()
         torch.cuda.empty_cache()
         time.sleep(2)
         post_cleanup = _gpu_used_gb()
-        freed_gb = pre_used + (post_load - pre_used) - (post_cleanup - pre_used) if 'post_load' in dir() else 0
         print(f"  GPU after cleanup: {post_cleanup:.1f}GB used  (started at {pre_used:.1f}GB)")
         residual = post_cleanup - pre_used
         if residual > 1.0:

@@ -29,7 +29,6 @@ training:
   max_grad_norm: 1.0
   num_epochs: 4
   output_dir: outputs
-  save_steps: 10
   seed: 42
   skew_lambda: 0.2
   skew_lambda_max: 0.5

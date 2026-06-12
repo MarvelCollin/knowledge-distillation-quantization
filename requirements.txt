@@ -1,7 +1,6 @@
 torch>=2.1.0
 transformers>=4.40.0,<4.47.0
 datasets>=2.14.0
-openai>=1.30.0
 accelerate>=0.28.0
 vllm>=0.6.3,<0.7.0
 tqdm>=4.66.0

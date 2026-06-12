@@ -18,19 +18,8 @@ class StudentModel(nn.Module):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
         return outputs.logits
-
-    def generate(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
-        return self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.6,
-            top_p=0.95,
-            pad_token_id=self.tokenizer.eos_token_id,
-        )
 
     def save(self, path: str) -> None:
         self.model.save_pretrained(path)
