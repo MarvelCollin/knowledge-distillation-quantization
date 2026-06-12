@@ -24,7 +24,7 @@ from transformers.optimization import Adafactor
 from src.data.dataset import PROMPT_TEMPLATE, create_datasets, load_problems
 from src.distillation.loss import (
     adaptive_skew_lambda,
-    build_teacher_distribution,
+    build_teacher_topk,
     compute_total_loss,
 )
 from src.distillation.qead import compute_qead_weights, teacher_confidence_weights
@@ -150,9 +150,8 @@ def main():
         raw_problems = load_problems(config)
         raw_prompts = [PROMPT_TEMPLATE.format(text=p["text"]) for p in raw_problems]
         raw_tests = [p["test_cases"] for p in raw_problems]
-        local_path = config["teacher"]["local_model_path"]
         local_teacher = LocalTeacherModel(
-            model_path=f"/workspace/{local_path}",
+            model_path=config["teacher"]["local_model_path"],
             max_tokens=config["teacher"]["max_tokens"],
             temperature=config["teacher"]["temperature"],
             top_p=config["teacher"].get("top_p", 0.95),
@@ -266,6 +265,7 @@ def main():
     print()
 
     vocab_size = student.model.config.vocab_size
+    topk = config["teacher"]["top_logprobs"] + 1
     alpha = config["training"]["alpha"]
     skew_lambda = config["training"]["skew_lambda"]
     skew_lambda_max = config["training"].get("skew_lambda_max", skew_lambda)
@@ -278,6 +278,18 @@ def main():
     test_eval_steps = config["training"].get("test_eval_steps", 0)
     test_eval_problems = config["training"].get("test_eval_problems", 5)
     test_eval_max_new_tokens = config["training"].get("test_eval_max_new_tokens", 1024)
+
+    teacher_topk = {}
+    for cache_idx in train_dataset.original_indices:
+        cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
+        if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
+            continue
+        teacher_topk[cache_idx] = build_teacher_topk(
+            cached["top_k_ids"], cached["top_k_vals"],
+            vocab_size, topk, torch.device("cpu"), distill_temp,
+        )
+    topk_mb = sum(i.nbytes + p.nbytes for i, p in teacher_topk.values()) / 1024**2
+    print(f"Preloaded teacher top-k for {len(teacher_topk)}/{n_train_samples} train samples ({topk_mb:.0f} MB CPU).")
 
     global_step = 0
     samples_seen = 0
@@ -305,47 +317,41 @@ def main():
             predict_mask[:, :-1] = response_mask[:, 1:]
             qead_weights = compute_qead_weights(student_logits, predict_mask)
 
-            teacher_dist = torch.zeros(len(sample_idxs), max_length, vocab_size, device=device)
+            teacher_ids = torch.zeros(len(sample_idxs), max_length, topk, dtype=torch.long, device=device)
+            teacher_probs = torch.zeros(len(sample_idxs), max_length, topk, device=device)
 
             for i in range(len(sample_idxs)):
                 local_idx = sample_idxs[i].item()
                 cache_idx = train_dataset.original_indices[local_idx]
-                cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
-                if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
+                entry = teacher_topk.get(cache_idx)
+                if entry is None:
                     continue
-                top_k_ids = cached["top_k_ids"]
-                top_k_vals = cached["top_k_vals"]
+                ids_full, probs_full = entry
                 pl = prompt_lengths[i].item()
                 dist_start = pl - 1
-                aligned_len = min(len(top_k_ids), max_length - dist_start)
+                aligned_len = min(ids_full.size(0), max_length - dist_start)
                 if aligned_len <= 0:
                     continue
-                partial = build_teacher_distribution(
-                    top_k_ids[:aligned_len],
-                    top_k_vals[:aligned_len],
-                    vocab_size,
-                    device,
-                    distill_temp,
-                )
-                teacher_dist[i, dist_start : dist_start + aligned_len] = partial
+                teacher_ids[i, dist_start : dist_start + aligned_len] = ids_full[:aligned_len].to(device)
+                teacher_probs[i, dist_start : dist_start + aligned_len] = probs_full[:aligned_len].to(device)
 
-            valid_teacher = teacher_dist.sum(dim=-1) > 1e-8
+            valid_teacher = teacher_probs.sum(dim=-1) > 1e-8
             qead_weights = qead_weights * valid_teacher.float()
             if use_confidence:
-                qead_weights = qead_weights * teacher_confidence_weights(teacher_dist)
+                qead_weights = qead_weights * teacher_confidence_weights(teacher_probs)
             weight_sums = qead_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
             qead_weights = qead_weights / weight_sums
 
             if use_adaptive_skew:
                 effective_lambda = adaptive_skew_lambda(
-                    student_logits, teacher_dist, qead_weights,
+                    student_logits, teacher_ids, teacher_probs, qead_weights,
                     skew_lambda, skew_lambda_max, distill_temp,
                 )
             else:
                 effective_lambda = skew_lambda
 
             total, l_distill, l_task = compute_total_loss(
-                student_logits, teacher_dist, qead_weights, labels, alpha, effective_lambda, distill_temp
+                student_logits, teacher_ids, teacher_probs, qead_weights, labels, alpha, effective_lambda, distill_temp
             )
 
             (total / grad_accum).backward()

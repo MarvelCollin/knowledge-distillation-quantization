@@ -583,7 +583,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     max_new_tokens = args.max_new_tokens or config["evaluation"]["max_new_tokens"]
     student_model  = config["student"]["model_name"]
-    teacher_path   = f"/workspace/{config['teacher']['local_model_path']}"
+    teacher_path   = config["teacher"]["local_model_path"]
 
     dataset_name = config["data"]["dataset_name"]
     problems = load_test_problems(args.num_problems, dataset_name, args.difficulty)

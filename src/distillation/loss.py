@@ -1,76 +1,77 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
 
-def build_teacher_distribution(
+def build_teacher_topk(
     top_k_ids: list,
     top_k_vals: list,
     vocab_size: int,
+    k: int,
     device: torch.device,
     temperature: float,
-) -> torch.Tensor:
+) -> tuple:
     inv_t = 1.0 / max(temperature, 1e-6)
     seq_len = len(top_k_ids)
-    dist = torch.zeros(seq_len, vocab_size, device=device)
-    for t in range(seq_len):
-        ids = top_k_ids[t]
-        vals = top_k_vals[t]
-        if not ids:
+    ids_rows = [[0] * k for _ in range(seq_len)]
+    probs_rows = [[0.0] * k for _ in range(seq_len)]
+    for t, (ids, vals) in enumerate(zip(top_k_ids, top_k_vals)):
+        acc = {}
+        for tok_id, val in zip(ids, vals):
+            if 0 <= tok_id < vocab_size:
+                acc[tok_id] = acc.get(tok_id, 0.0) + math.exp(val * inv_t)
+        if not acc:
             continue
-        idx_t = torch.as_tensor(ids, dtype=torch.long, device=device)
-        val_t = torch.as_tensor(vals, dtype=torch.float, device=device)
-        mask = (idx_t >= 0) & (idx_t < vocab_size)
-        if not mask.any():
-            continue
-        idx_t = idx_t[mask]
-        val_t = val_t[mask]
-        probs = torch.exp(val_t * inv_t)
-        dist[t].index_add_(0, idx_t, probs)
-        row_sum = dist[t].sum()
-        if row_sum > 1e-8:
-            dist[t] /= row_sum
-    return dist
+        items = list(acc.items())[:k]
+        total = sum(p for _, p in items)
+        id_row = ids_rows[t]
+        prob_row = probs_rows[t]
+        for j, (tok_id, p) in enumerate(items):
+            id_row[j] = tok_id
+            prob_row[j] = p / total
+    ids_out = torch.tensor(ids_rows, dtype=torch.long, device=device)
+    probs_out = torch.tensor(probs_rows, dtype=torch.float, device=device)
+    return ids_out, probs_out
 
 
 def skew_kld_loss(
     student_logits: torch.Tensor,
-    teacher_dist: torch.Tensor,
+    teacher_ids: torch.Tensor,
+    teacher_probs: torch.Tensor,
     qead_weights: torch.Tensor,
     skew_lambda,
     temperature: float,
 ) -> torch.Tensor:
-    student_probs = F.softmax(student_logits.float() / temperature, dim=-1)
-    safe_teacher = teacher_dist.clamp(min=1e-10)
+    student_logprobs = F.log_softmax(student_logits.float() / temperature, dim=-1)
+    student_at = torch.gather(student_logprobs, -1, teacher_ids).exp()
 
     if torch.is_tensor(skew_lambda) and skew_lambda.dim() == 1:
         lam = skew_lambda.view(-1, 1, 1)
     else:
         lam = skew_lambda
 
-    mixture = (lam * student_probs + (1 - lam) * safe_teacher).clamp(min=1e-10)
+    mixture = (lam * student_at + (1 - lam) * teacher_probs).clamp(min=1e-10)
+    safe_teacher = teacher_probs.clamp(min=1e-10)
 
-    kld_per_token = (mixture * (mixture.log() - safe_teacher.log())).sum(dim=-1)
+    kld_per_token = (teacher_probs * (safe_teacher.log() - mixture.log())).sum(dim=-1)
     return (qead_weights * kld_per_token).sum() / qead_weights.sum().clamp(min=1e-8)
 
 
 def adaptive_skew_lambda(
     student_logits: torch.Tensor,
-    teacher_dist: torch.Tensor,
+    teacher_ids: torch.Tensor,
+    teacher_probs: torch.Tensor,
     qead_weights: torch.Tensor,
     base_lambda: float,
     max_lambda: float,
     temperature: float,
 ) -> torch.Tensor:
     with torch.no_grad():
-        student_probs = F.softmax(student_logits.float() / temperature, dim=-1)
-        is_empty = teacher_dist.sum(dim=-1, keepdim=True) < 1e-8
-        safe_teacher = torch.where(
-            is_empty.expand_as(teacher_dist),
-            torch.full_like(teacher_dist, 1.0 / teacher_dist.size(-1)),
-            teacher_dist,
-        ).clamp(min=1e-10)
-        student_safe = student_probs.clamp(min=1e-10)
-        per_token_kld = (safe_teacher * (safe_teacher.log() - student_safe.log())).sum(dim=-1)
+        student_logprobs = F.log_softmax(student_logits.float() / temperature, dim=-1)
+        student_at = torch.gather(student_logprobs, -1, teacher_ids)
+        safe_teacher = teacher_probs.clamp(min=1e-10)
+        per_token_kld = (teacher_probs * (safe_teacher.log() - student_at)).sum(dim=-1)
         w_sum = qead_weights.sum(dim=-1).clamp(min=1e-8)
         per_sample_kld = (qead_weights * per_token_kld).sum(dim=-1) / w_sum
         scaled = torch.tanh(per_sample_kld / 4.0)
@@ -90,14 +91,15 @@ def task_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 def compute_total_loss(
     student_logits: torch.Tensor,
-    teacher_dist: torch.Tensor,
+    teacher_ids: torch.Tensor,
+    teacher_probs: torch.Tensor,
     qead_weights: torch.Tensor,
     labels: torch.Tensor,
     alpha: float,
     skew_lambda,
     temperature: float,
 ) -> tuple:
-    l_distill = skew_kld_loss(student_logits, teacher_dist, qead_weights, skew_lambda, temperature)
+    l_distill = skew_kld_loss(student_logits, teacher_ids, teacher_probs, qead_weights, skew_lambda, temperature)
     l_task = task_ce_loss(student_logits, labels)
     l_total = alpha * l_distill + (1 - alpha) * l_task
     return l_total, l_distill, l_task
