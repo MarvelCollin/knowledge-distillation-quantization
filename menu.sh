@@ -191,6 +191,50 @@ install_nvidia_toolkit() {
     read -rp "Press Enter to return to menu..."
 }
 
+show_cache_status() {
+    local dir="$1"
+    CACHE_TOTAL=0
+    CACHE_MAX_IDX=-1
+    echo -e "  ${BOLD}Teacher cache status${NC} (${dir})"
+    if [ ! -d "$dir" ]; then
+        echo -e "    ${RED}Cache dir not found${NC}"
+        return 1
+    fi
+    CACHE_TOTAL=$(find "$dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
+    if [ "$CACHE_TOTAL" -eq 0 ]; then
+        echo -e "    ${RED}No cached files${NC}"
+        return 1
+    fi
+    CACHE_MAX_IDX=$(find "$dir" -maxdepth 1 -name '*.json' -printf '%f\n' 2>/dev/null | sed 's/\.json$//' | sort -n | tail -1)
+    echo -e "    Total cached files   : ${GREEN}${CACHE_TOTAL}${NC}"
+    echo -e "    Problem index range  : 0-${CACHE_MAX_IDX}  (max_samples ${GREEN}$((CACHE_MAX_IDX + 1))${NC} covers the full cache)"
+    local stats
+    stats=$(timeout 10 python3 -c "
+import json, glob, random
+files = glob.glob('$dir/*.json')
+sample = random.sample(files, min(100, len(files)))
+total = passed = 0
+for f in sample:
+    try:
+        d = json.load(open(f))
+        tp, tt = d.get('test_passed'), d.get('test_total')
+        if tp is not None and tt is not None and tt > 0:
+            total += 1
+            if tp == tt: passed += 1
+    except Exception: pass
+print(f'{passed},{total}')
+" 2>/dev/null)
+    local s_pass s_total
+    IFS=',' read -r s_pass s_total <<< "$stats"
+    if [ -n "$s_total" ] && [ "$s_total" -gt 0 ]; then
+        local pct=$((s_pass * 100 / s_total))
+        echo -e "    Sample pass rate     : ${GREEN}${s_pass}/${s_total}${NC} (~${pct}% usable for training, random ${s_total}-file sample)"
+    else
+        echo -e "    Pass rate            : (skipped — scan timed out or files being written)"
+    fi
+    return 0
+}
+
 MENU_FILE="$(realpath "$0")"
 MENU_MTIME="$(stat -c %Y "$MENU_FILE")"
 
@@ -223,38 +267,8 @@ while true; do
             echo "    max_length          : ${cfg_alen}"
             echo "    seed                : ${cfg_seed}"
             echo ""
-            echo -e "  ${BOLD}Teacher cache status${NC} (${cache_dir})"
-            if [ -d "$cache_dir" ]; then
-                total_cached=$(find "$cache_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
-                if [ "$total_cached" -gt 0 ]; then
-                    echo -e "    Total cached files   : ${GREEN}${total_cached}${NC}"
-                    pass_stats=$(timeout 3 python3 -c "
-import json, glob, random
-files = glob.glob('$cache_dir/*.json')
-sample = random.sample(files, min(50, len(files)))
-total = passed = 0
-for f in sample:
-    try:
-        d = json.load(open(f))
-        tp, tt = d.get('test_passed'), d.get('test_total')
-        if tp is not None and tt is not None and tt > 0:
-            total += 1
-            if tp == tt: passed += 1
-    except Exception: pass
-print(f'{passed},{total}')
-" 2>/dev/null)
-                    IFS=',' read -r passed total <<< "$pass_stats"
-                    if [ -n "$total" ] && [ "$total" -gt 0 ]; then
-                        pct=$((passed * 100 / total))
-                        echo -e "    Sample pass rate     : ${GREEN}${passed}/${total}${NC} (${pct}% from random 50-file sample)"
-                    else
-                        echo -e "    Pass rate            : (skipped — files being written)"
-                    fi
-                else
-                    echo -e "    ${YELLOW}No cached files yet${NC} — fresh generation will run"
-                fi
-            else
-                echo -e "    ${YELLOW}Cache dir not found${NC} — fresh generation will run"
+            if ! show_cache_status "$cache_dir"; then
+                echo -e "    ${YELLOW}→ fresh generation will run${NC}"
             fi
             echo ""
             echo -e "  ${BOLD}max_samples${NC}  — problems to load (LeetCode train split has ~2,600)"
@@ -278,35 +292,10 @@ print(f'{passed},{total}')
             echo ""
             echo -e "  Fixed config: epochs=${cfg_epochs}, seed=${cfg_seed} (edit config/config.yaml to change)"
             echo ""
-            echo -e "  ${BOLD}Teacher cache status${NC} (${cache_dir})"
-            if [ -d "$cache_dir" ]; then
-                total_cached=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
-                if [ "$total_cached" -gt 0 ]; then
-                    pass_stats=$(python3 -c "
-import json, glob
-total = passed = 0
-for f in glob.glob('$cache_dir/*.json'):
-    try:
-        d = json.load(open(f))
-        tp = d.get('test_passed')
-        tt = d.get('test_total')
-        if tp is not None and tt is not None and tt > 0:
-            total += 1
-            if tp == tt: passed += 1
-    except Exception: pass
-print(f'{passed},{total}')
-" 2>/dev/null)
-                    IFS=',' read -r passed total <<< "$pass_stats"
-                    if [ -n "$total" ] && [ "$total" -gt 0 ]; then
-                        pct=$((passed * 100 / total))
-                        echo -e "    Total cached files   : ${GREEN}${total_cached}${NC}"
-                        echo -e "    Passing all tests    : ${GREEN}${passed}/${total}${NC} (${pct}%) — these are usable for training"
-                    fi
-                else
-                    echo -e "    ${RED}No cached files — offline training will fail${NC}"
-                fi
+            if show_cache_status "$cache_dir"; then
+                REC_SAMPLES=$((CACHE_MAX_IDX + 1))
             else
-                echo -e "    ${RED}Cache dir not found — offline training will fail${NC}"
+                echo -e "    ${RED}→ offline training will fail without a cache${NC}"
             fi
             echo ""
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "

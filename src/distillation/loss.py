@@ -20,7 +20,9 @@ def build_teacher_topk(
         acc = {}
         for tok_id, val in zip(ids, vals):
             if 0 <= tok_id < vocab_size:
-                acc[tok_id] = acc.get(tok_id, 0.0) + math.exp(val * inv_t)
+                p = math.exp(val * inv_t)
+                if p > 0.0:
+                    acc[tok_id] = acc.get(tok_id, 0.0) + p
         if not acc:
             continue
         items = list(acc.items())[:k]
