@@ -103,7 +103,19 @@ run_compare_eval() {
     echo -n "  num_problems [default: 100]: "
     read -r np
     [ -z "$np" ] && np=100
-    run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np --difficulty all --num-samples 5 --temperature 0.7 --top-p 0.95 $skip_flag"
+    echo ""
+    echo -e "  ${BOLD}difficulty${NC} — which levels to include (applied equally to all models)"
+    echo -e "     ${GREEN}1${NC}  all              (easy + medium + hard)"
+    echo "     2  easy + medium   (exclude hard — report as 'Easy+Medium' only)"
+    echo ""
+    echo -n "  difficulty [default: 1]: "
+    read -r diff_choice
+    local difficulty="all"
+    if [ "$diff_choice" = "2" ]; then
+        difficulty="easy,medium"
+        echo -e "  ${YELLOW}→ Hard EXCLUDED. Remember to label results 'Easy+Medium' in any report.${NC}"
+    fi
+    run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np --difficulty $difficulty --num-samples 5 --temperature 0.7 --top-p 0.95 $skip_flag"
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }
 

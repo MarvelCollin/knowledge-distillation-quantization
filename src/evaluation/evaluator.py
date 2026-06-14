@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 
 _MEMORY_LIMIT_BYTES = 1024 ** 3
@@ -314,4 +315,67 @@ def run_test_cases(code: str, test_cases: list) -> dict:
         "errors": errors,
         "categories": categories,
     }
+
+
+def failing_cases(result: dict, limit: int = 3) -> list:
+    """Pull the first `limit` failing (category, error, assertion) triples from a
+    run_test_cases result, de-duplicated by error message so the report stays short."""
+    out = []
+    seen = set()
+    details = result.get("details", [])
+    errors = result.get("errors", [])
+    cats = result.get("categories", [])
+    for i, outcome in enumerate(details):
+        if outcome == "pass":
+            continue
+        err = (errors[i] if i < len(errors) else "") or "(no error message)"
+        cat = cats[i] if i < len(cats) else "runtime_error"
+        key = (cat, err[:160])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((cat, err))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def write_failure_report(path, title: str, entries: list) -> None:
+    """Write a human-readable Markdown report of per-problem outcomes for debugging.
+
+    entries: list of dicts, each with:
+      header (str), solved (bool), note (str, optional), code (str, optional),
+      fails (list[(category, error)], optional)
+    Solved problems get a one-line ✓; failed problems show the generated code and
+    the first few distinct failing test cases so the root cause is visible."""
+    n_solved = sum(1 for e in entries if e.get("solved"))
+    lines = [
+        f"# {title}",
+        "",
+        f"Solved: **{n_solved}/{len(entries)}**.  Failed problems below show the generated "
+        f"code and the first distinct failing assertions.",
+        "",
+    ]
+    for e in entries:
+        mark = "✓" if e.get("solved") else "✗"
+        lines.append(f"## {mark} {e.get('header', '')}")
+        if e.get("note"):
+            lines.append(e["note"])
+        if not e.get("solved"):
+            code = (e.get("code") or "").strip()
+            lines.append("")
+            lines.append("```python")
+            lines.append(code[:4000] if code else "# (no code was extracted from the model output)")
+            lines.append("```")
+            fails = e.get("fails", [])
+            if fails:
+                lines.append("")
+                lines.append("Failing cases:")
+                for cat, err in fails:
+                    snippet = " ".join((err or "").split())[:300]
+                    lines.append(f"- **{cat}** — {snippet}")
+        lines.append("")
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(lines))
     

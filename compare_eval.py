@@ -109,9 +109,15 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 from src.data.dataset import PROMPT_TEMPLATE, _extract_test_cases
-from src.evaluation.evaluator import run_test_cases, extract_signature
+from src.evaluation.evaluator import (
+    run_test_cases,
+    extract_signature,
+    failing_cases,
+    write_failure_report,
+)
 from src.utils.reasoning import (
     SYSTEM_PROMPT,
+    THINK_END_TAG,
     build_signature_user_content,
     extract_code,
     extract_fn_name,
@@ -134,12 +140,15 @@ def load_config(path: str) -> dict:
 
 
 def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> list:
-    diff_label = f"{difficulty} " if difficulty != "all" else ""
+    # Accept one or several levels: "easy", "easy,medium", "easy+medium", "all".
+    allowed = {d.strip().lower() for d in difficulty.replace("+", ",").split(",") if d.strip()}
+    filter_on = bool(allowed) and "all" not in allowed
+    diff_label = f"{'+'.join(sorted(allowed))} " if filter_on else ""
     print(f"Loading {n} {diff_label}problems from {dataset_name} test split (separate from training data)...")
     raw = load_dataset(dataset_name, split="test")
     problems = []
     for item in raw:
-        if difficulty != "all" and (item.get("difficulty") or "").lower() != difficulty.lower():
+        if filter_on and (item.get("difficulty") or "").lower() not in allowed:
             continue
         entry_point = (item.get("entry_point") or "").strip()
         # Strip class prefix like "Solution().method" → just the method name
@@ -192,6 +201,59 @@ def _pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.prod((1.0 - k / i) for i in range(n - c + 1, n + 1))
 
 
+def _difficulty_breakdown(results: list, k: int) -> list:
+    """Per-difficulty pass@1 / pass@k / solved, so a single run shows where each
+    model floors (e.g. Hard) and justifies any difficulty filtering in the report."""
+    buckets = {}
+    for r in results:
+        d = (r.get("difficulty") or "unknown").strip().lower() or "unknown"
+        buckets.setdefault(d, []).append(r)
+    order = ["easy", "medium", "hard", "unknown"]
+    rows = []
+    for d in sorted(buckets, key=lambda x: order.index(x) if x in order else len(order)):
+        rs = buckets[d]
+        m = len(rs)
+        p1 = sum(_pass_at_k(x.get("num_samples", 1), x.get("num_passing", int(x["solved"])), 1) for x in rs) / m
+        pk = sum(_pass_at_k(x.get("num_samples", 1), x.get("num_passing", int(x["solved"])), k) for x in rs) / m
+        rows.append({
+            "difficulty": d,
+            "num_problems": m,
+            "pass_at_1": p1,
+            "pass_at_k": pk,
+            "solved": sum(1 for x in rs if x["solved"]),
+        })
+    return rows
+
+
+def _dump_failure_report(label: str, results: list) -> None:
+    """Write a readable Markdown breakdown of every problem (code + failing cases for
+    the misses) to outputs/eval/details/<label>.md for root-cause debugging."""
+    entries = []
+    for r in results:
+        diff = (r.get("difficulty") or "?")
+        np_, ns = r.get("num_passing", int(r["solved"])), r.get("num_samples", 1)
+        header = f"Problem {r['idx']}  [{diff}]  —  {np_}/{ns} samples passed"
+        # pick a representative failing sample (first unsolved), else first sample
+        samples = r.get("samples") or [r]
+        rep = next((s for s in samples if not s.get("solved")), samples[0])
+        note = None
+        if r["solved"]:
+            note = f"_first sample: {r['passed']}/{r['total']} test cases_"
+        if any(s.get("truncated") for s in samples):
+            note = (note or "") + "  ⚠ some samples truncated"
+        entries.append({
+            "header": header,
+            "solved": bool(r["solved"]),
+            "note": note,
+            "code": rep.get("code", ""),
+            "fails": failing_cases(rep, limit=3),
+        })
+    safe = label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
+    out_path = _INTERMEDIATE.parent / "details" / f"{safe}.md"
+    write_failure_report(out_path, f"Failure report — {label}", entries)
+    print(f"  Detail report     : {out_path}")
+
+
 def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
     tp = sum(r["passed"] for r in results)
     tt = sum(r["total"] for r in results)
@@ -208,6 +270,8 @@ def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
     pass1 = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), 1) for r in results) / max(n, 1)
     passk = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), k) for r in results) / max(n, 1)
 
+    by_difficulty = _difficulty_breakdown(results, k)
+
     summary = {
         "name": label,
         "dataset": dataset_name,
@@ -223,6 +287,7 @@ def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
         "num_problems": n,
         "truncated": truncated,
         "failure_counts": failure_counts,
+        "by_difficulty": by_difficulty,
         "per_problem": results,
     }
     print(f"\n  pass@1            : {pass1:.1%}")
@@ -232,14 +297,21 @@ def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
     print(f"  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})  [first sample]")
     print(f"  Failure modes     : "
           + ", ".join(f"{c}={failure_counts[c]}" for c in _FAILURE_CATEGORIES if failure_counts[c]))
+    if len(by_difficulty) > 1:
+        print(f"  By difficulty     :")
+        for d in by_difficulty:
+            print(f"      {d['difficulty']:<8} pass@1={d['pass_at_1']:.1%}  "
+                  f"pass@{k}={d['pass_at_k']:.1%}  solved={d['solved']}/{d['num_problems']}")
     if truncated:
         print(f"  ⚠ Truncated       : {truncated}/{n} hit the token cap — raise evaluation.max_new_tokens")
     _save_intermediate(label, summary)
+    _dump_failure_report(label, results)
     return summary
 
 
-def _build_eval_prompts(problems: list, tokenizer) -> list:
+def _build_eval_prompts(problems: list, tokenizer) -> tuple[list, list]:
     formatted = []
+    signatures = []
     for prob in problems:
         prompt = PROMPT_TEMPLATE.format(text=prob["text"])
         expected = prob.get("entry_point") or extract_fn_name(prob["test_cases"])
@@ -252,7 +324,57 @@ def _build_eval_prompts(problems: list, tokenizer) -> list:
         ]
         fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         formatted.append(fmt)
-    return formatted
+        signatures.append(signature)
+    return formatted, signatures
+
+
+def _budget_forced_generate(llm, prompts: list, signatures: list, num_samples: int,
+                            temperature: float, top_p: float, max_new_tokens: int,
+                            think_ratio: float = 0.75) -> list:
+    """Two-phase generation that guarantees a fenced code block even when the model
+    over-thinks. Phase 1 generates reasoning capped at `think_ratio` of the budget and
+    stops at </think>; phase 2 force-primes ```python (+ signature) and writes the
+    solution with the remaining budget. Mirrors evaluate.py's generate_with_thinking_cap,
+    but batched for vLLM with n samples. Returns, per prompt, a list of
+    (final_text, truncated) tuples — one per sample."""
+    from vllm import SamplingParams
+
+    do_sample = num_samples > 1
+    temp = temperature if do_sample else 0.0
+    tp = top_p if do_sample else 1.0
+    think_budget = max(1, int(max_new_tokens * think_ratio))
+    code_budget = max(1, max_new_tokens - think_budget)
+
+    think_params = SamplingParams(
+        temperature=temp, top_p=tp, max_tokens=think_budget, n=num_samples,
+        stop=[THINK_END_TAG], include_stop_str_in_output=True,
+    )
+    phase1 = llm.generate(prompts, think_params, use_tqdm=True)
+
+    code_params = SamplingParams(
+        temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
+        stop=["```"], include_stop_str_in_output=False,
+    )
+    cont_prompts = []
+    meta = []
+    for i, out in enumerate(phase1):
+        sig = signatures[i] if i < len(signatures) else ""
+        for j, o in enumerate(out.outputs):
+            think_text = o.text
+            closed = think_text if THINK_END_TAG in think_text else think_text + "\n" + THINK_END_TAG
+            primer = "\n```python\n" + (f"{sig}\n    " if sig else "")
+            cont_prompts.append(prompts[i] + closed + primer)
+            meta.append((i, j, closed, primer))
+
+    phase2 = llm.generate(cont_prompts, code_params, use_tqdm=True)
+
+    grid = [[None] * num_samples for _ in range(len(prompts))]
+    for (i, j, closed, primer), out in zip(meta, phase2):
+        gen = out.outputs[0]
+        truncated = gen.finish_reason == "length"
+        final_text = closed + primer + gen.text + "\n```"
+        grid[i][j] = (final_text, truncated)
+    return grid
 
 
 def evaluate_model(label: str, model_path: str, problems: list,
@@ -312,30 +434,27 @@ def evaluate_model(label: str, model_path: str, problems: list,
             enable_prefix_caching=True,
         )
 
-        do_sample = num_samples > 1
-        sampling_params = SamplingParams(
-            temperature=temperature if do_sample else 0.0,
-            top_p=top_p if do_sample else 1.0,
-            max_tokens=max_new_tokens,
-            n=num_samples,
-        )
-
-        formatted_prompts = _build_eval_prompts(problems, tokenizer)
+        formatted_prompts, signatures = _build_eval_prompts(problems, tokenizer)
 
         post_load = _gpu_used_gb()
         print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
 
         eval_chunk_size = 3 if is_teacher else 10
         total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
-        print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM (chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
-        outputs = []
+        print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
+              f"(budget-forced think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
+        gen_grid = [None] * len(formatted_prompts)
         for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
             chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
+            chunk_sigs = signatures[chunk_start:chunk_start + eval_chunk_size]
             chunk_idx = chunk_start // eval_chunk_size + 1
             chunk_t0 = time.time()
             print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
-            chunk_outputs = llm.generate(chunk, sampling_params, use_tqdm=True)
-            outputs.extend(chunk_outputs)
+            chunk_grid = _budget_forced_generate(
+                llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
+            )
+            for off, row in enumerate(chunk_grid):
+                gen_grid[chunk_start + off] = row
             chunk_elapsed = time.time() - chunk_t0
             done = chunk_start + len(chunk)
             avg = chunk_elapsed / len(chunk)
@@ -346,11 +465,10 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
         print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
         eval_tasks = []
-        for i, (prob, output) in enumerate(zip(problems, outputs)):
-            for j, gen in enumerate(output.outputs):
-                raw = gen.text
-                truncated = gen.finish_reason == "length"
-                code = extract_code(raw)
+        for i, prob in enumerate(problems):
+            for j in range(num_samples):
+                final_text, truncated = gen_grid[i][j]
+                code = extract_code(final_text)
                 eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
 
         def _run_one(task):
@@ -377,6 +495,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
             results.append({
                 "idx": i,
+                "difficulty": prob.get("difficulty", ""),
                 "passed": first["passed"], "total": first["total"],
                 "details": first["details"], "errors": first["errors"], "categories": first["categories"],
                 "solved": any_solved, "code": first["code"], "truncated": any_truncated,
@@ -557,8 +676,8 @@ def main() -> None:
     parser.add_argument("--num-problems", type=int, default=30,
                         help="Number of LeetCode test problems to evaluate (default: 30)")
     parser.add_argument("--difficulty", default="all",
-                        choices=["easy", "medium", "hard", "all"],
-                        help="Filter problems by difficulty (default: all)")
+                        help="Difficulties to include, comma-separated: easy, medium, hard, "
+                             "or all (default: all). e.g. --difficulty easy,medium")
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation to save time (~1 min/problem)")
     parser.add_argument("--max-new-tokens", type=int, default=None)

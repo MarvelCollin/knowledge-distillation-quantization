@@ -28,7 +28,7 @@ from src.distillation.loss import (
     compute_total_loss,
 )
 from src.distillation.qead import compute_qead_weights, teacher_confidence_weights
-from src.evaluation.evaluator import run_test_cases
+from src.evaluation.evaluator import run_test_cases, failing_cases, write_failure_report
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
 from evaluate import generate_solution
@@ -73,26 +73,46 @@ def run_validation(student: StudentModel, val_loader: DataLoader, device: torch.
 
 
 def run_test_validation(student: StudentModel, val_dataset, device: torch.device,
-                        num_problems: int, max_new_tokens: int) -> dict:
+                        num_problems: int, max_new_tokens: int,
+                        detail_path=None) -> dict:
     student.eval()
     n = min(num_problems, len(val_dataset))
     passed_total = 0
     test_total = 0
     solved_count = 0
+    entries = []
 
     for i in range(n):
         prompt = val_dataset.get_prompt(i)
         test_cases = val_dataset.get_test_cases(i)
+        code = ""
         try:
             code = generate_solution(student, prompt, test_cases, max_new_tokens, device)
             r = run_test_cases(code, test_cases)
         except Exception as exc:
             print(f"  [test-val {i}] generation/exec error: {type(exc).__name__}: {exc}")
+            entries.append({
+                "header": f"Problem {i}  —  generation/exec error",
+                "solved": False, "code": code,
+                "fails": [("runtime_error", f"{type(exc).__name__}: {exc}")],
+            })
             continue
         passed_total += r["passed"]
         test_total += r["total"]
-        if r["total"] > 0 and r["passed"] == r["total"]:
+        solved = r["total"] > 0 and r["passed"] == r["total"]
+        if solved:
             solved_count += 1
+        entries.append({
+            "header": f"Problem {i}  —  {r['passed']}/{r['total']} test cases",
+            "solved": solved, "code": code,
+            "fails": failing_cases(r, limit=3),
+        })
+
+    if detail_path is not None:
+        try:
+            write_failure_report(detail_path, f"Train selection eval — {Path(detail_path).stem}", entries)
+        except Exception as exc:
+            print(f"  [test-val] could not write detail report: {type(exc).__name__}: {exc}")
 
     return {
         "test_pass_rate": passed_total / max(test_total, 1),
@@ -275,9 +295,9 @@ def main():
     grad_accum = config["training"]["gradient_accumulation_steps"]
     max_grad_norm = config["training"]["max_grad_norm"]
     max_length = config["student"]["max_length"]
-    test_eval_steps = config["training"].get("test_eval_steps", 0)
-    test_eval_problems = config["training"].get("test_eval_problems", 5)
-    test_eval_max_new_tokens = config["training"].get("test_eval_max_new_tokens", 1024)
+    eval_steps = config["training"]["eval_steps"]
+    select_problems = config["training"]["select_problems"]
+    select_max_new_tokens = config["training"]["select_max_new_tokens"]
 
     teacher_topk = {}
     for cache_idx in train_dataset.original_indices:
@@ -293,6 +313,7 @@ def main():
 
     global_step = 0
     samples_seen = 0
+    best_solve_rate = -1.0
     best_val_loss = float("inf")
     train_start = time.time()
     student.model.gradient_checkpointing_enable()
@@ -378,27 +399,27 @@ def main():
                         f"task={l_task.item():.4f}"
                     )
 
-                if global_step % config["training"]["eval_steps"] == 0:
+                if global_step % eval_steps == 0:
                     val_loss = run_validation(student, val_loader, device)
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        student.save(str(output_dir / "final"))
-                        print(f"val_loss={val_loss:.4f} at step {global_step}  ✓ saved best")
-                    else:
-                        print(f"val_loss={val_loss:.4f} at step {global_step}  (best={best_val_loss:.4f})")
-                    student.train()
-
-                if test_eval_steps > 0 and global_step % test_eval_steps == 0:
                     stats = run_test_validation(
                         student, val_dataset, device,
-                        num_problems=test_eval_problems,
-                        max_new_tokens=test_eval_max_new_tokens,
+                        num_problems=select_problems,
+                        max_new_tokens=select_max_new_tokens,
+                        detail_path=output_dir / "train_details" / f"step_{global_step:05d}.md",
                     )
-                    print(
-                        f"[TEST-VAL] step={global_step} "
-                        f"solved={stats['problems_solved']}/{stats['problems_total']} "
-                        f"test_pass_rate={stats['test_pass_rate']:.1%}"
+                    solve_rate = stats["test_pass_rate"]
+                    line = (
+                        f"step {global_step}/{total_steps}  "
+                        f"solve={solve_rate:.1%} ({stats['problems_solved']}/{stats['problems_total']})  "
+                        f"val_loss={val_loss:.4f}"
                     )
+                    if (solve_rate, -val_loss) > (best_solve_rate, -best_val_loss):
+                        best_solve_rate = solve_rate
+                        best_val_loss = val_loss
+                        student.save(str(output_dir / "final"))
+                        print(line + "  ✓ saved best")
+                    else:
+                        print(line + f"  (best solve={best_solve_rate:.1%})")
                     student.train()
 
         epoch_elapsed = time.time() - epoch_start
@@ -408,14 +429,14 @@ def main():
               f"samples seen: {epoch_samples_seen}/{n_train_samples}  "
               f"cumulative: {samples_seen}  "
               f"time: {epoch_m}m {epoch_s:02d}s  "
-              f"best_val: {best_val_loss:.4f}")
+              f"best_solve: {best_solve_rate:.1%}")
         print()
 
-    if best_val_loss == float("inf"):
+    if best_solve_rate < 0:
         student.save(str(output_dir / "final"))
-        print("No validation eval ran during training — saved final-state checkpoint.")
+        print("No selection eval ran during training — saved final-state checkpoint.")
     else:
-        print(f"Training complete. Best val_loss={best_val_loss:.4f} saved at outputs/final.")
+        print(f"Training complete. Best solve_rate={best_solve_rate:.1%} (val_loss={best_val_loss:.4f}) saved at outputs/final.")
 
     elapsed = time.time() - train_start
     hours = int(elapsed // 3600)

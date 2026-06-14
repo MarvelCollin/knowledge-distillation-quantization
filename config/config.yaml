@@ -25,16 +25,15 @@ training:
   distill_temperature: 2.0
   eval_steps: 25
   gradient_accumulation_steps: 4
-  learning_rate: 1e-5
+  learning_rate: 3e-6
   max_grad_norm: 1.0
-  num_epochs: 4
+  num_epochs: 1
   output_dir: outputs
   seed: 42
   skew_lambda: 0.2
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: true
-  test_eval_steps: 50
-  test_eval_problems: 5
-  test_eval_max_new_tokens: 2048
+  select_problems: 10
+  select_max_new_tokens: 2048
   warmup_steps: 30
