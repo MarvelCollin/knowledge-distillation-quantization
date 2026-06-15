@@ -425,14 +425,19 @@ while true; do
             cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
             stats=$(python3 - "$cache_dir" <<'PYEOF'
-import json, glob, os, sys
+import glob, os, re, sys
 files = glob.glob(os.path.join(sys.argv[1], '*.json'))
+pat_p = re.compile(rb'"test_passed":\s*(\d+)')
+pat_t = re.compile(rb'"test_total":\s*(\d+)')
 passed = failed = 0
 for f in files:
     try:
-        d = json.load(open(f))
-        tp, tt = d.get('test_passed'), d.get('test_total')
-        if tt and tp == tt:
+        with open(f, 'rb') as fh:
+            sz = os.fstat(fh.fileno()).st_size
+            fh.seek(max(0, sz - 400))
+            tail = fh.read()
+        mp, mt = pat_p.search(tail), pat_t.search(tail)
+        if mp and mt and int(mt.group(1)) and int(mp.group(1)) == int(mt.group(1)):
             passed += 1
         else:
             failed += 1

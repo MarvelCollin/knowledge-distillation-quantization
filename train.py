@@ -130,6 +130,8 @@ def main():
                         help="Override data.max_samples from config (total problems loaded before train/val split).")
     parser.add_argument("--epochs", type=int, default=None,
                         help="Override training.num_epochs from config.")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Override training.learning_rate from config.")
     parser.add_argument("--seed", type=int, default=None,
                         help="Override training.seed for multi-seed runs.")
     args = parser.parse_args()
@@ -141,6 +143,8 @@ def main():
         config["data"]["max_samples"] = args.max_samples
     if args.epochs is not None:
         config["training"]["num_epochs"] = args.epochs
+    if args.lr is not None:
+        config["training"]["learning_rate"] = args.lr
     if args.seed is not None:
         config["training"]["seed"] = args.seed
 

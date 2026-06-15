@@ -17,11 +17,12 @@ import yaml
 from dotenv import load_dotenv
 
 from src.data.dataset import PROMPT_TEMPLATE, load_problems
-from src.evaluation.evaluator import extract_signature, run_test_cases
+from src.evaluation.evaluator import execute_assertion, extract_signature
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
 from src.utils.reasoning import (
     SYSTEM_PROMPT,
+    THINK_END_TAG,
     build_signature_user_content,
     extract_code,
     extract_fn_name,
@@ -39,12 +40,29 @@ def is_passing(entry: dict) -> bool:
     return bool(tt) and tp == tt
 
 
+def read_entry(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def passes_all(code: str, test_cases: list) -> bool:
+    if not code or not test_cases:
+        return False
+    for assertion in test_cases:
+        outcome, _ = execute_assertion(code, assertion)
+        if outcome != "pass":
+            return False
+    return True
+
+
 def tokenize_pieces(tokenizer, text: str) -> list:
     ids = tokenizer.encode(text, add_special_tokens=False)
     return [tokenizer.decode([i]) for i in ids]
 
 
-def teacher_payload(prompt: str, res: dict, r: dict, max_tokens: int) -> dict:
+def teacher_payload(prompt: str, res: dict, n_tests: int, max_tokens: int) -> dict:
     return {
         "prompt": prompt,
         "max_tokens": max_tokens,
@@ -54,13 +72,17 @@ def teacher_payload(prompt: str, res: dict, r: dict, max_tokens: int) -> dict:
         "logprobs": res.get("logprobs", []),
         "top_k_ids": res.get("top_k_ids"),
         "top_k_vals": res.get("top_k_vals"),
-        "test_passed": r["passed"],
-        "test_total": r["total"],
+        "test_passed": n_tests,
+        "test_total": n_tests,
     }
 
 
-def student_payload(tokenizer, prompt: str, code: str, r: dict, max_tokens: int) -> dict:
-    text = f"```python\n{code}\n```"
+def student_payload(tokenizer, prompt: str, raw: str, code: str, n_tests: int, max_tokens: int) -> dict:
+    if THINK_END_TAG in raw:
+        reasoning = raw.split(THINK_END_TAG)[0].rstrip()
+        text = f"{reasoning}\n{THINK_END_TAG}\n```python\n{code}\n```"
+    else:
+        text = f"```python\n{code}\n```"
     return {
         "prompt": prompt,
         "max_tokens": max_tokens,
@@ -70,13 +92,13 @@ def student_payload(tokenizer, prompt: str, code: str, r: dict, max_tokens: int)
         "logprobs": [],
         "top_k_ids": None,
         "top_k_vals": None,
-        "test_passed": r["passed"],
-        "test_total": r["total"],
+        "test_passed": n_tests,
+        "test_total": n_tests,
     }
 
 
-def sample_student_code(student, prompt: str, test_cases: list,
-                        max_new_tokens: int, temperature: float, top_p: float) -> str:
+def sample_student_solution(student, prompt: str, test_cases: list,
+                            max_new_tokens: int, temperature: float, top_p: float) -> tuple:
     expected = extract_fn_name(test_cases)
     signature = extract_signature(test_cases[0], expected) if test_cases else ""
     user_content = build_signature_user_content(prompt, signature)
@@ -92,7 +114,7 @@ def sample_student_code(student, prompt: str, test_cases: list,
         code_primer_signature=signature,
         do_sample=True, temperature=temperature, top_p=top_p,
     )
-    return extract_code(raw)
+    return raw, extract_code(raw)
 
 
 def persist(out_cache: str, idx: int, payload: dict) -> None:
@@ -102,10 +124,8 @@ def persist(out_cache: str, idx: int, payload: dict) -> None:
 
 def first_passing(candidates: list, test_cases: list):
     for res in candidates:
-        code = extract_code(res["text"])
-        r = run_test_cases(code, test_cases)
-        if r["total"] > 0 and r["passed"] == r["total"]:
-            return res, r
+        if passes_all(extract_code(res["text"]), test_cases):
+            return res
     return None
 
 
@@ -118,14 +138,15 @@ def seed_combined_cache(problems: list, src_cache: str, out_cache: str) -> list:
     gaps = []
     for i in range(len(problems)):
         sf = src / f"{i}.json"
-        if sf.exists() and is_passing(json.loads(sf.read_text())):
-            df = out / f"{i}.json"
+        se = read_entry(sf) if sf.exists() else None
+        df = out / f"{i}.json"
+        if se is not None and is_passing(se):
             if not df.exists():
                 shutil.copyfile(sf, df)
                 copied += 1
             continue
-        df = out / f"{i}.json"
-        if df.exists() and is_passing(json.loads(df.read_text())):
+        de = read_entry(df) if df.exists() else None
+        if de is not None and is_passing(de):
             continue
         gaps.append(i)
 
@@ -164,10 +185,9 @@ def run_teacher_phase(config, gaps, prompts, tests, args, out_cache) -> dict:
             temperature=args.temperature, top_p=args.top_p,
         )
         for i, cands in zip(idxs, results):
-            hit = first_passing(cands, tests[i])
-            if hit is not None:
-                res, r = hit
-                solved[i] = teacher_payload(prompts[i], res, r, config["teacher"]["max_tokens"])
+            res = first_passing(cands, tests[i])
+            if res is not None:
+                solved[i] = teacher_payload(prompts[i], res, len(tests[i]), config["teacher"]["max_tokens"])
                 persist(out_cache, i, solved[i])
         done = start + len(idxs)
         print(f"  teacher solved {len(solved)}/{done} gaps so far "
@@ -193,13 +213,12 @@ def run_student_phase(config, remaining, prompts, tests, args, device, out_cache
     t0 = time.time()
     for n, i in enumerate(remaining, 1):
         for _ in range(args.student_samples):
-            code = sample_student_code(
+            raw, code = sample_student_solution(
                 student, prompts[i], tests[i],
                 args.max_new_tokens, args.temperature, args.top_p,
             )
-            r = run_test_cases(code, tests[i])
-            if r["total"] > 0 and r["passed"] == r["total"]:
-                solved[i] = student_payload(tok, prompts[i], code, r,
+            if passes_all(code, tests[i]):
+                solved[i] = student_payload(tok, prompts[i], raw, code, len(tests[i]),
                                             config["student"]["max_length"])
                 persist(out_cache, i, solved[i])
                 break
@@ -245,6 +264,10 @@ def main():
         config["data"]["max_samples"] = args.max_samples
 
     src_cache = args.source_cache or config["data"]["teacher_cache_dir"]
+    if Path(args.out_cache).resolve() == Path(src_cache).resolve():
+        print("  ERROR: --out-cache must differ from the source teacher cache "
+              "(it would overwrite the originals).")
+        return
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print("═" * 60)
