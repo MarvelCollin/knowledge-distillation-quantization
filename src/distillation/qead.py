@@ -26,7 +26,7 @@ def teacher_confidence_weights(teacher_probs: torch.Tensor) -> torch.Tensor:
         safe = teacher_probs.clamp(min=1e-10)
         entropy = -(teacher_probs * safe.log()).sum(dim=-1)
         k_eff = (teacher_probs > 1e-10).float().sum(dim=-1).clamp(min=2.0)
-        max_entropy = torch.log(k_eff)
+         max_entropy = torch.log(k_eff)
         norm_entropy = (entropy / max_entropy).clamp(0.0, 1.0)
         confidence = 1.0 - norm_entropy
         return torch.where(nonempty, confidence, torch.zeros_like(confidence))

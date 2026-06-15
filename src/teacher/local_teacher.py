@@ -78,7 +78,9 @@ class LocalTeacherModel:
         )
 
     def _extract_result(self, vllm_output) -> dict:
-        gen = vllm_output.outputs[0]
+        return self._extract_one(vllm_output.outputs[0])
+
+    def _extract_one(self, gen) -> dict:
         token_ids = list(gen.token_ids)
         logprobs_list = gen.logprobs or []
 
@@ -126,6 +128,22 @@ class LocalTeacherModel:
         formatted = [self._format_prompt(p) for p in prompts]
         outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=True)
         return [self._extract_result(o) for o in outputs]
+
+    def sample_candidates_batch(self, prompts: list, n: int,
+                                temperature: float, top_p: float) -> list:
+        from vllm import SamplingParams
+
+        sp = SamplingParams(
+            n=n,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=self.max_tokens,
+            logprobs=self.top_logprobs,
+            repetition_penalty=1.05,
+        )
+        formatted = [self._format_prompt(p) for p in prompts]
+        outputs = self.llm.generate(formatted, sp, use_tqdm=True)
+        return [[self._extract_one(g) for g in o.outputs] for o in outputs]
 
     def precompute_and_cache(self, prompts: list, cache_dir: str,
                              test_cases_per_prompt: list = None,

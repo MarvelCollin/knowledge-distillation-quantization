@@ -29,6 +29,7 @@ show_menu() {
     echo "  2) Run training --offline    (skip cache build, use existing cache)"
     echo "  3) Run evaluation            (single checkpoint, val split)"
     echo "  4) Compare original | teacher | distilled + graph"
+    echo "  r) RFT gap-filling (Tahap B)  fill teacher-failed gaps, verified by unit tests"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
     echo "  5) View cached teacher responses"
@@ -68,15 +69,12 @@ run_cmd() {
     return $code
 }
 
-run_compare_eval() {
-    header
-    echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
-    echo ""
+# Collect compare-eval parameters into globals WITHOUT running anything.
+# Sets: CMP_SKIP_FLAG, CMP_NP, CMP_DIFFICULTY
+prompt_compare_params() {
     echo -e "  ${BOLD}Fixed eval config${NC} (paper-grade defaults):"
-    echo "    difficulty   : all"
     echo "    samples/prob : 5  (pass@5 standard)"
-    echo "    temperature  : 0.7"
-    echo "    top_p        : 0.95"
+    echo "    temperature  : 0.7   top_p : 0.95"
     echo "    chunk_size   : 10 student / 3 teacher   (scaled for 24576 budget)"
     echo "    max_tokens   : 24576  (paper-grade, target ~20% truncation)"
     echo ""
@@ -86,10 +84,10 @@ run_compare_eval() {
     echo ""
     echo -n "  Include teacher? (y/n) [default: y]: "
     read -r incl_teacher
-    local skip_flag=""
+    CMP_SKIP_FLAG=""
     if [ "$incl_teacher" = "n" ] || [ "$incl_teacher" = "N" ]; then
-        skip_flag="--skip-teacher"
-        echo -e "  ${YELLOW}→ Teacher SKIPPED. Eval will compare Student (original) vs Student (distilled) only.${NC}"
+        CMP_SKIP_FLAG="--skip-teacher"
+        echo -e "  ${YELLOW}→ Teacher SKIPPED. Will compare Student (original) vs Student (distilled) only.${NC}"
     else
         echo -e "  ${GREEN}→ Teacher INCLUDED. 3-way comparison.${NC}"
     fi
@@ -101,8 +99,8 @@ run_compare_eval() {
     echo "     full  entire test split        (~hours, most reliable)"
     echo ""
     echo -n "  num_problems [default: 100]: "
-    read -r np
-    [ -z "$np" ] && np=100
+    read -r CMP_NP
+    [ -z "$CMP_NP" ] && CMP_NP=100
     echo ""
     echo -e "  ${BOLD}difficulty${NC} — which levels to include (applied equally to all models)"
     echo -e "     ${GREEN}1${NC}  all              (easy + medium + hard)"
@@ -110,31 +108,106 @@ run_compare_eval() {
     echo ""
     echo -n "  difficulty [default: 1]: "
     read -r diff_choice
-    local difficulty="all"
+    CMP_DIFFICULTY="all"
     if [ "$diff_choice" = "2" ]; then
-        difficulty="easy,medium"
+        CMP_DIFFICULTY="easy,medium"
         echo -e "  ${YELLOW}→ Hard EXCLUDED. Remember to label results 'Easy+Medium' in any report.${NC}"
     fi
-    run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $np --difficulty $difficulty --num-samples 5 --temperature 0.7 --top-p 0.95 $skip_flag"
+}
+
+# Run compare-eval using already-collected CMP_* params (NO prompts).
+run_compare_with_params() {
+    run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.7 --top-p 0.95 $CMP_SKIP_FLAG"
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }
 
+# Standalone compare (menu option 4): ask, then run.
+run_compare_eval() {
+    header
+    echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
+    echo ""
+    prompt_compare_params
+    echo ""
+    run_compare_with_params
+}
+
+# Ask UP FRONT (before training runs) whether to auto-compare afterwards,
+# and if so collect all compare params now so nothing is asked mid-run.
+# Sets: COMPARE_AFTER (1/0) and CMP_* params.
+prompt_compare_after() {
+    echo -e "  ${BOLD}After training finishes, run compare eval automatically?${NC}"
+    echo "    (everything is asked now — training then compare run unattended)"
+    echo ""
+    echo -n "  Compare after training? (y/n) [default: y]: "
+    read -r run_cmp
+    if [ "$run_cmp" = "n" ] || [ "$run_cmp" = "N" ]; then
+        COMPARE_AFTER=0
+        echo -e "  ${YELLOW}→ Will NOT compare after training.${NC}"
+    else
+        COMPARE_AFTER=1
+        echo ""
+        echo -e "  ${CYAN}── Compare options (collected now, run after training) ──${NC}"
+        echo ""
+        prompt_compare_params
+    fi
+}
+
+# Run training, then auto-compare if it was requested up front (NO mid-run prompts).
 run_training_then_optionally_compare() {
     local train_cmd="$1"
     run_cmd_noprompt "$train_cmd"
     local code=$?
     echo ""
-    if [ $code -eq 0 ]; then
-        echo -n "  ${BOLD}Training complete!${NC} Run compare eval now? (y/n) [default: y]: "
-        read -r run_cmp
-        if [ "$run_cmp" != "n" ] && [ "$run_cmp" != "N" ]; then
-            echo ""
-            run_compare_eval
-            return
-        fi
+    if [ $code -ne 0 ]; then
+        echo -e "  ${RED}Training failed — skipping compare.${NC}"
+        echo ""
+        read -rp "Press Enter to return to menu..."
+        return
     fi
+    if [ "$COMPARE_AFTER" = "1" ]; then
+        echo -e "  ${GREEN}✓ Training complete — starting pre-configured compare eval...${NC}"
+        echo ""
+        run_compare_with_params
+        return
+    fi
+    echo -e "  ${GREEN}✓ Training complete. (compare skipped per your choice)${NC}"
     echo ""
     read -rp "Press Enter to return to menu..."
+}
+
+run_rft() {
+    header
+    local cache_dir
+    cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
+    cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
+    echo -e "  ${BOLD}RFT gap-filling (Tahap B)${NC}"
+    echo "    Samples student + teacher (high temp) on problems the teacher could not"
+    echo "    solve, keeps ONLY solutions that pass ALL unit tests, and writes a combined"
+    echo "    drop-in cache. Lets the student learn problems the teacher itself fails."
+    echo ""
+    if [ ! -d "outputs/final" ]; then
+        echo -e "  ${RED}No student checkpoint at outputs/final — run training (Tahap A) first.${NC}"
+        echo ""
+        read -rp "Press Enter to return to menu..."
+        return
+    fi
+    local REC=1000
+    if show_cache_status "$cache_dir"; then
+        REC=$((CACHE_MAX_IDX + 1))
+    fi
+    echo ""
+    echo -n "  max_samples (problems to consider) [default: ${REC}]: "
+    read -r ns; [ -z "$ns" ] && ns=$REC
+    echo -n "  teacher samples per gap     [default: 4]: "
+    read -r ts; [ -z "$ts" ] && ts=4
+    echo -n "  student samples per gap     [default: 8]: "
+    read -r ss; [ -z "$ss" ] && ss=8
+    echo -n "  out cache dir               [default: cache/combined_r1_7b]: "
+    read -r oc; [ -z "$oc" ] && oc=cache/combined_r1_7b
+    echo ""
+    run_cmd "sudo docker compose run --rm train python rft_generate.py --max-samples $ns --teacher-samples $ts --student-samples $ss --out-cache $oc"
+    echo -e "  Combined cache → ${GREEN}${oc}${NC}"
+    echo -e "  To train on it: set ${BOLD}data.teacher_cache_dir: ${oc}${NC} in config/config.yaml, then run offline training (option 2)."
 }
 
 view_cache() {
@@ -292,6 +365,9 @@ while true; do
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns
             [ -z "$ns" ] && ns=$REC_SAMPLES
+            echo ""
+            prompt_compare_after
+            echo ""
             run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --max-samples $ns"
             ;;
         2)
@@ -313,6 +389,9 @@ while true; do
             echo -n "  max_samples [default: ${REC_SAMPLES}]: "
             read -r ns
             [ -z "$ns" ] && ns=$REC_SAMPLES
+            echo ""
+            prompt_compare_after
+            echo ""
             run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --offline --max-samples $ns"
             ;;
         3)
@@ -333,6 +412,9 @@ while true; do
             ;;
         4)
             run_compare_eval
+            ;;
+        r|R)
+            run_rft
             ;;
         5)
             view_cache
