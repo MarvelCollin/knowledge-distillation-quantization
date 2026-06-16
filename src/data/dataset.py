@@ -189,18 +189,12 @@ class CodingDataset(Dataset):
 
         combined = prompt_ids + response_ids
         attn = [1] * len(combined)
-        pad_id = self.tokenizer.pad_token_id
-        if len(combined) < self.max_length:
-            pad_len = self.max_length - len(combined)
-            combined = combined + [pad_id] * pad_len
-            attn = attn + [0] * pad_len
 
         input_ids = torch.tensor(combined, dtype=torch.long)
         attention_mask = torch.tensor(attn, dtype=torch.long)
 
         labels = input_ids.clone()
         labels[:prompt_length] = -100
-        labels[attention_mask == 0] = -100
 
         return {
             "input_ids": input_ids,

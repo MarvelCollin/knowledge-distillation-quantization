@@ -25,7 +25,7 @@ show_menu() {
     echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
-    echo "  1) Run training              (build/refresh teacher cache, then train)"
+    echo "  1) Run training              (build/refresh teacher cache, then train, then compare)"
     echo "  2) Run training --offline    (skip cache build, use existing cache)"
     echo "  3) Run evaluation            (single checkpoint, val split)"
     echo "  4) Compare original | teacher | distilled + graph"
@@ -67,6 +67,21 @@ run_cmd() {
     echo ""
     read -rp "Press Enter to return to menu..."
     return $code
+}
+
+# Ask for the sudo password ONCE up front and refresh it in the background, so a long
+# multi-step pipeline never stops to re-ask mid-run (sudo's timestamp would otherwise
+# expire between the train / RFT / retrain / compare steps).
+keep_sudo_alive() {
+    echo -e "  ${CYAN}Caching sudo credentials (asked once now, kept alive for the whole run)...${NC}"
+    sudo -v || return 1
+    ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
+    SUDO_KEEPALIVE_PID=$!
+}
+
+stop_sudo_alive() {
+    [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
+    SUDO_KEEPALIVE_PID=""
 }
 
 # Collect compare-eval parameters into globals WITHOUT running anything.
@@ -342,7 +357,7 @@ while true; do
             cfg_temp=$(grep 'distill_temperature' config/config.yaml | awk '{print $2}')
             cfg_alen=$(grep 'max_length' config/config.yaml | awk '{print $2}')
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
-            echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train)"
+            echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train, then compare)"
             echo ""
             echo -e "  ${BOLD}Fixed config${NC} (paper-grade defaults, edit config/config.yaml to change):"
             echo "    epochs              : ${cfg_epochs}     (Hinton 2015 / DistilBERT standard)"
@@ -368,7 +383,9 @@ while true; do
             echo ""
             prompt_compare_after
             echo ""
+            keep_sudo_alive
             run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --max-samples $ns"
+            stop_sudo_alive
             ;;
         2)
             header
@@ -392,7 +409,9 @@ while true; do
             echo ""
             prompt_compare_after
             echo ""
+            keep_sudo_alive
             run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --offline --max-samples $ns"
+            stop_sudo_alive
             ;;
         3)
             header

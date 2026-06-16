@@ -3,19 +3,24 @@ import torch.nn.functional as F
 
 
 def simulate_int8_quantization(tensor: torch.Tensor) -> torch.Tensor:
-    min_val = tensor.min(dim=-1, keepdim=True).values
-    max_val = tensor.max(dim=-1, keepdim=True).values
-    scale = (max_val - min_val) / 255.0
-    scale = scale.clamp(min=1e-8)
-    quantized = torch.round((tensor - min_val) / scale).clamp(0, 255)
-    return quantized * scale + min_val
+    min_val = tensor.amin(dim=-1, keepdim=True)
+    max_val = tensor.amax(dim=-1, keepdim=True)
+    scale = ((max_val - min_val) / 255.0).clamp(min=1e-8)
+    q = tensor.sub(min_val)
+    q.div_(scale).round_().clamp_(0, 255).mul_(scale).add_(min_val)
+    return q
 
 
 def compute_qead_weights(logits: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
-    logits_fp = logits.float().detach()
-    logits_q = simulate_int8_quantization(logits_fp)
-    error = torch.norm(logits_fp - logits_q, p=2, dim=-1)
-    error = error * response_mask.float()
+    batch, seq_len, vocab = logits.shape
+    flat_logits = logits.detach().reshape(-1, vocab)
+    idx = response_mask.reshape(-1).nonzero(as_tuple=True)[0]
+    rows = flat_logits.index_select(0, idx).float()
+    rows_q = simulate_int8_quantization(rows)
+    row_error = torch.norm(rows.sub_(rows_q), p=2, dim=-1)
+    error = torch.zeros(batch * seq_len, device=logits.device)
+    error[idx] = row_error
+    error = error.reshape(batch, seq_len)
     row_sums = error.sum(dim=-1, keepdim=True).clamp(min=1e-8)
     return error / row_sums
 

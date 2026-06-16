@@ -11,7 +11,7 @@ student:
   model_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 teacher:
   local_model_path: cache/teacher-model-r1-7b
-  max_tokens: 8192
+  max_tokens: 9600
   temperature: 0.6
   top_p: 0.95
   top_logprobs: 20

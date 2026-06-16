@@ -134,6 +134,8 @@ def main():
                         help="Override training.learning_rate from config.")
     parser.add_argument("--seed", type=int, default=None,
                         help="Override training.seed for multi-seed runs.")
+    parser.add_argument("--cache-dir", default=None,
+                        help="Override data.teacher_cache_dir (e.g. an RFT combined cache).")
     args = parser.parse_args()
 
     load_dotenv()
@@ -147,6 +149,8 @@ def main():
         config["training"]["learning_rate"] = args.lr
     if args.seed is not None:
         config["training"]["seed"] = args.seed
+    if args.cache_dir is not None:
+        config["data"]["teacher_cache_dir"] = args.cache_dir
 
     seed = config["training"].get("seed", 42)
     random.seed(seed)
@@ -298,7 +302,6 @@ def main():
     distill_temp = config["training"]["distill_temperature"]
     grad_accum = config["training"]["gradient_accumulation_steps"]
     max_grad_norm = config["training"]["max_grad_norm"]
-    max_length = config["student"]["max_length"]
     eval_steps = config["training"]["eval_steps"]
     select_problems = config["training"]["select_problems"]
     select_max_new_tokens = config["training"]["select_max_new_tokens"]
@@ -336,14 +339,15 @@ def main():
             sample_idxs = batch["idx"]
 
             student_logits = student(input_ids, attention_mask)
+            seq_len = student_logits.size(1)
 
             response_mask = labels != -100
             predict_mask = torch.zeros_like(response_mask)
             predict_mask[:, :-1] = response_mask[:, 1:]
             qead_weights = compute_qead_weights(student_logits, predict_mask)
 
-            teacher_ids = torch.zeros(len(sample_idxs), max_length, topk, dtype=torch.long, device=device)
-            teacher_probs = torch.zeros(len(sample_idxs), max_length, topk, device=device)
+            teacher_ids = torch.zeros(len(sample_idxs), seq_len, topk, dtype=torch.long, device=device)
+            teacher_probs = torch.zeros(len(sample_idxs), seq_len, topk, device=device)
 
             for i in range(len(sample_idxs)):
                 local_idx = sample_idxs[i].item()
@@ -354,7 +358,7 @@ def main():
                 ids_full, probs_full = entry
                 pl = prompt_lengths[i].item()
                 dist_start = pl - 1
-                aligned_len = min(ids_full.size(0), max_length - dist_start)
+                aligned_len = min(ids_full.size(0), seq_len - dist_start)
                 if aligned_len <= 0:
                     continue
                 teacher_ids[i, dist_start : dist_start + aligned_len] = ids_full[:aligned_len].to(device)
