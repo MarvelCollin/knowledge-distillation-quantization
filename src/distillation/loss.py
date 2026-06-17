@@ -45,8 +45,9 @@ def skew_kld_loss(
     skew_lambda,
     temperature: float,
 ) -> torch.Tensor:
-    student_logprobs = F.log_softmax(student_logits.float() / temperature, dim=-1)
-    student_at = torch.gather(student_logprobs, -1, teacher_ids).exp()
+    scaled = student_logits / temperature
+    log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
+    student_at = (torch.gather(scaled, -1, teacher_ids).float() - log_z).exp()
 
     if torch.is_tensor(skew_lambda) and skew_lambda.dim() == 1:
         lam = skew_lambda.view(-1, 1, 1)
@@ -70,23 +71,24 @@ def adaptive_skew_lambda(
     temperature: float,
 ) -> torch.Tensor:
     with torch.no_grad():
-        student_logprobs = F.log_softmax(student_logits.float() / temperature, dim=-1)
-        student_at = torch.gather(student_logprobs, -1, teacher_ids)
+        scaled = student_logits / temperature
+        log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
+        student_at = torch.gather(scaled, -1, teacher_ids).float() - log_z
         safe_teacher = teacher_probs.clamp(min=1e-10)
         per_token_kld = (teacher_probs * (safe_teacher.log() - student_at)).sum(dim=-1)
         w_sum = qead_weights.sum(dim=-1).clamp(min=1e-8)
         per_sample_kld = (qead_weights * per_token_kld).sum(dim=-1) / w_sum
-        scaled = torch.tanh(per_sample_kld / 4.0)
-        lam = base_lambda + (max_lambda - base_lambda) * scaled
+        gate = torch.tanh(per_sample_kld / 4.0)
+        lam = base_lambda + (max_lambda - base_lambda) * gate
         return lam.clamp(min=base_lambda, max=max_lambda)
 
 
 def task_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = labels[..., 1:].contiguous()
+    shift_labels = torch.full_like(labels, -100)
+    shift_labels[..., :-1] = labels[..., 1:]
     return F.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
+        logits.reshape(-1, logits.size(-1)),
+        shift_labels.reshape(-1),
         ignore_index=-100,
     )
 
