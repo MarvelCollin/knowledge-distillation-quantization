@@ -33,12 +33,16 @@ class LocalTeacherModel:
         top_p: float = 0.95,
         gpu_memory_utilization: float = 0.85,
         max_model_len: int = 10240,
+        enforce_eager: bool = False,
+        enable_chunked_prefill: bool = False,
+        max_num_batched_tokens: int = None,
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
         self.top_logprobs = top_logprobs
         self.student_tokenizer = student_tokenizer
+        self.max_model_len = max_model_len
 
         from vllm import LLM, SamplingParams
 
@@ -47,21 +51,25 @@ class LocalTeacherModel:
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-        self.llm = LLM(
+        llm_kwargs = dict(
             model=model_path,
             dtype="bfloat16",
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             trust_remote_code=True,
-            enforce_eager=False,
+            enforce_eager=enforce_eager,
         )
+        if enable_chunked_prefill:
+            llm_kwargs["enable_chunked_prefill"] = True
+            if max_num_batched_tokens is not None:
+                llm_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        self.llm = LLM(**llm_kwargs)
 
         self.sampling_params = SamplingParams(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             logprobs=top_logprobs,
-            repetition_penalty=1.05,
         )
 
         print(f"  vLLM teacher loaded.  GPU used (nvidia-smi): {_gpu_mem_used_gb():.1f} GB")
@@ -80,13 +88,30 @@ class LocalTeacherModel:
     def _extract_result(self, vllm_output) -> dict:
         return self._extract_one(vllm_output.outputs[0])
 
-    def _extract_one(self, gen) -> dict:
-        token_ids = list(gen.token_ids)
-        logprobs_list = gen.logprobs or []
-
+    def _topk_to_student(self, lp_dict) -> tuple:
         student_vocab = (
             self.student_tokenizer.vocab_size if self.student_tokenizer is not None else 0
         )
+        top_k_dict = {}
+        student_ids = []
+        student_vals = []
+        if lp_dict is not None:
+            for tok_id, lp_obj in lp_dict.items():
+                val_f = float(lp_obj.logprob)
+                tok_str = self.tokenizer.decode([int(tok_id)])
+                top_k_dict[tok_str] = val_f
+
+                if self.student_tokenizer is None or not tok_str:
+                    continue
+                re_ids = self.student_tokenizer.encode(tok_str, add_special_tokens=False)
+                if len(re_ids) == 1 and 0 <= re_ids[0] < student_vocab:
+                    student_ids.append(re_ids[0])
+                    student_vals.append(val_f)
+        return top_k_dict, student_ids, student_vals
+
+    def _extract_one(self, gen) -> dict:
+        token_ids = list(gen.token_ids)
+        logprobs_list = gen.logprobs or []
 
         tokens = []
         logprobs_per_token = []
@@ -94,25 +119,8 @@ class LocalTeacherModel:
         top_k_vals_per_token = []
 
         for t_id, lp_dict in zip(token_ids, logprobs_list):
-            token = self.tokenizer.decode([t_id])
-            tokens.append(token)
-
-            top_k_dict = {}
-            student_ids = []
-            student_vals = []
-            if lp_dict is not None:
-                for tok_id, lp_obj in lp_dict.items():
-                    val_f = float(lp_obj.logprob)
-                    tok_str = self.tokenizer.decode([int(tok_id)])
-                    top_k_dict[tok_str] = val_f
-
-                    if self.student_tokenizer is None or not tok_str:
-                        continue
-                    re_ids = self.student_tokenizer.encode(tok_str, add_special_tokens=False)
-                    if len(re_ids) == 1 and 0 <= re_ids[0] < student_vocab:
-                        student_ids.append(re_ids[0])
-                        student_vals.append(val_f)
-
+            tokens.append(self.tokenizer.decode([t_id]))
+            top_k_dict, student_ids, student_vals = self._topk_to_student(lp_dict)
             logprobs_per_token.append(top_k_dict)
             top_k_ids_per_token.append(student_ids)
             top_k_vals_per_token.append(student_vals)
@@ -251,6 +259,78 @@ class LocalTeacherModel:
             total_min = (time.time() - total_start) / 60
             print(f"\n  Cache build complete in {total_min:.1f} min: "
                   f"{pass_count}/{tested} pass all tests ({rate:.1%}).")
+
+    def _rescore_one(self, full_token_ids: list, prompt_logprobs: list, prompt_len: int) -> dict:
+        tokens = []
+        logprobs_per_token = []
+        top_k_ids_per_token = []
+        top_k_vals_per_token = []
+        for pos in range(prompt_len, len(full_token_ids)):
+            tokens.append(self.tokenizer.decode([full_token_ids[pos]]))
+            lp_dict = prompt_logprobs[pos] if pos < len(prompt_logprobs) else None
+            top_k_dict, student_ids, student_vals = self._topk_to_student(lp_dict)
+            logprobs_per_token.append(top_k_dict)
+            top_k_ids_per_token.append(student_ids)
+            top_k_vals_per_token.append(student_vals)
+        text = self.tokenizer.decode(full_token_ids[prompt_len:], skip_special_tokens=True)
+        result = {"text": text, "tokens": tokens, "logprobs": logprobs_per_token}
+        if self.student_tokenizer is not None:
+            result["top_k_ids"] = top_k_ids_per_token
+            result["top_k_vals"] = top_k_vals_per_token
+        return result
+
+    def rescore_and_cache(self, src_cache_dir: str, dst_cache_dir: str, chunk_size: int = 8) -> None:
+        from vllm import SamplingParams
+
+        src = Path(src_cache_dir)
+        dst = Path(dst_cache_dir)
+        dst.mkdir(parents=True, exist_ok=True)
+
+        files = sorted(src.glob("*.json"), key=lambda p: int(p.stem) if p.stem.isdigit() else 1 << 30)
+        pending = []
+        for f in files:
+            d = json.loads(f.read_text())
+            if d.get("prompt") and d.get("text") and d.get("tokens"):
+                pending.append((int(f.stem), d))
+
+        print(f"Rescoring {len(pending)} cached trajectories: {src_cache_dir} -> {dst_cache_dir}")
+        print(f"  prompt_logprobs={self.top_logprobs}  temperature=1.0  top_p=1.0  (true teacher distribution)")
+
+        score_params = SamplingParams(
+            temperature=1.0, top_p=1.0, max_tokens=1, prompt_logprobs=self.top_logprobs,
+        )
+        cap = self.max_model_len - 1
+        total_start = time.time()
+
+        for chunk_start in range(0, len(pending), chunk_size):
+            chunk = pending[chunk_start:chunk_start + chunk_size]
+            token_prompts = []
+            metas = []
+            for idx, d in chunk:
+                p_ids = self.tokenizer(d["prompt"], add_special_tokens=False).input_ids
+                r_ids = self.tokenizer(d["text"], add_special_tokens=False).input_ids
+                full_ids = (p_ids + r_ids)[:cap]
+                token_prompts.append({"prompt_token_ids": full_ids})
+                metas.append((idx, d, len(p_ids)))
+
+            outputs = self.llm.generate(token_prompts, score_params, use_tqdm=False)
+
+            for (idx, d, prompt_len), out in zip(metas, outputs):
+                result = self._rescore_one(out.prompt_token_ids, out.prompt_logprobs or [], prompt_len)
+                payload = {"prompt": d["prompt"], "max_tokens": d.get("max_tokens", self.max_tokens), **result}
+                if d.get("test_total") is not None:
+                    payload["test_passed"] = d.get("test_passed")
+                    payload["test_total"] = d.get("test_total")
+                with open(dst / f"{idx}.json", "w") as fh:
+                    json.dump(payload, fh)
+
+            done = min(chunk_start + chunk_size, len(pending))
+            elapsed = time.time() - total_start
+            eta = elapsed / done * (len(pending) - done)
+            eta_m, eta_s = divmod(int(eta), 60)
+            print(f"  rescored {done}/{len(pending)}  ({elapsed / done:.2f}s/problem)  ETA {eta_m}m {eta_s:02d}s  GPU {_gpu_mem_used_gb():.1f}GB")
+
+        print(f"\n  Rescore complete in {(time.time() - total_start) / 60:.1f} min -> {dst_cache_dir}")
 
     def shutdown(self) -> None:
         from vllm.distributed.parallel_state import (
