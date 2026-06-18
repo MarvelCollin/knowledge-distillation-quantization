@@ -92,6 +92,8 @@ prompt_compare_params() {
     echo "    temperature  : 0.7   top_p : 0.95"
     echo "    chunk_size   : 10 student / 3 teacher   (scaled for 24576 budget)"
     echo "    max_tokens   : 24576  (paper-grade, target ~20% truncation)"
+    echo "    seed         : 1234  (fixed → pass@5 reproducible run-to-run)"
+    echo "    reuse        : teacher + original cached & reused; only distilled re-runs"
     echo ""
     echo -e "  ${BOLD}Include teacher in comparison?${NC}"
     echo -e "    ${GREEN}y${NC}  ALL 3 models (paper-grade comparison, ~3-4.5h total)"
@@ -130,8 +132,35 @@ prompt_compare_params() {
     fi
 }
 
+compare_cache_status() {
+    [ -d outputs/eval/intermediate ] || { echo -e "  ${YELLOW}No cached evals yet — all models will run.${NC}"; echo ""; return 0; }
+    echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}, pass@5:"
+    python3 - "$CMP_NP" "$CMP_DIFFICULTY" <<'PY'
+import json, os, sys
+np = int(sys.argv[1]); diff = sys.argv[2]
+checks = [("Student (original)", "Student_original.json"),
+          ("Teacher (R1-Distill-Qwen-7B)", "Teacher_R1-Distill-Qwen-7B.json")]
+d = "outputs/eval/intermediate"
+for label, fn in checks:
+    p = os.path.join(d, fn)
+    reused = False
+    if os.path.exists(p):
+        try:
+            c = json.load(open(p))
+            reused = (c.get("num_problems") == np and c.get("difficulty") == diff
+                      and c.get("num_samples") == 5 and c.get("k") == 5
+                      and c.get("temperature") == 0.7 and c.get("top_p") == 0.95)
+        except Exception:
+            reused = False
+    print(f"    {label:<32} {'REUSED (cached, skipped)' if reused else 'will RUN'}")
+print(f"    {'Student (distilled)':<32} always RUN (new checkpoint)")
+PY
+    echo ""
+}
+
 # Run compare-eval using already-collected CMP_* params (NO prompts).
 run_compare_with_params() {
+    compare_cache_status
     run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.7 --top-p 0.95 $CMP_SKIP_FLAG"
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }

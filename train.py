@@ -26,6 +26,7 @@ from src.data.dataset import PROMPT_TEMPLATE, create_datasets, load_problems
 from src.distillation.loss import (
     adaptive_skew_lambda,
     build_teacher_topk,
+    compute_loss_chunked_backward,
     compute_total_loss,
 )
 from src.distillation.qead import compute_qead_weights, teacher_confidence_weights
@@ -166,6 +167,12 @@ def main():
           f"  epochs={config['training']['num_epochs']}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        _dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+        _total_mem = torch.cuda.get_device_properties(_dev_idx).total_memory
+        _cap_frac = min(22.0 * 1024 ** 3 / _total_mem, 1.0)
+        torch.cuda.set_per_process_memory_fraction(_cap_frac, _dev_idx)
+        print(f"  CUDA memory cap  : 22 GB / {_total_mem / 1024**3:.1f} GB (fraction={_cap_frac:.3f})")
     output_dir = Path(config["training"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -380,11 +387,18 @@ def main():
             else:
                 effective_lambda = skew_lambda
 
-            total, l_distill, l_task = compute_total_loss(
-                student_logits, teacher_ids, teacher_probs, qead_weights, labels, alpha, effective_lambda, distill_temp
+            # Chunked-over-sequence loss + backward: keeps the (chunk, vocab) softmax
+            # working set small so peak VRAM stays under the 22 GB cap even on the
+            # longest (max_length) sequences at the end of the curriculum.
+            total_val, distill_val, task_val = compute_loss_chunked_backward(
+                student_logits, teacher_ids, teacher_probs, qead_weights, labels,
+                alpha, effective_lambda, distill_temp, loss_scale=1.0 / grad_accum,
             )
 
-            (total / grad_accum).backward()
+            # Free large GPU tensors immediately to keep VRAM below 22 GB cap.
+            del student_logits, teacher_ids, teacher_probs, qead_weights, valid_teacher
+            del effective_lambda, weight_sums
+            del response_mask, predict_mask
 
             samples_seen += len(sample_idxs)
             epoch_samples_seen += len(sample_idxs)
@@ -396,6 +410,9 @@ def main():
                 optimizer.zero_grad()
                 global_step += 1
 
+                if global_step % 50 == 0:
+                    torch.cuda.empty_cache()
+
                 if global_step % 10 == 0:
                     epoch_pct = epoch_samples_seen / max(n_train_samples, 1) * 100
                     total_pct = global_step / max(total_steps, 1) * 100
@@ -403,9 +420,9 @@ def main():
                         f"[ep {epoch + 1}/{config['training']['num_epochs']}] "
                         f"step={global_step}/{total_steps} ({total_pct:.0f}%) "
                         f"samples={epoch_samples_seen}/{n_train_samples} ({epoch_pct:.0f}% of epoch) "
-                        f"total={total.item():.4f} "
-                        f"distill={l_distill.item():.4f} "
-                        f"task={l_task.item():.4f}"
+                        f"total={total_val:.4f} "
+                        f"distill={distill_val:.4f} "
+                        f"task={task_val:.4f}"
                     )
 
                 if global_step % eval_steps == 0:

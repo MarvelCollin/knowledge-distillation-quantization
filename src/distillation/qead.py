@@ -11,15 +11,19 @@ def simulate_int8_quantization(tensor: torch.Tensor) -> torch.Tensor:
     return q
 
 
-def compute_qead_weights(logits: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+def compute_qead_weights(logits: torch.Tensor, response_mask: torch.Tensor, chunk_size: int = 512) -> torch.Tensor:
     batch, seq_len, vocab = logits.shape
     flat_logits = logits.detach().reshape(-1, vocab)
     idx = response_mask.reshape(-1).nonzero(as_tuple=True)[0]
-    rows = flat_logits.index_select(0, idx).float()
-    rows_q = simulate_int8_quantization(rows)
-    row_error = torch.norm(rows.sub_(rows_q), p=2, dim=-1)
     error = torch.zeros(batch * seq_len, device=logits.device)
-    error[idx] = row_error
+    # Process in chunks to avoid a single (seq_len, vocab) float32 allocation (~4-5 GB at
+    # max sequence length), which was causing CUDA OOM near the end of each epoch.
+    for start in range(0, len(idx), chunk_size):
+        chunk_idx = idx[start : start + chunk_size]
+        rows = flat_logits.index_select(0, chunk_idx).float()
+        rows_q = simulate_int8_quantization(rows)
+        error[chunk_idx] = torch.norm(rows.sub_(rows_q), p=2, dim=-1)
+        del rows, rows_q
     error = error.reshape(batch, seq_len)
     row_sums = error.sum(dim=-1, keepdim=True).clamp(min=1e-8)
     return error / row_sums

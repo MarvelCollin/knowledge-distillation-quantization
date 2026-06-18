@@ -192,6 +192,14 @@ def _load_intermediate(label: str, dataset_name: str) -> dict | None:
     return None
 
 
+def _model_fingerprint(model_path: str) -> str:
+    weights = Path(model_path) / "model.safetensors"
+    if weights.exists():
+        st = weights.stat()
+        return f"{model_path}:{int(st.st_mtime)}:{st.st_size}"
+    return model_path
+
+
 _FAILURE_CATEGORIES = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
 
 
@@ -254,7 +262,7 @@ def _dump_failure_report(label: str, results: list) -> None:
     print(f"  Detail report     : {out_path}")
 
 
-def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
+def _finalise(label: str, results: list, dataset_name: str, k: int, meta: dict | None = None) -> dict:
     tp = sum(r["passed"] for r in results)
     tt = sum(r["total"] for r in results)
     solved = sum(1 for r in results if r["solved"])
@@ -290,6 +298,8 @@ def _finalise(label: str, results: list, dataset_name: str, k: int) -> dict:
         "by_difficulty": by_difficulty,
         "per_problem": results,
     }
+    if meta:
+        summary.update(meta)
     print(f"\n  pass@1            : {pass1:.1%}")
     if k > 1:
         print(f"  pass@{k:<2}            : {passk:.1%}")
@@ -330,7 +340,7 @@ def _build_eval_prompts(problems: list, tokenizer) -> tuple[list, list]:
 
 def _budget_forced_generate(llm, prompts: list, signatures: list, num_samples: int,
                             temperature: float, top_p: float, max_new_tokens: int,
-                            think_ratio: float = 0.75) -> list:
+                            think_ratio: float = 0.75, seed: int = 1234) -> list:
     """Two-phase generation that guarantees a fenced code block even when the model
     over-thinks. Phase 1 generates reasoning capped at `think_ratio` of the budget and
     stops at </think>; phase 2 force-primes ```python (+ signature) and writes the
@@ -347,13 +357,13 @@ def _budget_forced_generate(llm, prompts: list, signatures: list, num_samples: i
 
     think_params = SamplingParams(
         temperature=temp, top_p=tp, max_tokens=think_budget, n=num_samples,
-        stop=[THINK_END_TAG], include_stop_str_in_output=True,
+        stop=[THINK_END_TAG], include_stop_str_in_output=True, seed=seed,
     )
     phase1 = llm.generate(prompts, think_params, use_tqdm=True)
 
     code_params = SamplingParams(
         temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
-        stop=["```"], include_stop_str_in_output=False,
+        stop=["```"], include_stop_str_in_output=False, seed=seed,
     )
     cont_prompts = []
     meta = []
@@ -381,12 +391,21 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    max_new_tokens: int, device, is_teacher: bool = False,
                    dataset_name: str = "", num_samples: int = 1,
                    temperature: float = 0.7, top_p: float = 0.95,
-                   k: int = 1) -> dict:
+                   k: int = 1, difficulty: str = "all", seed: int = 1234) -> dict:
+    cache_key = {
+        "num_problems": len(problems),
+        "num_samples": num_samples,
+        "k": k,
+        "difficulty": difficulty,
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "seed": seed,
+        "model_fingerprint": _model_fingerprint(model_path),
+    }
     cached = _load_intermediate(label, dataset_name)
-    if (cached and cached.get("num_problems") == len(problems)
-            and cached.get("num_samples", 1) == num_samples
-            and cached.get("k", 1) == k):
-        print(f"\n  Loaded cached results for: {label}")
+    if cached and all(cached.get(key) == val for key, val in cache_key.items()):
+        print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
         return cached
 
     from vllm import LLM, SamplingParams
@@ -452,6 +471,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
             chunk_grid = _budget_forced_generate(
                 llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
+                seed=seed,
             )
             for off, row in enumerate(chunk_grid):
                 gen_grid[chunk_start + off] = row
@@ -515,7 +535,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                     f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
                 )
 
-        summary = _finalise(label, results, dataset_name, k)
+        summary = _finalise(label, results, dataset_name, k, meta=cache_key)
 
     finally:
         print(f"  Cleaning up vLLM...")
@@ -688,6 +708,10 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=None,
                         help="k for pass@k (defaults to --num-samples)")
     parser.add_argument("--out", default="outputs/eval/comparison.png")
+    parser.add_argument("--seed", type=int, default=1234,
+                        help="Sampling seed for reproducible pass@k (static models give identical results each run)")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Ignore and clear cached per-model results, re-evaluating every model from scratch.")
     args = parser.parse_args()
     k = args.k if args.k is not None else args.num_samples
     if k > args.num_samples:
@@ -695,8 +719,10 @@ def main() -> None:
 
     load_dotenv()
 
-    for p in _INTERMEDIATE.glob("*.json"):
-        p.unlink()
+    if args.fresh:
+        for p in _INTERMEDIATE.glob("*.json"):
+            p.unlink()
+        print("  --fresh: cleared cached intermediate results — every model will be re-evaluated.")
 
     config = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -714,6 +740,7 @@ def main() -> None:
         problems, max_new_tokens, device, is_teacher=False,
         dataset_name=dataset_name,
         num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
+        difficulty=args.difficulty, seed=args.seed,
     ))
 
     if not args.skip_teacher:
@@ -722,6 +749,7 @@ def main() -> None:
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
+            difficulty=args.difficulty, seed=args.seed,
         ))
 
     distilled_path = args.distilled
@@ -736,6 +764,7 @@ def main() -> None:
             problems, max_new_tokens, device, is_teacher=False,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
+            difficulty=args.difficulty, seed=args.seed,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
