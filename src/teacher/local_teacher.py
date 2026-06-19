@@ -1,25 +1,14 @@
 import gc
 import json
-import subprocess
 import time
 from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer
 
-from src.utils.reasoning import SYSTEM_PROMPT, extract_code
 from src.evaluation.evaluator import run_test_cases
-
-
-def _gpu_mem_used_gb() -> float:
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip().splitlines()[0]
-        return int(out) / 1024.0
-    except Exception:
-        return 0.0
+from src.utils.gpu import gpu_used_gb
+from src.utils.reasoning import SYSTEM_PROMPT, extract_code
 
 
 class LocalTeacherModel:
@@ -72,7 +61,7 @@ class LocalTeacherModel:
             logprobs=top_logprobs,
         )
 
-        print(f"  vLLM teacher loaded.  GPU used (nvidia-smi): {_gpu_mem_used_gb():.1f} GB")
+        print(f"  vLLM teacher loaded.  GPU used (nvidia-smi): {gpu_used_gb():.1f} GB")
         if student_tokenizer is not None:
             print(f"  Student tokenizer wired for token-id top-k cache.")
 
@@ -250,7 +239,7 @@ class LocalTeacherModel:
                 f"({chunk_elapsed / len(chunk):.1f}s/prompt avg)  "
                 f"|  pass {pass_count}/{tested} ({rate:.1%})  "
                 f"|  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  "
-                f"|  GPU {_gpu_mem_used_gb():.1f}GB"
+                f"|  GPU {gpu_used_gb():.1f}GB"
             )
 
         if test_cases_per_prompt is not None:
@@ -328,7 +317,7 @@ class LocalTeacherModel:
             elapsed = time.time() - total_start
             eta = elapsed / done * (len(pending) - done)
             eta_m, eta_s = divmod(int(eta), 60)
-            print(f"  rescored {done}/{len(pending)}  ({elapsed / done:.2f}s/problem)  ETA {eta_m}m {eta_s:02d}s  GPU {_gpu_mem_used_gb():.1f}GB")
+            print(f"  rescored {done}/{len(pending)}  ({elapsed / done:.2f}s/problem)  ETA {eta_m}m {eta_s:02d}s  GPU {gpu_used_gb():.1f}GB")
 
         print(f"\n  Rescore complete in {(time.time() - total_start) / 60:.1f} min -> {dst_cache_dir}")
 
@@ -343,7 +332,7 @@ class LocalTeacherModel:
         del self.llm
         gc.collect()
         torch.cuda.empty_cache()
-        gpu_after = _gpu_mem_used_gb()
+        gpu_after = gpu_used_gb()
         print(f"  vLLM shutdown complete. GPU used (nvidia-smi): {gpu_after:.1f} GB")
 
     @staticmethod

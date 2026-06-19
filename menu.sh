@@ -161,7 +161,7 @@ PY
 # Run compare-eval using already-collected CMP_* params (NO prompts).
 run_compare_with_params() {
     compare_cache_status
-    run_cmd "sudo docker compose run --rm compare_eval python compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.7 --top-p 0.95 $CMP_SKIP_FLAG"
+    run_cmd "sudo docker compose run --rm compare_eval python scripts/compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.7 --top-p 0.95 $CMP_SKIP_FLAG"
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }
 
@@ -249,7 +249,7 @@ run_rft() {
     echo -n "  out cache dir               [default: cache/combined_r1_7b]: "
     read -r oc; [ -z "$oc" ] && oc=cache/combined_r1_7b
     echo ""
-    run_cmd "sudo docker compose run --rm train python rft_generate.py --max-samples $ns --teacher-samples $ts --student-samples $ss --out-cache $oc"
+    run_cmd "sudo docker compose run --rm train python scripts/rft_generate.py --max-samples $ns --teacher-samples $ts --student-samples $ss --out-cache $oc"
     echo -e "  Combined cache → ${GREEN}${oc}${NC}"
     echo -e "  To train on it: set ${BOLD}data.teacher_cache_dir: ${oc}${NC} in config/config.yaml, then run offline training (option 2)."
 }
@@ -413,7 +413,7 @@ while true; do
             prompt_compare_after
             echo ""
             keep_sudo_alive
-            run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --max-samples $ns"
+            run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py --max-samples $ns"
             stop_sudo_alive
             ;;
         2)
@@ -439,7 +439,7 @@ while true; do
             prompt_compare_after
             echo ""
             keep_sudo_alive
-            run_training_then_optionally_compare "sudo docker compose run --rm train python train.py --offline --max-samples $ns"
+            run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py --offline --max-samples $ns"
             stop_sudo_alive
             ;;
         3)
@@ -455,7 +455,7 @@ while true; do
                 read -r vb
                 vflag=""
                 [ "$vb" = "y" ] || [ "$vb" = "Y" ] && vflag=" --verbose"
-                run_cmd "sudo docker compose run --rm evaluate python evaluate.py --checkpoint /workspace/$ckpt$vflag"
+                run_cmd "sudo docker compose run --rm evaluate python scripts/evaluate.py --checkpoint /workspace/$ckpt$vflag"
             fi
             ;;
         4)

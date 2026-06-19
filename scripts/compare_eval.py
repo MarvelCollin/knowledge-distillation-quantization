@@ -4,100 +4,25 @@ Three-way evaluation: original student | teacher | distilled student.
 Uses the LeetCodeDataset *test* split — never seen during training.
 
 Usage (inside Docker):
-    python compare_eval.py
-    python compare_eval.py --distilled outputs/final
-    python compare_eval.py --num-problems 30 --skip-teacher
+    python scripts/compare_eval.py
+    python scripts/compare_eval.py --distilled outputs/final
+    python scripts/compare_eval.py --num-problems 30 --skip-teacher
 """
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import gc
 import json
 import math
 import re
-import subprocess
 import time
-import yaml
 import torch
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
-
-
-def _gpu_used_gb() -> float:
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip().splitlines()[0]
-        return int(out) / 1024.0
-    except Exception:
-        return 0.0
-
-
-def _gpu_total_gb() -> float:
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip().splitlines()[0]
-        return int(out) / 1024.0
-    except Exception:
-        return 24.0
-
-
-def _cleanup_vllm(llm_obj) -> None:
-    try:
-        from vllm.distributed.parallel_state import (
-            destroy_distributed_environment,
-            destroy_model_parallel,
-        )
-        destroy_model_parallel()
-        destroy_distributed_environment()
-    except Exception as exc:
-        print(f"  vLLM destroy_model_parallel warning: {exc}")
-
-    if llm_obj is not None and hasattr(llm_obj, "llm_engine"):
-        try:
-            engine = llm_obj.llm_engine
-            if hasattr(engine, "model_executor") and hasattr(engine.model_executor, "shutdown"):
-                engine.model_executor.shutdown()
-        except Exception as exc:
-            print(f"  vLLM model_executor.shutdown warning: {exc}")
-
-    if llm_obj is not None:
-        del llm_obj
-
-    for _ in range(3):
-        gc.collect()
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-    try:
-        torch.cuda.ipc_collect()
-    except Exception:
-        pass
-
-
-def _wait_for_gpu_freed(target_free_gb: float, max_retries: int = 5, retry_sleep: float = 3.0) -> float:
-    total_gb = _gpu_total_gb()
-    for retry in range(max_retries):
-        used_gb = _gpu_used_gb()
-        free_gb = total_gb - used_gb
-        if free_gb >= target_free_gb:
-            return free_gb
-        print(f"  GPU memory: {used_gb:.1f}GB used / {total_gb:.1f}GB total  (free {free_gb:.1f}GB, need {target_free_gb:.1f}GB)  retry {retry+1}/{max_retries}...")
-        for _ in range(3):
-            gc.collect()
-        torch.cuda.empty_cache()
-        try:
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-        time.sleep(retry_sleep)
-    return _gpu_total_gb() - _gpu_used_gb()
 
 from datasets import load_dataset
 from tqdm import tqdm
@@ -108,20 +33,16 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 
-from src.data.dataset import PROMPT_TEMPLATE, _extract_test_cases
+from src.config import load_config
+from src.data.dataset import _extract_test_cases
 from src.evaluation.evaluator import (
     run_test_cases,
-    extract_signature,
     failing_cases,
     write_failure_report,
 )
-from src.utils.reasoning import (
-    SYSTEM_PROMPT,
-    THINK_END_TAG,
-    build_signature_user_content,
-    extract_code,
-    extract_fn_name,
-)
+from src.evaluation.generation import build_eval_prompts, budget_forced_generate
+from src.utils.gpu import cleanup_vllm, gpu_total_gb, gpu_used_gb, wait_for_gpu_freed
+from src.utils.reasoning import extract_code
 
 
 _INTERMEDIATE = Path("outputs/eval/intermediate")
@@ -132,11 +53,6 @@ COLORS = {
     "Student (distilled)":           "#59a14f",
 }
 FALLBACK_COLOR = "#888888"
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> list:
@@ -319,74 +235,6 @@ def _finalise(label: str, results: list, dataset_name: str, k: int, meta: dict |
     return summary
 
 
-def _build_eval_prompts(problems: list, tokenizer) -> tuple[list, list]:
-    formatted = []
-    signatures = []
-    for prob in problems:
-        prompt = PROMPT_TEMPLATE.format(text=prob["text"])
-        expected = prob.get("entry_point") or extract_fn_name(prob["test_cases"])
-        signature = extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
-        user_content = build_signature_user_content(prompt, signature)
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-        fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        formatted.append(fmt)
-        signatures.append(signature)
-    return formatted, signatures
-
-
-def _budget_forced_generate(llm, prompts: list, signatures: list, num_samples: int,
-                            temperature: float, top_p: float, max_new_tokens: int,
-                            think_ratio: float = 0.75, seed: int = 1234) -> list:
-    """Two-phase generation that guarantees a fenced code block even when the model
-    over-thinks. Phase 1 generates reasoning capped at `think_ratio` of the budget and
-    stops at </think>; phase 2 force-primes ```python (+ signature) and writes the
-    solution with the remaining budget. Mirrors evaluate.py's generate_with_thinking_cap,
-    but batched for vLLM with n samples. Returns, per prompt, a list of
-    (final_text, truncated) tuples — one per sample."""
-    from vllm import SamplingParams
-
-    do_sample = num_samples > 1
-    temp = temperature if do_sample else 0.0
-    tp = top_p if do_sample else 1.0
-    think_budget = max(1, int(max_new_tokens * think_ratio))
-    code_budget = max(1, max_new_tokens - think_budget)
-
-    think_params = SamplingParams(
-        temperature=temp, top_p=tp, max_tokens=think_budget, n=num_samples,
-        stop=[THINK_END_TAG], include_stop_str_in_output=True, seed=seed,
-    )
-    phase1 = llm.generate(prompts, think_params, use_tqdm=True)
-
-    code_params = SamplingParams(
-        temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
-        stop=["```"], include_stop_str_in_output=False, seed=seed,
-    )
-    cont_prompts = []
-    meta = []
-    for i, out in enumerate(phase1):
-        sig = signatures[i] if i < len(signatures) else ""
-        for j, o in enumerate(out.outputs):
-            think_text = o.text
-            closed = think_text if THINK_END_TAG in think_text else think_text + "\n" + THINK_END_TAG
-            primer = "\n```python\n" + (f"{sig}\n    " if sig else "")
-            cont_prompts.append(prompts[i] + closed + primer)
-            meta.append((i, j, closed, primer))
-
-    phase2 = llm.generate(cont_prompts, code_params, use_tqdm=True)
-
-    grid = [[None] * num_samples for _ in range(len(prompts))]
-    for (i, j, closed, primer), out in zip(meta, phase2):
-        gen = out.outputs[0]
-        truncated = gen.finish_reason == "length"
-        final_text = closed + primer + gen.text + "\n```"
-        grid[i][j] = (final_text, truncated)
-    return grid
-
-
 def evaluate_model(label: str, model_path: str, problems: list,
                    max_new_tokens: int, device, is_teacher: bool = False,
                    dataset_name: str = "", num_samples: int = 1,
@@ -416,15 +264,15 @@ def evaluate_model(label: str, model_path: str, problems: list,
     print(f"  Model path: {model_path}")
     print(f"{'═' * 62}")
 
-    total_gb = _gpu_total_gb()
-    pre_used = _gpu_used_gb()
+    total_gb = gpu_total_gb()
+    pre_used = gpu_used_gb()
     print(f"  GPU before load: {pre_used:.1f}GB used / {total_gb:.1f}GB total")
 
     required_gb = 20.0
     free_gb = total_gb - pre_used
     if free_gb < required_gb:
         print(f"  WARNING: only {free_gb:.1f}GB free, need ≥{required_gb:.1f}GB. Forcing cleanup...")
-        free_gb = _wait_for_gpu_freed(target_free_gb=required_gb, max_retries=5, retry_sleep=3.0)
+        free_gb = wait_for_gpu_freed(target_free_gb=required_gb, max_retries=5, retry_sleep=3.0)
         if free_gb < required_gb:
             print(f"  ERROR: GPU still has only {free_gb:.1f}GB free after retries. Memory leak suspected.")
             raise RuntimeError(f"Insufficient GPU memory: need {required_gb:.1f}GB, have {free_gb:.1f}GB")
@@ -453,9 +301,9 @@ def evaluate_model(label: str, model_path: str, problems: list,
             enable_prefix_caching=True,
         )
 
-        formatted_prompts, signatures = _build_eval_prompts(problems, tokenizer)
+        formatted_prompts, signatures = build_eval_prompts(problems, tokenizer)
 
-        post_load = _gpu_used_gb()
+        post_load = gpu_used_gb()
         print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
 
         eval_chunk_size = 3 if is_teacher else 10
@@ -469,7 +317,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             chunk_idx = chunk_start // eval_chunk_size + 1
             chunk_t0 = time.time()
             print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
-            chunk_grid = _budget_forced_generate(
+            chunk_grid = budget_forced_generate(
                 llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
                 seed=seed,
             )
@@ -481,7 +329,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             eta_remaining = avg * (len(formatted_prompts) - done) * 1.05
             eta_m, eta_s = divmod(int(eta_remaining), 60)
             eta_h, eta_m = divmod(eta_m, 60)
-            print(f"    chunk done in {chunk_elapsed:.1f}s ({avg:.1f}s/prompt avg)  |  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  |  GPU {_gpu_used_gb():.1f}GB")
+            print(f"    chunk done in {chunk_elapsed:.1f}s ({avg:.1f}s/prompt avg)  |  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  |  GPU {gpu_used_gb():.1f}GB")
 
         print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
         eval_tasks = []
@@ -539,19 +387,19 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
     finally:
         print(f"  Cleaning up vLLM...")
-        _cleanup_vllm(llm)
+        cleanup_vllm(llm)
         llm = None
         del tokenizer
         for _ in range(3):
             gc.collect()
         torch.cuda.empty_cache()
         time.sleep(2)
-        post_cleanup = _gpu_used_gb()
+        post_cleanup = gpu_used_gb()
         print(f"  GPU after cleanup: {post_cleanup:.1f}GB used  (started at {pre_used:.1f}GB)")
         residual = post_cleanup - pre_used
         if residual > 1.0:
             print(f"  ⚠ Residual leak detected: +{residual:.1f}GB above baseline. Forcing extra cleanup...")
-            _wait_for_gpu_freed(target_free_gb=total_gb - pre_used - 1.0, max_retries=3, retry_sleep=2.0)
+            wait_for_gpu_freed(target_free_gb=total_gb - pre_used - 1.0, max_retries=3, retry_sleep=2.0)
 
     return summary
 

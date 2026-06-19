@@ -1,51 +1,19 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import json
-import yaml
 import torch
 import argparse
 
 from tqdm import tqdm
 
+from src.config import load_config
 from src.data.dataset import create_datasets
-from src.evaluation.evaluator import run_test_cases, extract_signature
+from src.evaluation.evaluator import run_test_cases
+from src.evaluation.generation import generate_student_solution
 from src.student.model import StudentModel
-from src.utils.reasoning import (
-    SYSTEM_PROMPT,
-    build_signature_user_content,
-    extract_code,
-    extract_fn_name,
-    generate_with_thinking_cap,
-)
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
-def generate_solution(student: StudentModel, prompt: str, test_cases: list,
-                      max_new_tokens: int, device: torch.device) -> str:
-    expected = extract_fn_name(test_cases)
-    signature = extract_signature(test_cases[0], expected) if test_cases else ""
-    user_content = build_signature_user_content(prompt, signature)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    fmt = student.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-    student.eval()
-    raw, _ = generate_with_thinking_cap(
-        student.model, student.tokenizer, fmt, max_new_tokens,
-        code_primer_signature=signature,
-        do_sample=False,
-    )
-    return extract_code(raw)
 
 
 def main():
@@ -79,9 +47,8 @@ def main():
         prompt = val_dataset.get_prompt(i)
         test_cases = val_dataset.get_test_cases(i)
 
-        generated_code = generate_solution(
-            student, prompt, test_cases,
-            config["evaluation"]["max_new_tokens"], device,
+        _, generated_code = generate_student_solution(
+            student, prompt, test_cases, config["evaluation"]["max_new_tokens"],
         )
         result = run_test_cases(generated_code, test_cases)
 

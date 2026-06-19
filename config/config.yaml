@@ -34,6 +34,6 @@ training:
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: false
-  select_problems: 10
+  select_problems: 30
   select_max_new_tokens: 6144
   warmup_steps: 30

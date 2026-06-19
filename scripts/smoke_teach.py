@@ -1,23 +1,18 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
 
 import torch
-import yaml
 from dotenv import load_dotenv
 
+from src.config import load_config
 from src.data.dataset import create_datasets
 from src.distillation.loss import build_teacher_topk
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 @torch.no_grad()

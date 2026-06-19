@@ -2,134 +2,36 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import argparse
 import gc
-import json
 import shutil
 import time
 
 import torch
-import yaml
 from dotenv import load_dotenv
 
+from src.config import load_config
 from src.data.dataset import PROMPT_TEMPLATE, load_problems
-from src.evaluation.evaluator import execute_assertion, extract_signature
+from src.distillation.rft import (
+    assemble_solution_text,
+    first_passing,
+    is_passing,
+    kd_payload,
+    persist,
+    read_entry,
+    sft_payload,
+    solves,
+)
+from src.evaluation.generation import generate_student_solution
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
-from src.utils.reasoning import (
-    SYSTEM_PROMPT,
-    THINK_END_TAG,
-    build_signature_user_content,
-    extract_code,
-    extract_fn_name,
-    generate_with_thinking_cap,
-)
 
 
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
-def is_passing(entry: dict) -> bool:
-    tp, tt = entry.get("test_passed"), entry.get("test_total")
-    return bool(tt) and tp == tt
-
-
-def read_entry(path: Path) -> dict | None:
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
-
-
-def passes_all(code: str, test_cases: list) -> bool:
-    if not code or not test_cases:
-        return False
-    for assertion in test_cases:
-        outcome, _ = execute_assertion(code, assertion)
-        if outcome != "pass":
-            return False
-    return True
-
-
-def tokenize_pieces(tokenizer, text: str) -> list:
-    ids = tokenizer.encode(text, add_special_tokens=False)
-    return [tokenizer.decode([i]) for i in ids]
-
-
-def teacher_payload(prompt: str, res: dict, n_tests: int, max_tokens: int) -> dict:
-    return {
-        "prompt": prompt,
-        "max_tokens": max_tokens,
-        "source": "rft_teacher",
-        "text": res["text"],
-        "tokens": res["tokens"],
-        "logprobs": res.get("logprobs", []),
-        "top_k_ids": res.get("top_k_ids"),
-        "top_k_vals": res.get("top_k_vals"),
-        "test_passed": n_tests,
-        "test_total": n_tests,
-    }
-
-
-def student_payload(tokenizer, prompt: str, raw: str, code: str, n_tests: int, max_tokens: int) -> dict:
-    if THINK_END_TAG in raw:
-        reasoning = raw.split(THINK_END_TAG)[0].rstrip()
-        text = f"{reasoning}\n{THINK_END_TAG}\n```python\n{code}\n```"
-    else:
-        text = f"```python\n{code}\n```"
-    return {
-        "prompt": prompt,
-        "max_tokens": max_tokens,
-        "source": "rft_student",
-        "text": text,
-        "tokens": tokenize_pieces(tokenizer, text),
-        "logprobs": [],
-        "top_k_ids": None,
-        "top_k_vals": None,
-        "test_passed": n_tests,
-        "test_total": n_tests,
-    }
-
-
-def sample_student_solution(student, prompt: str, test_cases: list,
-                            max_new_tokens: int, temperature: float, top_p: float) -> tuple:
-    expected = extract_fn_name(test_cases)
-    signature = extract_signature(test_cases[0], expected) if test_cases else ""
-    user_content = build_signature_user_content(prompt, signature)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    fmt = student.tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    raw, _ = generate_with_thinking_cap(
-        student.model, student.tokenizer, fmt, max_new_tokens,
-        code_primer_signature=signature,
-        do_sample=True, temperature=temperature, top_p=top_p,
-    )
-    return raw, extract_code(raw)
-
-
-def persist(out_cache: str, idx: int, payload: dict) -> None:
-    with open(Path(out_cache) / f"{idx}.json", "w") as f:
-        json.dump(payload, f)
-
-
-def first_passing(candidates: list, test_cases: list):
-    for res in candidates:
-        if passes_all(extract_code(res["text"]), test_cases):
-            return res
-    return None
-
-
-def seed_combined_cache(problems: list, src_cache: str, out_cache: str) -> list:
+def seed_combined_cache(problems, src_cache, out_cache):
     src = Path(src_cache)
     out = Path(out_cache)
     out.mkdir(parents=True, exist_ok=True)
@@ -155,7 +57,7 @@ def seed_combined_cache(problems: list, src_cache: str, out_cache: str) -> list:
     return gaps
 
 
-def run_teacher_phase(config, gaps, prompts, tests, args, out_cache) -> dict:
+def run_teacher_phase(config, gaps, prompts, tests, args, out_cache):
     from transformers import AutoTokenizer
 
     solved = {}
@@ -187,7 +89,7 @@ def run_teacher_phase(config, gaps, prompts, tests, args, out_cache) -> dict:
         for i, cands in zip(idxs, results):
             res = first_passing(cands, tests[i])
             if res is not None:
-                solved[i] = teacher_payload(prompts[i], res, len(tests[i]), config["teacher"]["max_tokens"])
+                solved[i] = kd_payload(prompts[i], res, len(tests[i]), config["teacher"]["max_tokens"])
                 persist(out_cache, i, solved[i])
         done = start + len(idxs)
         print(f"  teacher solved {len(solved)}/{done} gaps so far "
@@ -200,7 +102,7 @@ def run_teacher_phase(config, gaps, prompts, tests, args, out_cache) -> dict:
     return solved
 
 
-def run_student_phase(config, remaining, prompts, tests, args, device, out_cache) -> dict:
+def run_student_phase(config, remaining, prompts, tests, args, device, out_cache):
     solved = {}
     student = StudentModel(
         model_name=args.checkpoint,
@@ -213,13 +115,14 @@ def run_student_phase(config, remaining, prompts, tests, args, device, out_cache
     t0 = time.time()
     for n, i in enumerate(remaining, 1):
         for _ in range(args.student_samples):
-            raw, code = sample_student_solution(
-                student, prompts[i], tests[i],
-                args.max_new_tokens, args.temperature, args.top_p,
+            raw, code = generate_student_solution(
+                student, prompts[i], tests[i], args.max_new_tokens,
+                do_sample=True, temperature=args.temperature, top_p=args.top_p,
             )
-            if passes_all(code, tests[i]):
-                solved[i] = student_payload(tok, prompts[i], raw, code, len(tests[i]),
-                                            config["student"]["max_length"])
+            if solves(code, tests[i]):
+                text = assemble_solution_text(raw, code)
+                solved[i] = sft_payload(tok, prompts[i], text, len(tests[i]),
+                                        config["student"]["max_length"])
                 persist(out_cache, i, solved[i])
                 break
         if n % 10 == 0 or n == len(remaining):
@@ -235,25 +138,17 @@ def run_student_phase(config, remaining, prompts, tests, args, device, out_cache
 def main():
     parser = argparse.ArgumentParser(description="RFT gap-filling (Tahap B)")
     parser.add_argument("--config", default="config/config.yaml")
-    parser.add_argument("--checkpoint", default="outputs/final",
-                        help="Student checkpoint to sample candidates from.")
-    parser.add_argument("--max-samples", type=int, default=None,
-                        help="Problems to consider (defaults to config data.max_samples).")
-    parser.add_argument("--source-cache", default=None,
-                        help="Teacher cache to read passing entries / gaps from "
-                             "(defaults to config data.teacher_cache_dir).")
-    parser.add_argument("--out-cache", default="cache/combined_r1_7b",
-                        help="Combined drop-in cache to write (point training at this).")
+    parser.add_argument("--checkpoint", default="outputs/final")
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--source-cache", default=None)
+    parser.add_argument("--out-cache", default="cache/combined_r1_7b")
     parser.add_argument("--teacher-samples", type=int, default=4)
     parser.add_argument("--student-samples", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--max-new-tokens", type=int, default=2048,
-                        help="Student generation budget per candidate.")
-    parser.add_argument("--chunk-size", type=int, default=16,
-                        help="Teacher prompts per vLLM batch.")
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Cap number of gap problems (smoke test).")
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--chunk-size", type=int, default=16)
+    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skip-teacher", action="store_true")
     parser.add_argument("--skip-student", action="store_true")
     args = parser.parse_args()
@@ -265,9 +160,7 @@ def main():
 
     src_cache = args.source_cache or config["data"]["teacher_cache_dir"]
     if Path(args.out_cache).resolve() == Path(src_cache).resolve():
-        print("  ERROR: --out-cache must differ from the source teacher cache "
-              "(it would overwrite the originals).")
-        return
+        raise SystemExit("  ERROR: --out-cache must differ from the source teacher cache.")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print("═" * 60)
@@ -313,12 +206,11 @@ def main():
     print(f"  Filled by teacher     : {len(by_teacher)}")
     print(f"  Filled by student     : {len(by_student)}")
     print(f"  Still unsolved        : {len(gaps) - len(solved)}")
-    print(f"  Combined cache size   : {total_combined} problems "
-          f"({args.out_cache})")
+    print(f"  Combined cache size   : {total_combined} problems ({args.out_cache})")
     print("═" * 60)
-    print(f"\n  Next: train on the combined cache by setting")
-    print(f"        data.teacher_cache_dir: {args.out_cache}   in config/config.yaml")
-    print(f"        (or keep both dirs for an SFT vs KD vs KD+RFT ablation).")
+    print(f"\n  Train on it:")
+    print(f"    docker compose run --rm train python scripts/train.py --offline "
+          f"--cache-dir {args.out_cache} --max-samples {len(problems)}")
 
 
 if __name__ == "__main__":

@@ -2,12 +2,11 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import yaml
 import torch
 import argparse
 import random
@@ -33,12 +32,8 @@ from src.distillation.qead import compute_qead_weights, teacher_confidence_weigh
 from src.evaluation.evaluator import run_test_cases, failing_cases, write_failure_report
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
-from evaluate import generate_solution
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
+from src.config import load_config
+from src.evaluation.generation import generate_student_solution
 
 
 def seed_worker(worker_id: int) -> None:
@@ -89,7 +84,7 @@ def run_test_validation(student: StudentModel, val_dataset, device: torch.device
         test_cases = val_dataset.get_test_cases(i)
         code = ""
         try:
-            code = generate_solution(student, prompt, test_cases, max_new_tokens, device)
+            _, code = generate_student_solution(student, prompt, test_cases, max_new_tokens)
             r = run_test_cases(code, test_cases)
         except Exception as exc:
             print(f"  [test-val {i}] generation/exec error: {type(exc).__name__}: {exc}")
@@ -328,10 +323,20 @@ def main():
 
     global_step = 0
     samples_seen = 0
-    best_solve_rate = -1.0
-    best_val_loss = float("inf")
     train_start = time.time()
     student.model.gradient_checkpointing_enable()
+
+    base_stats = run_test_validation(
+        student, val_dataset, device,
+        num_problems=select_problems, max_new_tokens=select_max_new_tokens,
+        detail_path=output_dir / "train_details" / "step_00000_base.md",
+    )
+    best_solve_rate = base_stats["test_pass_rate"]
+    best_val_loss = run_validation(student, val_loader, device)
+    student.save(str(output_dir / "final"))
+    print(f"Baseline (untrained) selection: solve={best_solve_rate:.1%} "
+          f"({base_stats['problems_solved']}/{base_stats['problems_total']})  "
+          f"val_loss={best_val_loss:.4f}  → saved as initial best (floor).")
 
     for epoch in range(config["training"]["num_epochs"]):
         student.train()
@@ -387,12 +392,14 @@ def main():
             else:
                 effective_lambda = skew_lambda
 
+            sample_alpha = alpha if bool(valid_teacher.any()) else 0.0
+
             # Chunked-over-sequence loss + backward: keeps the (chunk, vocab) softmax
             # working set small so peak VRAM stays under the 22 GB cap even on the
             # longest (max_length) sequences at the end of the curriculum.
             total_val, distill_val, task_val = compute_loss_chunked_backward(
                 student_logits, teacher_ids, teacher_probs, qead_weights, labels,
-                alpha, effective_lambda, distill_temp, loss_scale=1.0 / grad_accum,
+                sample_alpha, effective_lambda, distill_temp, loss_scale=1.0 / grad_accum,
             )
 
             # Free large GPU tensors immediately to keep VRAM below 22 GB cap.
@@ -458,11 +465,8 @@ def main():
               f"best_solve: {best_solve_rate:.1%}")
         print()
 
-    if best_solve_rate < 0:
-        student.save(str(output_dir / "final"))
-        print("No selection eval ran during training — saved final-state checkpoint.")
-    else:
-        print(f"Training complete. Best solve_rate={best_solve_rate:.1%} (val_loss={best_val_loss:.4f}) saved at outputs/final.")
+    print(f"Training complete. Best solve_rate={best_solve_rate:.1%} (val_loss={best_val_loss:.4f}) "
+          f"saved at outputs/final — guaranteed >= base ({base_stats['test_pass_rate']:.1%}).")
 
     elapsed = time.time() - train_start
     hours = int(elapsed // 3600)
