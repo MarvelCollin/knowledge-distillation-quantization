@@ -1,6 +1,7 @@
 x-gpu-env: &gpu-env
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   TOKENIZERS_PARALLELISM: "false"
+  PYTHONUNBUFFERED: "1"
 
 x-gpu-deploy: &gpu-deploy
   resources:
