@@ -65,26 +65,33 @@ def budget_forced_generate(llm, prompts, signatures, num_samples,
     think_budget = max(1, int(max_new_tokens * think_ratio))
     code_budget = max(1, max_new_tokens - think_budget)
 
-    think_params = SamplingParams(
-        temperature=temp, top_p=tp, max_tokens=think_budget, n=num_samples,
-        stop=[THINK_END_TAG], include_stop_str_in_output=True, seed=seed,
-    )
-    phase1 = llm.generate(prompts, think_params, use_tqdm=True)
+    think_prompts = []
+    think_params = []
+    sample_index = []
+    for i, prompt in enumerate(prompts):
+        for j in range(num_samples):
+            think_prompts.append(prompt)
+            think_params.append(SamplingParams(
+                temperature=temp, top_p=tp, max_tokens=think_budget, n=1,
+                stop=[THINK_END_TAG], include_stop_str_in_output=True, seed=seed + j,
+            ))
+            sample_index.append((i, j))
+    phase1 = llm.generate(think_prompts, think_params, use_tqdm=True)
 
-    code_params = SamplingParams(
-        temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
-        stop=["```"], include_stop_str_in_output=False, seed=seed,
-    )
     cont_prompts = []
+    code_params = []
     meta = []
-    for i, out in enumerate(phase1):
+    for (i, j), out in zip(sample_index, phase1):
         sig = signatures[i] if i < len(signatures) else ""
-        for j, o in enumerate(out.outputs):
-            think_text = o.text
-            closed = think_text if THINK_END_TAG in think_text else think_text + "\n" + THINK_END_TAG
-            primer = "\n```python\n" + (f"{sig}\n    " if sig else "")
-            cont_prompts.append(prompts[i] + closed + primer)
-            meta.append((i, j, closed, primer))
+        think_text = out.outputs[0].text
+        closed = think_text if THINK_END_TAG in think_text else think_text + "\n" + THINK_END_TAG
+        primer = "\n```python\n" + (f"{sig}\n    " if sig else "")
+        cont_prompts.append(prompts[i] + closed + primer)
+        code_params.append(SamplingParams(
+            temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
+            stop=["```"], include_stop_str_in_output=False, seed=seed + j,
+        ))
+        meta.append((i, j, closed, primer))
 
     phase2 = llm.generate(cont_prompts, code_params, use_tqdm=True)
 

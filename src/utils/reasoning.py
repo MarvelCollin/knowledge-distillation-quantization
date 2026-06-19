@@ -118,13 +118,28 @@ class _SelfStripper(ast.NodeTransformer):
         return node
 
 
+def _largest_parseable_prefix(code: str) -> str:
+    lines = code.split('\n')
+    end = len(lines)
+    while end > 0:
+        candidate = '\n'.join(lines[:end])
+        try:
+            ast.parse(candidate)
+        except SyntaxError as exc:
+            nxt = (exc.lineno - 1) if exc.lineno else end - 1
+            end = nxt if 0 < nxt < end else end - 1
+            continue
+        return candidate.rstrip()
+    return ""
+
+
 def _unwrap_solution(code: str) -> str:
     if not code.strip():
         return code
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return code
+    code = _largest_parseable_prefix(code)
+    if not code:
+        return ""
+    tree = ast.parse(code)
 
     if not any(isinstance(n, ast.ClassDef) and n.name == "Solution" for n in tree.body):
         return code

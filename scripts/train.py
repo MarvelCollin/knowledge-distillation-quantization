@@ -132,7 +132,7 @@ def main():
     parser.add_argument("--seed", type=int, default=None,
                         help="Override training.seed for multi-seed runs.")
     parser.add_argument("--cache-dir", default=None,
-                        help="Override data.teacher_cache_dir (e.g. an RFT combined cache).")
+                        help="Override data.teacher_cache_dir.")
     args = parser.parse_args()
 
     load_dotenv()

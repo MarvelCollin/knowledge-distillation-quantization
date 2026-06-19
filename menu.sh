@@ -29,7 +29,6 @@ show_menu() {
     echo "  2) Run training --offline    (skip cache build, use existing cache)"
     echo "  3) Run evaluation            (single checkpoint, val split)"
     echo "  4) Compare original | teacher | distilled + graph"
-    echo "  r) RFT gap-filling (Tahap B)  fill teacher-failed gaps, verified by unit tests"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
     echo "  5) View cached teacher responses"
@@ -71,7 +70,7 @@ run_cmd() {
 
 # Ask for the sudo password ONCE up front and refresh it in the background, so a long
 # multi-step pipeline never stops to re-ask mid-run (sudo's timestamp would otherwise
-# expire between the train / RFT / retrain / compare steps).
+# expire between the train / retrain / compare steps).
 keep_sudo_alive() {
     echo -e "  ${CYAN}Caching sudo credentials (asked once now, kept alive for the whole run)...${NC}"
     sudo -v || return 1
@@ -217,41 +216,6 @@ run_training_then_optionally_compare() {
     echo -e "  ${GREEN}✓ Training complete. (compare skipped per your choice)${NC}"
     echo ""
     read -rp "Press Enter to return to menu..."
-}
-
-run_rft() {
-    header
-    local cache_dir
-    cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-    cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
-    echo -e "  ${BOLD}RFT gap-filling (Tahap B)${NC}"
-    echo "    Samples student + teacher (high temp) on problems the teacher could not"
-    echo "    solve, keeps ONLY solutions that pass ALL unit tests, and writes a combined"
-    echo "    drop-in cache. Lets the student learn problems the teacher itself fails."
-    echo ""
-    if [ ! -d "outputs/final" ]; then
-        echo -e "  ${RED}No student checkpoint at outputs/final — run training (Tahap A) first.${NC}"
-        echo ""
-        read -rp "Press Enter to return to menu..."
-        return
-    fi
-    local REC=1000
-    if show_cache_status "$cache_dir"; then
-        REC=$((CACHE_MAX_IDX + 1))
-    fi
-    echo ""
-    echo -n "  max_samples (problems to consider) [default: ${REC}]: "
-    read -r ns; [ -z "$ns" ] && ns=$REC
-    echo -n "  teacher samples per gap     [default: 4]: "
-    read -r ts; [ -z "$ts" ] && ts=4
-    echo -n "  student samples per gap     [default: 8]: "
-    read -r ss; [ -z "$ss" ] && ss=8
-    echo -n "  out cache dir               [default: cache/combined_r1_7b]: "
-    read -r oc; [ -z "$oc" ] && oc=cache/combined_r1_7b
-    echo ""
-    run_cmd "sudo docker compose run --rm train python scripts/rft_generate.py --max-samples $ns --teacher-samples $ts --student-samples $ss --out-cache $oc"
-    echo -e "  Combined cache → ${GREEN}${oc}${NC}"
-    echo -e "  To train on it: set ${BOLD}data.teacher_cache_dir: ${oc}${NC} in config/config.yaml, then run offline training (option 2)."
 }
 
 view_cache() {
@@ -460,9 +424,6 @@ while true; do
             ;;
         4)
             run_compare_eval
-            ;;
-        r|R)
-            run_rft
             ;;
         5)
             view_cache
