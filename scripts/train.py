@@ -210,7 +210,7 @@ def main():
     else:
         print("Offline mode: skipping teacher cache build. Using existing cache only.")
 
-    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir)
+    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir, rescore=True)
 
     student = StudentModel(
         model_name=config["student"]["model_name"],

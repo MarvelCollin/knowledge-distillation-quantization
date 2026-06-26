@@ -7,8 +7,8 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
-from src.utils.reasoning import SYSTEM_PROMPT, THINK_END_TAG, build_signature_user_content
-from src.evaluation.evaluator import extract_signature
+from src.utils.reasoning import SYSTEM_PROMPT, THINK_END_TAG, build_signature_user_content, extract_code
+from src.evaluation.evaluator import extract_signature, run_test_cases
 
 PROMPT_TEMPLATE = (
     "Write a solution in Python to solve the following problem.\n"
@@ -243,7 +243,57 @@ def load_problems(config: dict) -> list:
     return problems
 
 
-def create_datasets(config: dict, tokenizer, cache_dir: str) -> tuple:
+def _failed_cache_indices(cache_dir: str, num_problems: int) -> list:
+    pp = re.compile(rb'"test_passed":\s*(\d+)')
+    tt = re.compile(rb'"test_total":\s*(\d+)')
+    cache_path = Path(cache_dir)
+    failed = []
+    for i in range(num_problems):
+        f = cache_path / f"{i}.json"
+        if not f.exists():
+            continue
+        with open(f, "rb") as fh:
+            fh.seek(max(0, f.stat().st_size - 400))
+            tail = fh.read()
+        a, b = pp.search(tail), tt.search(tail)
+        if not (a and b and int(b.group(1)) > 0 and int(a.group(1)) == int(b.group(1))):
+            failed.append(i)
+    return failed
+
+
+def rescore_failed_cache(cache_dir: str, problems: list, apply: bool = True,
+                         sample: int = 0, seed: int = 0, max_workers: int = 16) -> tuple:
+    from concurrent.futures import ThreadPoolExecutor
+
+    cache_path = Path(cache_dir)
+    failed = _failed_cache_indices(cache_dir, len(problems))
+    total_failed = len(failed)
+    if sample > 0:
+        import random
+        random.seed(seed)
+        failed = random.sample(failed, min(sample, len(failed)))
+
+    def _recheck(i: int) -> bool:
+        f = cache_path / f"{i}.json"
+        d = json.loads(f.read_text())
+        code = extract_code(d.get("text", ""))
+        r = run_test_cases(code, problems[i]["test_cases"])
+        if r["total"] > 0 and r["passed"] == r["total"]:
+            if apply:
+                d["test_passed"] = r["total"]
+                d["test_total"] = r["total"]
+                f.write_text(json.dumps(d))
+            return True
+        return False
+
+    recovered = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for ok in ex.map(_recheck, failed):
+            recovered += int(ok)
+    return recovered, len(failed), total_failed
+
+
+def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False) -> tuple:
     max_length = config["student"]["max_length"]
     train_ratio = config["data"]["train_ratio"]
 
@@ -251,6 +301,10 @@ def create_datasets(config: dict, tokenizer, cache_dir: str) -> tuple:
         tokenizer.pad_token = tokenizer.eos_token
 
     problems = load_problems(config)
+    if rescore:
+        recovered, tested, total_failed = rescore_failed_cache(cache_dir, problems)
+        print(f"  Rescored teacher cache (pure KD — re-tests labels only, trajectories untouched): "
+              f"recovered {recovered}/{total_failed} previously-failed responses now passing.")
     teacher_responses = _load_passing_indices(cache_dir, len(problems))
 
     kept_indices = []

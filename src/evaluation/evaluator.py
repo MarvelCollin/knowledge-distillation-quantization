@@ -25,7 +25,9 @@ _LIMIT_BOOTSTRAP = (
 _LEETCODE_PREAMBLE = '''\
 from typing import *
 from collections import *
-import heapq, math, itertools, functools, bisect, string, re, random, operator, copy
+import collections, sys, heapq, math, itertools, functools, bisect, string, re, random, operator, copy
+from fractions import Fraction
+from decimal import Decimal
 from math import comb, perm, gcd, lcm, factorial, sqrt, isqrt, ceil, floor, inf, log, log2
 from itertools import combinations, permutations, product, accumulate, chain, count, groupby, pairwise
 from heapq import heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest

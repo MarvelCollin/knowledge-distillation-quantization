@@ -33,6 +33,7 @@ show_menu() {
     echo -e "  ${BOLD}Cache${NC}"
     echo "  5) View cached teacher responses"
     echo "  6) Reset teacher cache (delete all OR failed-only)"
+    echo "  r) Rescore failed cache (recover harness-fixed entries, CPU-only)"
     echo ""
     echo -e "  ${BOLD}Docker${NC}"
     echo "  7) Build Docker image"
@@ -526,6 +527,29 @@ PYEOF
                         echo -e "  Cancelled."
                         ;;
                 esac
+                echo ""
+                read -rp "Press Enter to return to menu..."
+            fi
+            ;;
+        r|R)
+            header
+            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
+            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
+            echo -e "  ${BOLD}Rescore failed teacher cache${NC} (${cache_dir})"
+            echo ""
+            echo -e "  Re-runs the unit tests on FAILED cached trajectories with the current"
+            echo -e "  harness and marks any that now PASS as usable for training."
+            echo -e "  ${CYAN}Pure knowledge distillation${NC}: teacher tokens/logprobs are never changed —"
+            echo -e "  only wrongly-failed correct trajectories get un-discarded."
+            echo -e "  ${GREEN}CPU-only${NC} (no GPU), safe to run alongside a GPU job."
+            echo ""
+            echo -n "  Rescore and update cache now? (y/n): "
+            read -r ans
+            if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+                run_cmd "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
+            else
+                echo ""
+                echo -e "  Cancelled."
                 echo ""
                 read -rp "Press Enter to return to menu..."
             fi
