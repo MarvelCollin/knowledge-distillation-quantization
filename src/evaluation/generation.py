@@ -13,10 +13,9 @@ from src.utils.reasoning import (
 def build_student_prompt(tokenizer, prompt, test_cases):
     expected = extract_fn_name(test_cases)
     signature = extract_signature(test_cases[0], expected) if test_cases else ""
-    user_content = build_signature_user_content(prompt, signature)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
+        {"role": "user", "content": prompt},
     ]
     fmt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     return fmt, signature

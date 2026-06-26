@@ -26,6 +26,11 @@ _LEETCODE_PREAMBLE = '''\
 from typing import *
 from collections import *
 import heapq, math, itertools, functools, bisect, string, re, random, operator, copy
+from math import comb, perm, gcd, lcm, factorial, sqrt, isqrt, ceil, floor, inf, log, log2
+from itertools import combinations, permutations, product, accumulate, chain, count, groupby, pairwise
+from heapq import heappush, heappop, heapify, heappushpop, heapreplace, nlargest, nsmallest
+from functools import reduce, lru_cache, cache, cmp_to_key
+from bisect import bisect_left, bisect_right, insort, insort_left, insort_right
 
 
 class ListNode:
@@ -218,16 +223,22 @@ def _alias_candidate(code: str, candidate: str | None) -> str:
         tree = ast.parse(code)
     except SyntaxError:
         return code
-    names = [
-        n.name for n in tree.body
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
+    funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    names = [n.name for n in funcs]
     if not names or candidate in names:
         return code
     target = candidate.replace("_", "").lower()
     matched = next((n for n in names if n.replace("_", "").lower() == target), None)
     if matched is None and len(names) == 1:
         matched = names[0]
+    if matched is None and len(names) > 1:
+        called_by_others = set()
+        for fn in funcs:
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id != fn.name:
+                    called_by_others.add(node.func.id)
+        entries = [n for n in names if n not in called_by_others]
+        matched = entries[-1] if entries else names[-1]
     if matched is None:
         return code
     return code + f"\n{candidate} = {matched}\n"

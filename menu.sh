@@ -221,7 +221,7 @@ run_training_then_optionally_compare() {
 view_cache() {
     local cache_dir
     cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-    cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
+    cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
     header
     local total
     total=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
@@ -431,7 +431,7 @@ while true; do
         6)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_r1_7b}
+            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
             stats=$(python3 - "$cache_dir" <<'PYEOF'
 import glob, os, re, sys
@@ -493,16 +493,25 @@ PYEOF
                         read -r ans
                         if [ "$ans" = "yes" ]; then
                             sudo python3 - "$cache_dir" <<'PYEOF'
-import json, glob, os, sys
+import glob, os, re, sys
+pat_p = re.compile(rb'"test_passed":\s*(\d+)')
+pat_t = re.compile(rb'"test_total":\s*(\d+)')
 deleted = 0
 for f in sorted(glob.glob(os.path.join(sys.argv[1], '*.json'))):
     try:
-        d = json.load(open(f))
-        tp, tt = d.get('test_passed'), d.get('test_total')
-        if not tt or tp is None or tp < tt:
-            os.remove(f); deleted += 1
+        with open(f, 'rb') as fh:
+            sz = os.fstat(fh.fileno()).st_size
+            fh.seek(max(0, sz - 400))
+            tail = fh.read()
+        mp, mt = pat_p.search(tail), pat_t.search(tail)
+        keep = bool(mp and mt) and int(mt.group(1)) > 0 and int(mp.group(1)) == int(mt.group(1))
     except Exception:
-        os.remove(f); deleted += 1
+        keep = False
+    if not keep:
+        try:
+            os.remove(f); deleted += 1
+        except OSError:
+            pass
 print(f'  deleted {deleted} failed files')
 PYEOF
                             echo ""

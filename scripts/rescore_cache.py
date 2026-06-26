@@ -19,7 +19,7 @@ def main() -> None:
                     "re-generating. Fixes caches whose logprobs were truncated by top_p/temperature."
     )
     parser.add_argument("--config", default="config/config.yaml")
-    parser.add_argument("--src", default="cache/teacher_logprobs_r1_7b",
+    parser.add_argument("--src", default="cache/teacher_logprobs_coder15b",
                         help="Source cache dir with existing (passing) trajectories to reuse.")
     parser.add_argument("--dst", default=None,
                         help="Output cache dir (default: data.teacher_cache_dir from config).")

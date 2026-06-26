@@ -47,6 +47,8 @@ from src.utils.reasoning import extract_code
 
 _INTERMEDIATE = Path("outputs/eval/intermediate")
 
+MEM_CEILING_GB = 22.0
+
 COLORS = {
     "Student (original)":            "#4e79a7",
     "Teacher (R1-Distill-Qwen-7B)":  "#f28e2b",
@@ -74,7 +76,7 @@ def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> li
         cases = _extract_test_cases(test_str, entry_point) if test_str.strip() and entry_point else []
         code = (item.get("response") or "").strip()
         text = (item.get("problem_description") or "").strip()
-        if not cases or not code or not text:
+        if not cases or not text:
             continue
         problems.append({
             "text": text,
@@ -280,7 +282,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
     available_for_vllm = free_gb / total_gb
     safety_margin = 0.05
     base_util = 0.82
-    gpu_mem_util = min(base_util, available_for_vllm - safety_margin)
+    ceiling_util = MEM_CEILING_GB / total_gb
+    gpu_mem_util = min(base_util, available_for_vllm - safety_margin, ceiling_util)
     gpu_mem_util = max(gpu_mem_util, 0.30)
     max_model_len = max_new_tokens + 2048
 
@@ -288,7 +291,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util:.2f}, max_model_len={max_model_len})...")
+    print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util:.2f} "
+          f"≈{gpu_mem_util * total_gb:.1f}GB, ceiling={MEM_CEILING_GB:.0f}GB, max_model_len={max_model_len})...")
     llm = None
     try:
         llm = LLM(
@@ -602,10 +606,13 @@ def main() -> None:
 
     distilled_path = args.distilled
     if distilled_path is None:
-        final_dir = Path(config["training"]["output_dir"]) / "final"
-        if (final_dir / "model.safetensors").exists():
-            distilled_path = str(final_dir)
-            print(f"\nAuto-detected distilled checkpoint: {distilled_path}")
+        out_dir = Path(config["training"]["output_dir"])
+        for name in ("final_last", "final"):
+            cand = out_dir / name
+            if (cand / "model.safetensors").exists():
+                distilled_path = str(cand)
+                print(f"\nAuto-detected distilled checkpoint: {distilled_path}")
+                break
     if distilled_path:
         summaries.append(evaluate_model(
             "Student (distilled)", distilled_path,

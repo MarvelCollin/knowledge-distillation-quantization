@@ -18,10 +18,10 @@ from dotenv import load_dotenv
 import gc
 from torch.utils.data import DataLoader, Sampler
 from tqdm import tqdm
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from transformers.optimization import Adafactor
 
-from src.data.dataset import PROMPT_TEMPLATE, create_datasets, load_problems
+from src.data.dataset import PROMPT_TEMPLATE, build_user_content, create_datasets, load_problems
 from src.distillation.loss import (
     adaptive_skew_lambda,
     build_teacher_topk,
@@ -167,6 +167,8 @@ def main():
         _total_mem = torch.cuda.get_device_properties(_dev_idx).total_memory
         _cap_frac = min(22.0 * 1024 ** 3 / _total_mem, 1.0)
         torch.cuda.set_per_process_memory_fraction(_cap_frac, _dev_idx)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         print(f"  CUDA memory cap  : 22 GB / {_total_mem / 1024**3:.1f} GB (fraction={_cap_frac:.3f})")
     output_dir = Path(config["training"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -179,7 +181,7 @@ def main():
 
     if not args.offline:
         raw_problems = load_problems(config)
-        raw_prompts = [PROMPT_TEMPLATE.format(text=p["text"]) for p in raw_problems]
+        raw_prompts = [build_user_content(p) for p in raw_problems]
         raw_tests = [p["test_cases"] for p in raw_problems]
         local_teacher = LocalTeacherModel(
             model_path=config["teacher"]["local_model_path"],
@@ -192,9 +194,14 @@ def main():
             max_model_len=config["teacher"].get("max_model_len", 10240),
         )
         chunk_size = config["teacher"].get("cache_chunk_size", 64)
-        local_teacher.precompute_and_cache(raw_prompts, cache_dir,
-                                           test_cases_per_prompt=raw_tests,
-                                           chunk_size=chunk_size)
+        local_teacher.precompute_and_cache(
+            raw_prompts, cache_dir,
+            test_cases_per_prompt=raw_tests,
+            chunk_size=chunk_size,
+            rejection_samples=config["teacher"].get("rejection_samples", 0),
+            rejection_temperature=config["teacher"].get("rejection_temperature", 1.0),
+            rejection_top_p=config["teacher"].get("rejection_top_p", 0.95),
+        )
         local_teacher.shutdown()
         del local_teacher
         gc.collect()
@@ -264,13 +271,14 @@ def main():
     optimizer = Adafactor(
         student.parameters(),
         lr=float(config["training"]["learning_rate"]),
+        weight_decay=float(config["training"].get("weight_decay", 0.0)),
         scale_parameter=False,
         relative_step=False,
         warmup_init=False,
     )
     optimizer_steps_per_epoch = len(train_loader) // config["training"]["gradient_accumulation_steps"]
     total_steps = optimizer_steps_per_epoch * config["training"]["num_epochs"]
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=config["training"]["warmup_steps"],
         num_training_steps=total_steps,
@@ -324,7 +332,22 @@ def main():
     global_step = 0
     samples_seen = 0
     train_start = time.time()
-    student.model.gradient_checkpointing_enable()
+    if config["training"].get("gradient_checkpointing", True):
+        student.model.gradient_checkpointing_enable()
+        print("  Gradient checkpointing: ON (saves memory, ~30% slower)")
+    else:
+        print("  Gradient checkpointing: OFF (faster, higher memory)")
+
+    neftune_alpha = float(config["training"].get("neftune_alpha", 0.0))
+    if neftune_alpha > 0:
+        def _neftune_hook(module, args, output):
+            if module.training:
+                dims = output.size(-2) * output.size(-1)
+                mag = neftune_alpha / (dims ** 0.5)
+                output = output + torch.empty_like(output).uniform_(-mag, mag)
+            return output
+        student.model.get_input_embeddings().register_forward_hook(_neftune_hook)
+        print(f"  NEFTune: ON (alpha={neftune_alpha}) -- noisy embeddings during training only")
 
     base_stats = run_test_validation(
         student, val_dataset, device,
@@ -464,6 +487,9 @@ def main():
               f"time: {epoch_m}m {epoch_s:02d}s  "
               f"best_solve: {best_solve_rate:.1%}")
         print()
+
+    student.save(str(output_dir / "final_last"))
+    print(f"Last-epoch (fully-trained) checkpoint saved at outputs/final_last for evaluation.")
 
     print(f"Training complete. Best solve_rate={best_solve_rate:.1%} (val_loss={best_val_loss:.4f}) "
           f"saved at outputs/final — guaranteed >= base ({base_stats['test_pass_rate']:.1%}).")

@@ -142,9 +142,25 @@ class LocalTeacherModel:
         outputs = self.llm.generate(formatted, sp, use_tqdm=True)
         return [[self._extract_one(g) for g in o.outputs] for o in outputs]
 
+    @staticmethod
+    def _fully_passed(test_passed, test_total) -> bool:
+        return test_total is not None and test_total > 0 and test_passed == test_total
+
+    def _score_result(self, result: dict, test_cases: list) -> tuple:
+        try:
+            code = extract_code(result.get("text", ""))
+            r = run_test_cases(code, test_cases)
+            return r["passed"], r["total"]
+        except Exception as exc:
+            print(f"  test exec error: {type(exc).__name__}: {exc}")
+            return None, None
+
     def precompute_and_cache(self, prompts: list, cache_dir: str,
                              test_cases_per_prompt: list = None,
-                             chunk_size: int = 64) -> None:
+                             chunk_size: int = 64,
+                             rejection_samples: int = 0,
+                             rejection_temperature: float = 1.0,
+                             rejection_top_p: float = 0.95) -> None:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +174,9 @@ class LocalTeacherModel:
                     return False
                 tokens = d.get("tokens") or []
                 if not tokens:
+                    return False
+                if rejection_samples > 0 and not self._fully_passed(
+                        d.get("test_passed"), d.get("test_total")):
                     return False
                 cached_max_tokens = d.get("max_tokens", 0)
                 if cached_max_tokens < self.max_tokens:
@@ -197,22 +216,38 @@ class LocalTeacherModel:
 
             results = self.get_responses_batch(chunk_prompts)
 
+            scored = []
             for (idx, prompt), result in zip(chunk, results):
                 test_passed = None
                 test_total = None
-                code = ""
                 if test_cases_per_prompt is not None:
-                    tcs = test_cases_per_prompt[idx]
-                    try:
-                        code = extract_code(result.get("text", ""))
-                        r = run_test_cases(code, tcs)
-                        test_passed = r["passed"]
-                        test_total = r["total"]
-                    except Exception as exc:
-                        print(f"  test exec error idx={idx}: {type(exc).__name__}: {exc}")
+                    test_passed, test_total = self._score_result(
+                        result, test_cases_per_prompt[idx])
+                scored.append([idx, prompt, result, test_passed, test_total])
 
+            if rejection_samples > 0 and test_cases_per_prompt is not None:
+                failed = [s for s in scored
+                          if s[4] is not None and not self._fully_passed(s[3], s[4])]
+                if failed:
+                    print(f"  rejection sampling {len(failed)} failed prompts "
+                          f"(n={rejection_samples}, temp={rejection_temperature})...")
+                    candidate_lists = self.sample_candidates_batch(
+                        [s[1] for s in failed], rejection_samples,
+                        rejection_temperature, rejection_top_p)
+                    recovered = 0
+                    for s, candidates in zip(failed, candidate_lists):
+                        tcs = test_cases_per_prompt[s[0]]
+                        for candidate in candidates:
+                            cand_passed, cand_total = self._score_result(candidate, tcs)
+                            if self._fully_passed(cand_passed, cand_total):
+                                s[2], s[3], s[4] = candidate, cand_passed, cand_total
+                                recovered += 1
+                                break
+                    print(f"  rejection recovered {recovered}/{len(failed)} prompts.")
+
+            for idx, prompt, result, test_passed, test_total in scored:
                 if test_total is not None:
-                    if test_total > 0 and test_passed == test_total:
+                    if self._fully_passed(test_passed, test_total):
                         pass_count += 1
                     else:
                         fail_count += 1

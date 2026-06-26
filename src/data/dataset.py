@@ -7,7 +7,8 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
-from src.utils.reasoning import SYSTEM_PROMPT, THINK_END_TAG
+from src.utils.reasoning import SYSTEM_PROMPT, THINK_END_TAG, build_signature_user_content
+from src.evaluation.evaluator import extract_signature
 
 PROMPT_TEMPLATE = (
     "Write a solution in Python to solve the following problem.\n"
@@ -20,6 +21,11 @@ _CODE_FENCE_CLOSE = "```"
 _BRIDGE_TOKEN = "\n"
 
 
+def build_user_content(problem: dict) -> str:
+    base = PROMPT_TEMPLATE.format(text=problem["text"])
+    return build_signature_user_content(base, problem.get("signature", ""))
+
+
 def _extract_test_cases(test_str: str, entry_point: str) -> list:
     if not test_str.strip() or not entry_point:
         return []
@@ -29,6 +35,7 @@ def _extract_test_cases(test_str: str, entry_point: str) -> list:
         if isinstance(n, ast.FunctionDef) and n.name == "check"
     )
     other_top_level = [n for n in tree.body if n is not check_func]
+    cases = []
     cases = []
     for stmt in check_func.body:
         single_check = ast.FunctionDef(
@@ -146,7 +153,7 @@ class CodingDataset(Dataset):
         return len(self.problems)
 
     def get_prompt(self, idx: int) -> str:
-        return PROMPT_TEMPLATE.format(text=self.problems[idx]["text"])
+        return build_user_content(self.problems[idx])
 
     def get_chat_prompt(self, idx: int) -> str:
         messages = [
@@ -223,10 +230,13 @@ def load_problems(config: dict) -> list:
         text = (item.get("problem_description") or "").strip()
         if not test_cases or not code or not text:
             continue
+        signature = extract_signature(test_cases[0], entry_point) if test_cases else ""
         problems.append({
             "text": text,
             "code": code,
             "test_cases": test_cases,
+            "entry_point": entry_point,
+            "signature": signature,
         })
 
     print(f"  Loaded {len(problems)} problems with test cases.")
@@ -248,7 +258,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str) -> tuple:
     for i in sorted(teacher_responses.keys()):
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": PROMPT_TEMPLATE.format(text=problems[i]["text"])},
+            {"role": "user", "content": build_user_content(problems[i])},
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         prompt_len = min(len(tokenizer(prompt, add_special_tokens=False).input_ids), max_length - 1)

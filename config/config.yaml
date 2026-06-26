@@ -7,33 +7,38 @@ evaluation:
   max_new_tokens: 24576
   output_dir: outputs/eval
 student:
-  max_length: 8192
+  max_length: 12288
   model_name: Qwen/Qwen2.5-Coder-1.5B-Instruct
 teacher:
   local_model_path: cache/teacher-model-r1-7b
-  max_tokens: 9600
-  temperature: 0.6
+  max_tokens: 14336
+  temperature: 0.8
   top_p: 1.0
   top_logprobs: 20
-  gpu_memory_utilization: 0.92
-  max_model_len: 10240
+  gpu_memory_utilization: 0.90
+  max_model_len: 18432
   cache_chunk_size: 16
+  rejection_samples: 6
+  rejection_temperature: 1.0
+  rejection_top_p: 0.95
 training:
   alpha: 0.7
   batch_size: 1
   curriculum: length
-  distill_temperature: 2.0
-  eval_steps: 100
+  distill_temperature: 3.0
+  eval_steps: 25
   gradient_accumulation_steps: 4
   learning_rate: 5e-6
   max_grad_norm: 1.0
-  num_epochs: 2
+  num_epochs: 3
   output_dir: outputs
   seed: 42
   skew_lambda: 0.2
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: false
-  select_problems: 10
-  select_max_new_tokens: 4096
+  select_problems: 20
+  select_max_new_tokens: 8192
   warmup_steps: 30
+  weight_decay: 0.01
+  neftune_alpha: 5.0
