@@ -35,8 +35,16 @@ class LocalTeacherModel:
 
         from vllm import LLM, SamplingParams
 
+        gc.collect()
+        torch.cuda.empty_cache()
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        safety_bytes = 1024 ** 3
+        free_util = max(0.1, (free_bytes - safety_bytes) / total_bytes)
+        gpu_memory_utilization = min(gpu_memory_utilization, free_util)
+
         print(f"Loading vLLM teacher from {model_path}...")
-        print(f"  gpu_memory_utilization={gpu_memory_utilization}  max_model_len={max_model_len}")
+        print(f"  free {free_bytes / 1024**3:.1f} GB / total {total_bytes / 1024**3:.1f} GB")
+        print(f"  gpu_memory_utilization={gpu_memory_utilization:.3f}  max_model_len={max_model_len}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 

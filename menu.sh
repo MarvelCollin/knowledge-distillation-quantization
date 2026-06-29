@@ -118,6 +118,9 @@ prompt_compare_params() {
     echo -n "  num_problems [default: 100]: "
     read -r CMP_NP
     [ -z "$CMP_NP" ] && CMP_NP=100
+    case "$CMP_NP" in
+        full|FULL|Full|all|f) CMP_NP=100000 ;;
+    esac
     echo ""
     echo -e "  ${BOLD}difficulty${NC} — which levels to include (applied equally to all models)"
     echo -e "     ${GREEN}1${NC}  all              (easy + medium + hard)"
