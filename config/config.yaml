@@ -17,6 +17,10 @@ teacher:
   top_logprobs: 20
   gpu_memory_utilization: 0.92
   max_model_len: 18432
+  kv_cache_dtype: auto
+  enable_chunked_prefill: true
+  max_num_batched_tokens: 4096
+  max_num_seqs: 16
   cache_chunk_size: 16
   rejection_samples: 6
   rejection_wave: 2

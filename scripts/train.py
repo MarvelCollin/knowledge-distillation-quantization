@@ -192,6 +192,10 @@ def main():
             student_tokenizer=student_tokenizer,
             gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
             max_model_len=config["teacher"].get("max_model_len", 10240),
+            kv_cache_dtype=config["teacher"].get("kv_cache_dtype", "auto"),
+            enable_chunked_prefill=config["teacher"].get("enable_chunked_prefill", False),
+            max_num_batched_tokens=config["teacher"].get("max_num_batched_tokens", None),
+            max_num_seqs=config["teacher"].get("max_num_seqs", None),
         )
         chunk_size = config["teacher"].get("cache_chunk_size", 64)
         local_teacher.precompute_and_cache(

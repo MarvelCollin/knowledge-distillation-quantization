@@ -40,8 +40,12 @@ show_menu() {
 run_cmd_noprompt() {
     echo -e "${YELLOW}▶ $*${NC}"
     echo ""
-    eval "$@"
-    local code=$?
+    mkdir -p logs
+    local log="logs/$(date +%Y%m%d_%H%M%S).log"
+    echo -e "${CYAN}Logging to $log${NC}"
+    echo ""
+    { echo "\$ $*"; echo ""; eval "$@"; } 2>&1 | tee "$log"
+    local code=${PIPESTATUS[0]}
     echo ""
     if [ $code -eq 0 ]; then
         echo -e "${GREEN}✓ Done (exit 0)${NC}"
@@ -74,55 +78,23 @@ stop_sudo_alive() {
     SUDO_KEEPALIVE_PID=""
 }
 
-# Collect compare-eval parameters into globals WITHOUT running anything.
-# Sets: CMP_SKIP_FLAG, CMP_NP, CMP_DIFFICULTY
-prompt_compare_params() {
-    echo -e "  ${BOLD}Fixed eval config${NC} (paper-grade defaults):"
-    echo "    samples/prob : 5  (pass@5 standard)"
-    echo "    temperature  : 0.7   top_p : 0.95"
-    echo "    chunk_size   : 10 student / 3 teacher   (scaled for 24576 budget)"
-    echo "    max_tokens   : 24576  (paper-grade, target ~20% truncation)"
-    echo "    seed         : 1234  (fixed → pass@5 reproducible run-to-run)"
-    echo "    reuse        : teacher + original cached & reused; only distilled re-runs"
-    echo ""
-    echo -e "  ${BOLD}Include teacher in comparison?${NC}"
-    echo -e "    ${GREEN}y${NC}  ALL 3 models (paper-grade comparison, ~3-4.5h total)"
-    echo "    n  Student-only (skip teacher, ~1.5-2.5h, quick iteration)"
-    echo ""
-    echo -n "  Include teacher? (y/n) [default: y]: "
-    read -r incl_teacher
+# Fixed compare-eval parameters — no prompts, always full 3-way paper-grade run.
+# Sets: CMP_SKIP_FLAG, CMP_NP, CMP_DIFFICULTY, COMPARE_AFTER
+set_fixed_compare_params() {
+    local eval_mnt
+    eval_mnt=$(grep 'max_new_tokens' config/config.yaml 2>/dev/null | awk '{print $2}')
     CMP_SKIP_FLAG=""
-    if [ "$incl_teacher" = "n" ] || [ "$incl_teacher" = "N" ]; then
-        CMP_SKIP_FLAG="--skip-teacher"
-        echo -e "  ${YELLOW}→ Teacher SKIPPED. Will compare Student (original) vs Student (distilled) only.${NC}"
-    else
-        echo -e "  ${GREEN}→ Teacher INCLUDED. 3-way comparison.${NC}"
-    fi
-    echo ""
-    echo -e "  ${BOLD}num_problems${NC} — test problems to evaluate (LeetCode test split)"
-    echo "     30    quick smoke test          (~15 min, noisy single-run)"
-    echo "     100   ablation/intermediate     (~45 min, reasonable confidence)"
-    echo -e "     ${GREEN}164${NC}   ${GREEN}HumanEval-comparable n${NC}  (~75 min, paper-grade)"
-    echo "     full  entire test split        (~hours, most reliable)"
-    echo ""
-    echo -n "  num_problems [default: 100]: "
-    read -r CMP_NP
-    [ -z "$CMP_NP" ] && CMP_NP=100
-    case "$CMP_NP" in
-        full|FULL|Full|all|f) CMP_NP=100000 ;;
-    esac
-    echo ""
-    echo -e "  ${BOLD}difficulty${NC} — which levels to include (applied equally to all models)"
-    echo -e "     ${GREEN}1${NC}  all              (easy + medium + hard)"
-    echo "     2  easy + medium   (exclude hard — report as 'Easy+Medium' only)"
-    echo ""
-    echo -n "  difficulty [default: 1]: "
-    read -r diff_choice
+    CMP_NP=100000
     CMP_DIFFICULTY="all"
-    if [ "$diff_choice" = "2" ]; then
-        CMP_DIFFICULTY="easy,medium"
-        echo -e "  ${YELLOW}→ Hard EXCLUDED. Remember to label results 'Easy+Medium' in any report.${NC}"
-    fi
+    COMPARE_AFTER=1
+    echo -e "  ${BOLD}Fixed compare config${NC} (auto, no prompts):"
+    echo "    models       : original + teacher + distilled  (3-way)"
+    echo "    num_problems : full test split"
+    echo "    difficulty   : all  (easy + medium + hard)"
+    echo "    samples/prob : 5  (pass@5)   temperature 0.7   top_p 0.95"
+    echo "    max_tokens   : ${eval_mnt}   seed 1234"
+    echo "    chunk_size   : 24 student / 8 teacher"
+    echo "    reuse        : teacher + original cached & reused; only distilled re-runs"
 }
 
 compare_cache_status() {
@@ -158,35 +130,13 @@ run_compare_with_params() {
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }
 
-# Standalone compare (menu option 4): ask, then run.
 run_compare_eval() {
     header
     echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
     echo ""
-    prompt_compare_params
+    set_fixed_compare_params
     echo ""
     run_compare_with_params
-}
-
-# Ask UP FRONT (before training runs) whether to auto-compare afterwards,
-# and if so collect all compare params now so nothing is asked mid-run.
-# Sets: COMPARE_AFTER (1/0) and CMP_* params.
-prompt_compare_after() {
-    echo -e "  ${BOLD}After training finishes, run compare eval automatically?${NC}"
-    echo "    (everything is asked now — training then compare run unattended)"
-    echo ""
-    echo -n "  Compare after training? (y/n) [default: y]: "
-    read -r run_cmp
-    if [ "$run_cmp" = "n" ] || [ "$run_cmp" = "N" ]; then
-        COMPARE_AFTER=0
-        echo -e "  ${YELLOW}→ Will NOT compare after training.${NC}"
-    else
-        COMPARE_AFTER=1
-        echo ""
-        echo -e "  ${CYAN}── Compare options (collected now, run after training) ──${NC}"
-        echo ""
-        prompt_compare_params
-    fi
 }
 
 # Run training, then auto-compare if it was requested up front (NO mid-run prompts).
@@ -296,28 +246,35 @@ show_cache_status() {
     echo -e "    Total cached files   : ${GREEN}${CACHE_TOTAL}${NC}"
     echo -e "    Problem index range  : 0-${CACHE_MAX_IDX}  (max_samples ${GREEN}$((CACHE_MAX_IDX + 1))${NC} covers the full cache)"
     local stats
-    stats=$(timeout 10 python3 -c "
-import json, glob, random
-files = glob.glob('$dir/*.json')
-sample = random.sample(files, min(100, len(files)))
-total = passed = 0
-for f in sample:
+    stats=$(python3 - "$dir" <<'PYEOF'
+import glob, os, re, sys
+files = glob.glob(os.path.join(sys.argv[1], '*.json'))
+pat_p = re.compile(rb'"test_passed":\s*(\d+)')
+pat_t = re.compile(rb'"test_total":\s*(\d+)')
+passed = tested = 0
+for f in files:
     try:
-        d = json.load(open(f))
-        tp, tt = d.get('test_passed'), d.get('test_total')
-        if tp is not None and tt is not None and tt > 0:
-            total += 1
-            if tp == tt: passed += 1
-    except Exception: pass
-print(f'{passed},{total}')
-" 2>/dev/null)
+        with open(f, 'rb') as fh:
+            sz = os.fstat(fh.fileno()).st_size
+            fh.seek(max(0, sz - 400))
+            tail = fh.read()
+        mp, mt = pat_p.search(tail), pat_t.search(tail)
+        if mp and mt and int(mt.group(1)) > 0:
+            tested += 1
+            if int(mp.group(1)) == int(mt.group(1)):
+                passed += 1
+    except Exception:
+        pass
+print(f'{passed},{tested}')
+PYEOF
+)
     local s_pass s_total
     IFS=',' read -r s_pass s_total <<< "$stats"
     if [ -n "$s_total" ] && [ "$s_total" -gt 0 ]; then
         local pct=$((s_pass * 100 / s_total))
-        echo -e "    Sample pass rate     : ${GREEN}${s_pass}/${s_total}${NC} (~${pct}% usable for training, random ${s_total}-file sample)"
+        echo -e "    Passing (usable)     : ${GREEN}${s_pass}/${s_total}${NC} (${pct}% of tested cache, exact count)"
     else
-        echo -e "    Pass rate            : (skipped — scan timed out or files being written)"
+        echo -e "    Pass rate            : (no tested entries yet)"
     fi
     return 0
 }
@@ -336,7 +293,7 @@ while true; do
     case $choice in
         1)
             header
-            REC_SAMPLES=1000
+            NS=2600
             cfg_epochs=$(grep 'num_epochs' config/config.yaml | awk '{print $2}')
             cfg_alpha=$(grep 'alpha:' config/config.yaml | awk '{print $2}')
             cfg_lr=$(grep 'learning_rate' config/config.yaml | awk '{print $2}')
@@ -344,10 +301,11 @@ while true; do
             cfg_temp=$(grep 'distill_temperature' config/config.yaml | awk '{print $2}')
             cfg_alen=$(grep 'max_length' config/config.yaml | awk '{print $2}')
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
-            echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train, then compare)"
+            echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train, then full 3-way compare)"
             echo ""
-            echo -e "  ${BOLD}Fixed config${NC} (paper-grade defaults, edit config/config.yaml to change):"
-            echo "    epochs              : ${cfg_epochs}     (Hinton 2015 / DistilBERT standard)"
+            echo -e "  ${BOLD}Fixed config${NC} (edit config/config.yaml to change):"
+            echo "    max_samples         : ${NS}  (full LeetCode train split)"
+            echo "    epochs              : ${cfg_epochs}"
             echo "    alpha (distill mix) : ${cfg_alpha}"
             echo "    distill temperature : ${cfg_temp}"
             echo "    learning rate       : ${cfg_lr}"
@@ -358,20 +316,24 @@ while true; do
                 echo -e "    ${YELLOW}→ fresh generation will run${NC}"
             fi
             echo ""
-            echo -e "  ${BOLD}max_samples${NC}  — problems to load (LeetCode train split has ~2,600)"
-            echo "     200    quick smoke test          (~2 min teacher cache, low statistical power)"
-            echo "     500    ablation runs             (~5 min teacher cache, ok for early experiments)"
-            echo -e "     ${GREEN}1000${NC}   ${GREEN}recommended for paper${NC}   (~10 min teacher cache, solid n for pass@k)"
-            echo "     2600   full dataset              (~25 min teacher cache, best — if you have time)"
+            set_fixed_compare_params
             echo ""
-            echo -n "  max_samples [default: ${REC_SAMPLES}]: "
-            read -r ns
-            [ -z "$ns" ] && ns=$REC_SAMPLES
+            echo -e "  ${BOLD}Teacher cache mode${NC} (the only question)"
+            echo -e "     ${GREEN}1${NC}  build/refresh missing entries first  (slow — regenerates every missing/failed problem)"
+            echo "     2  offline: train NOW on the current passing cache only (skips generation entirely)"
             echo ""
-            prompt_compare_after
+            echo -n "  cache mode [default: 1]: "
+            read -r cache_mode
+            TRAIN_FLAGS="--max-samples $NS"
+            if [ "$cache_mode" = "2" ]; then
+                TRAIN_FLAGS="$TRAIN_FLAGS --offline"
+                echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
+            else
+                echo -e "  ${GREEN}→ Cache build/refresh will run before training.${NC}"
+            fi
             echo ""
             keep_sudo_alive
-            run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py --max-samples $ns"
+            run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py $TRAIN_FLAGS"
             stop_sudo_alive
             ;;
         2)

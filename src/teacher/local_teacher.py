@@ -1,5 +1,6 @@
 import gc
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
-from src.evaluation.evaluator import run_test_cases
+from src.evaluation.evaluator import failing_cases, run_test_cases
 from src.utils.gpu import gpu_used_gb
 from src.utils.reasoning import SYSTEM_PROMPT, extract_code
 
@@ -26,6 +27,8 @@ class LocalTeacherModel:
         enforce_eager: bool = False,
         enable_chunked_prefill: bool = False,
         max_num_batched_tokens: int = None,
+        kv_cache_dtype: str = "auto",
+        max_num_seqs: int = None,
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -40,7 +43,15 @@ class LocalTeacherModel:
         torch.cuda.empty_cache()
         free_bytes, total_bytes = torch.cuda.mem_get_info()
         safety_bytes = 1024 ** 3
-        free_util = max(0.1, (free_bytes - safety_bytes) / total_bytes)
+        min_required_gb = 17.0
+        free_gb = free_bytes / 1024 ** 3
+        if free_gb - 1.0 < min_required_gb:
+            raise RuntimeError(
+                f"GPU busy: only {free_gb:.1f} GB free of "
+                f"{total_bytes / 1024**3:.1f} GB, teacher needs ~{min_required_gb:.0f} GB. "
+                f"Another run is holding the GPU — wait for it to finish or stop it first."
+            )
+        free_util = (free_bytes - safety_bytes) / total_bytes
         gpu_memory_utilization = min(gpu_memory_utilization, free_util)
 
         print(f"Loading vLLM teacher from {model_path}...")
@@ -48,6 +59,8 @@ class LocalTeacherModel:
         print(f"  gpu_memory_utilization={gpu_memory_utilization:.3f}  max_model_len={max_model_len}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self._decode_cache = {}
+        self._student_id_cache = {}
 
         llm_kwargs = dict(
             model=model_path,
@@ -56,8 +69,11 @@ class LocalTeacherModel:
             max_model_len=max_model_len,
             trust_remote_code=True,
             enforce_eager=enforce_eager,
-            enable_prefix_caching=True,
+            kv_cache_dtype=kv_cache_dtype,
+            enable_prefix_caching=kv_cache_dtype == "auto",
         )
+        if max_num_seqs is not None:
+            llm_kwargs["max_num_seqs"] = max_num_seqs
         if enable_chunked_prefill:
             llm_kwargs["enable_chunked_prefill"] = True
             if max_num_batched_tokens is not None:
@@ -87,24 +103,40 @@ class LocalTeacherModel:
     def _extract_result(self, vllm_output) -> dict:
         return self._extract_one(vllm_output.outputs[0])
 
+    def _tok_str(self, tok_id: int) -> str:
+        cached = self._decode_cache.get(tok_id)
+        if cached is None:
+            cached = self.tokenizer.decode([tok_id])
+            self._decode_cache[tok_id] = cached
+        return cached
+
+    def _student_id(self, tok_id: int, tok_str: str) -> int | None:
+        if tok_id in self._student_id_cache:
+            return self._student_id_cache[tok_id]
+        student_id = None
+        if tok_str:
+            re_ids = self.student_tokenizer.encode(tok_str, add_special_tokens=False)
+            if len(re_ids) == 1 and 0 <= re_ids[0] < self.student_tokenizer.vocab_size:
+                student_id = re_ids[0]
+        self._student_id_cache[tok_id] = student_id
+        return student_id
+
     def _topk_to_student(self, lp_dict) -> tuple:
-        student_vocab = (
-            self.student_tokenizer.vocab_size if self.student_tokenizer is not None else 0
-        )
         top_k_dict = {}
         student_ids = []
         student_vals = []
         if lp_dict is not None:
             for tok_id, lp_obj in lp_dict.items():
                 val_f = float(lp_obj.logprob)
-                tok_str = self.tokenizer.decode([int(tok_id)])
+                tok_id = int(tok_id)
+                tok_str = self._tok_str(tok_id)
                 top_k_dict[tok_str] = val_f
 
-                if self.student_tokenizer is None or not tok_str:
+                if self.student_tokenizer is None:
                     continue
-                re_ids = self.student_tokenizer.encode(tok_str, add_special_tokens=False)
-                if len(re_ids) == 1 and 0 <= re_ids[0] < student_vocab:
-                    student_ids.append(re_ids[0])
+                student_id = self._student_id(tok_id, tok_str)
+                if student_id is not None:
+                    student_ids.append(student_id)
                     student_vals.append(val_f)
         return top_k_dict, student_ids, student_vals
 
@@ -118,7 +150,7 @@ class LocalTeacherModel:
         top_k_vals_per_token = []
 
         for t_id, lp_dict in zip(token_ids, logprobs_list):
-            tokens.append(self.tokenizer.decode([t_id]))
+            tokens.append(self._tok_str(int(t_id)))
             top_k_dict, student_ids, student_vals = self._topk_to_student(lp_dict)
             logprobs_per_token.append(top_k_dict)
             top_k_ids_per_token.append(student_ids)
@@ -165,24 +197,44 @@ class LocalTeacherModel:
     def _fully_passed(test_passed, test_total) -> bool:
         return test_total is not None and test_total > 0 and test_passed == test_total
 
-    def _score_result(self, result: dict, test_cases: list) -> tuple:
-        return self._score_text(result.get("text", ""), test_cases)
+    def _score_gen(self, gen, test_cases: list) -> dict:
+        """Score a raw vLLM output by decoding only its text (no logprob extraction).
 
-    def _score_gen(self, gen, test_cases: list) -> tuple:
-        """Score a raw vLLM output by decoding only its text (no logprob extraction)."""
-        return self._score_text(
-            self.tokenizer.decode(list(gen.token_ids), skip_special_tokens=True),
-            test_cases,
-        )
-
-    def _score_text(self, text: str, test_cases: list) -> tuple:
+        Returns the full run_test_cases dict (passed/total/details/errors/categories)
+        so failures can be logged with root-cause detail."""
+        text = self.tokenizer.decode(list(gen.token_ids), skip_special_tokens=True)
         try:
-            code = extract_code(text)
-            r = run_test_cases(code, test_cases)
-            return r["passed"], r["total"]
+            return run_test_cases(extract_code(text), test_cases)
         except Exception as exc:
             print(f"  test exec error: {type(exc).__name__}: {exc}")
-            return None, None
+            return {"passed": None, "total": None, "details": [], "errors": [], "categories": []}
+
+    @staticmethod
+    def _failure_modes(score: dict) -> str:
+        """Compact 'wrong_answer×5, timeout×1' summary of a failing score dict."""
+        cats = [c for c in (score.get("categories") or []) if c and c != "pass"]
+        if not cats:
+            return "n/a"
+        return ", ".join(f"{c}×{cats.count(c)}" for c in dict.fromkeys(cats))
+
+    def _log_failures(self, failed: list, prefix: str = "  ") -> None:
+        """Print root-cause detail for a list of (label, score_dict) failed cases:
+        per-case failure modes + a couple of representative Input/Output/Expected
+        diagnostics, plus an aggregate mode histogram across the batch."""
+        agg = {}
+        for label, score in failed:
+            modes = self._failure_modes(score)
+            passed, total = score.get("passed"), score.get("total")
+            print(f"{prefix}✗ {label}: {passed}/{total} tests | modes: {modes}")
+            for cat, err in failing_cases(score, limit=2):
+                snippet = " ".join((err or "").split())[:300] or "(no error message)"
+                print(f"{prefix}    [{cat}] {snippet}")
+            for c in (score.get("categories") or []):
+                if c and c != "pass":
+                    agg[c] = agg.get(c, 0) + 1
+        if agg:
+            hist = ", ".join(f"{c}={n}" for c, n in sorted(agg.items(), key=lambda x: -x[1]))
+            print(f"{prefix}failure modes (aggregate): {hist}")
 
     def precompute_and_cache(self, prompts: list, cache_dir: str,
                              test_cases_per_prompt: list = None,
@@ -194,31 +246,39 @@ class LocalTeacherModel:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
 
+        pat_passed = re.compile(rb'"test_passed":\s*(\d+)')
+        pat_total = re.compile(rb'"test_total":\s*(\d+)')
+
         def _is_valid(idx: int, prompt: str) -> bool:
             f = cache_path / f"{idx}.json"
             if not f.exists():
                 return False
             try:
-                d = json.loads(f.read_text())
-                if d.get("prompt", "") != prompt:
+                prefix = ('{"prompt": ' + json.dumps(prompt) + ', "max_tokens": ').encode()
+                with open(f, "rb") as fh:
+                    head = fh.read(len(prefix) + 64)
+                    size = fh.seek(0, 2)
+                    fh.seek(max(0, size - 400))
+                    tail = fh.read()
+                if not head.startswith(prefix):
                     return False
-                tokens = d.get("tokens") or []
-                if not tokens:
+                if b'"tokens": []' in head:
                     return False
-                if rejection_samples > 0 and not self._fully_passed(
-                        d.get("test_passed"), d.get("test_total")):
+                m = re.match(rb"\d+", head[len(prefix):])
+                if m is None:
                     return False
-                cached_max_tokens = d.get("max_tokens", 0)
-                if cached_max_tokens < self.max_tokens:
-                    test_passed = d.get("test_passed")
-                    test_total = d.get("test_total")
-                    if (
-                        test_total is None
-                        or test_passed is None
-                        or test_total == 0
-                        or test_passed < test_total
-                    ):
-                        return False
+                cached_max_tokens = int(m.group(0))
+                mp = pat_passed.search(tail)
+                mt = pat_total.search(tail)
+                fully_passed = (
+                    mp is not None and mt is not None
+                    and int(mt.group(1)) > 0
+                    and int(mp.group(1)) == int(mt.group(1))
+                )
+                if rejection_samples > 0 and not fully_passed:
+                    return False
+                if cached_max_tokens < self.max_tokens and not fully_passed:
+                    return False
                 return True
             except Exception:
                 return False
@@ -252,11 +312,11 @@ class LocalTeacherModel:
                     score_out = list(ex.map(
                         lambda ir: self._score_gen(ir[1], test_cases_per_prompt[ir[0]]),
                         [(idx, gen) for (idx, _), gen in zip(chunk, results)]))
-                for (idx, prompt), gen, (test_passed, test_total) in zip(chunk, results, score_out):
-                    scored.append([idx, prompt, gen, test_passed, test_total])
+                for (idx, prompt), gen, score in zip(chunk, results, score_out):
+                    scored.append([idx, prompt, gen, score["passed"], score["total"], score])
             else:
                 for (idx, prompt), gen in zip(chunk, results):
-                    scored.append([idx, prompt, gen, None, None])
+                    scored.append([idx, prompt, gen, None, None, None])
 
             if rejection_samples > 0 and test_cases_per_prompt is not None:
                 remaining = [s for s in scored
@@ -281,32 +341,45 @@ class LocalTeacherModel:
                                 tasks.append((ri, ci, candidate, tcs))
                         with ThreadPoolExecutor(max_workers=min(16, max(1, len(tasks)))) as ex:
                             task_scores = list(ex.map(
-                                lambda t: self._score_result(t[2], t[3]), tasks))
+                                lambda t: self._score_gen(t[2], t[3]), tasks))
                         by_prompt = {}
-                        for (ri, ci, candidate, _), (cand_passed, cand_total) in zip(tasks, task_scores):
-                            by_prompt.setdefault(ri, []).append((ci, candidate, cand_passed, cand_total))
+                        for (ri, ci, candidate, _), score in zip(tasks, task_scores):
+                            by_prompt.setdefault(ri, []).append((ci, candidate, score))
                         still = []
                         for ri, s in enumerate(remaining):
                             hit = False
-                            for ci, candidate, cand_passed, cand_total in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
-                                if self._fully_passed(cand_passed, cand_total):
-                                    s[2], s[3], s[4] = candidate, cand_passed, cand_total
+                            for ci, candidate, score in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
+                                if self._fully_passed(score["passed"], score["total"]):
+                                    s[2], s[3], s[4], s[5] = candidate, score["passed"], score["total"], score
                                     recovered += 1
                                     hit = True
                                     break
                             if not hit:
+                                # keep the best-scoring candidate's diagnostics for logging
+                                best = max(by_prompt.get(ri, []),
+                                           key=lambda x: (x[2].get("passed") or 0), default=None)
+                                if best is not None and (best[2].get("passed") or 0) > (s[5].get("passed") or 0):
+                                    s[5] = best[2]
                                 still.append(s)
                         remaining = still
                     print(f"  rejection recovered {recovered}/{failed_count} prompts "
                           f"(generated up to {generated}/{rejection_samples} per prompt).")
 
-            for idx, prompt, result, test_passed, test_total in scored:
+            if test_cases_per_prompt is not None:
+                failed = [(f"prompt {s[0]}", s[5]) for s in scored
+                          if s[4] is not None and not self._fully_passed(s[3], s[4]) and s[5] is not None]
+                if failed:
+                    print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
+                    self._log_failures(failed)
+
+            for idx, prompt, gen, test_passed, test_total, score in scored:
                 if test_total is not None:
                     if self._fully_passed(test_passed, test_total):
                         pass_count += 1
                     else:
                         fail_count += 1
 
+                result = self._extract_one(gen)
                 payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
                 if test_total is not None:
                     payload["test_passed"] = test_passed
@@ -345,7 +418,7 @@ class LocalTeacherModel:
         top_k_ids_per_token = []
         top_k_vals_per_token = []
         for pos in range(prompt_len, len(full_token_ids)):
-            tokens.append(self.tokenizer.decode([full_token_ids[pos]]))
+            tokens.append(self._tok_str(int(full_token_ids[pos])))
             lp_dict = prompt_logprobs[pos] if pos < len(prompt_logprobs) else None
             top_k_dict, student_ids, student_vals = self._topk_to_student(lp_dict)
             logprobs_per_token.append(top_k_dict)

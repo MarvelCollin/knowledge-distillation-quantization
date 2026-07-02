@@ -310,7 +310,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
         post_load = gpu_used_gb()
         print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
 
-        eval_chunk_size = 3 if is_teacher else 10
+        eval_chunk_size = 8 if is_teacher else 24
         total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
         print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
               f"(budget-forced think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
