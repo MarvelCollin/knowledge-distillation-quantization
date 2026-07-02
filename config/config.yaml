@@ -4,21 +4,22 @@ data:
   teacher_cache_dir: cache/teacher_logprobs_coder15b
   train_ratio: 0.9
 evaluation:
-  max_new_tokens: 24576
+  max_new_tokens: 15360
   output_dir: outputs/eval
 student:
-  max_length: 12288
+  max_length: 16384
   model_name: Qwen/Qwen2.5-Coder-1.5B-Instruct
 teacher:
   local_model_path: cache/teacher-model-r1-7b
-  max_tokens: 14336
-  temperature: 0.8
-  top_p: 1.0
+  max_tokens: 16384
+  temperature: 0.6
+  top_p: 0.95
   top_logprobs: 20
-  gpu_memory_utilization: 0.90
+  gpu_memory_utilization: 0.92
   max_model_len: 18432
   cache_chunk_size: 16
   rejection_samples: 6
+  rejection_wave: 2
   rejection_temperature: 1.0
   rejection_top_p: 0.95
 training:
@@ -38,7 +39,7 @@ training:
   adaptive_skew: true
   teacher_confidence_weight: false
   select_problems: 20
-  select_max_new_tokens: 8192
+  select_max_new_tokens: 15360
   warmup_steps: 30
   weight_decay: 0.01
   neftune_alpha: 5.0

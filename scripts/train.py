@@ -199,6 +199,7 @@ def main():
             test_cases_per_prompt=raw_tests,
             chunk_size=chunk_size,
             rejection_samples=config["teacher"].get("rejection_samples", 0),
+            rejection_wave=config["teacher"].get("rejection_wave", 2),
             rejection_temperature=config["teacher"].get("rejection_temperature", 1.0),
             rejection_top_p=config["teacher"].get("rejection_top_p", 0.95),
         )

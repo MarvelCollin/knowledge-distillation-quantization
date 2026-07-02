@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import re
 import shutil
@@ -309,25 +310,177 @@ def _classify(outcome: str, error: str) -> str:
     return "runtime_error"
 
 
-def run_test_cases(code: str, test_cases: list) -> dict:
+_BATCH_RUNNER = r'''
+import sys, json, io, gc, signal, traceback, resource
+
+
+def _classify(outcome, error):
+    if outcome == 'pass':
+        return 'pass'
+    if outcome == 'timeout':
+        return 'timeout'
+    if 'SyntaxError' in error or 'IndentationError' in error:
+        return 'syntax_error'
+    if 'AssertionError' in error:
+        return 'wrong_answer'
+    if 'NameError' in error and 'not defined' in error:
+        return 'missing_function'
+    return 'runtime_error'
+
+
+def main():
+    payload = json.load(open(sys.argv[1]))
+    bodies = payload['bodies']
+    timeout = float(payload['timeout'])
+    preamble = payload['preamble']
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (payload['mem'], payload['mem']))
+        resource.setrlimit(resource.RLIMIT_DATA, (payload['mem'], payload['mem']))
+        resource.setrlimit(resource.RLIMIT_STACK, (payload['stack'], payload['stack']))
+        resource.setrlimit(resource.RLIMIT_CPU, (payload['cpu'], payload['cpu']))
+    except Exception:
+        pass
+
+    class _TO(BaseException):
+        pass
+
+    def _handler(signum, frame):
+        raise _TO()
+
+    signal.signal(signal.SIGALRM, _handler)
+
+    base = {}
+    exec(compile(preamble, '<preamble>', 'exec'), base)
+
+    real_out = sys.stdout
+    consecutive_to = 0
+    aborted = False
+    for i, body in enumerate(bodies):
+        if aborted:
+            real_out.write(json.dumps({'i': i, 'outcome': 'timeout', 'category': 'timeout', 'error': 'skipped after repeated timeouts'}) + '\n')
+            real_out.flush()
+            continue
+        buf = io.StringIO()
+        ns = dict(base)
+        outcome = 'pass'
+        error = ''
+        sys.stdout = buf
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            exec(compile(body, '<solution>', 'exec'), ns)
+        except _TO:
+            outcome = 'timeout'
+            error = 'execution timed out'
+        except BaseException:
+            outcome = 'fail'
+            error = buf.getvalue() + '\n' + traceback.format_exc()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            sys.stdout = real_out
+        ns.clear()
+        del ns
+        gc.collect()
+        if outcome == 'timeout':
+            consecutive_to += 1
+            if consecutive_to >= 3:
+                aborted = True
+        else:
+            consecutive_to = 0
+        category = _classify(outcome, error)
+        if len(error) > 4000:
+            error = error[:4000]
+        real_out.write(json.dumps({'i': i, 'outcome': outcome, 'category': category, 'error': error}) + '\n')
+        real_out.flush()
+
+
+main()
+'''
+
+
+def _run_bodies_batch(bodies: list, timeout: float) -> dict:
+    n = len(bodies)
+    workdir = tempfile.mkdtemp(prefix="exec_")
+    out = ""
+    try:
+        payload = {
+            "bodies": bodies,
+            "timeout": timeout,
+            "mem": _MEMORY_LIMIT_BYTES,
+            "stack": _STACK_LIMIT_BYTES,
+            "cpu": int(timeout * n + 30),
+            "preamble": _LEETCODE_PREAMBLE,
+        }
+        payload_path = os.path.join(workdir, "payload.json")
+        runner_path = os.path.join(workdir, "runner.py")
+        with open(payload_path, "w") as f:
+            json.dump(payload, f)
+        with open(runner_path, "w") as f:
+            f.write(_BATCH_RUNNER)
+        proc = subprocess.Popen(
+            [sys.executable, runner_path, payload_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            cwd=workdir,
+            env={"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
+            start_new_session=True,
+        )
+        overall = timeout * n + 30
+        try:
+            out, _ = proc.communicate(timeout=overall)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            out, _ = proc.communicate()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    parsed = {}
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            parsed[obj["i"]] = obj
+        except Exception:
+            continue
+
     passed = 0
-    details = []
-    errors = []
-    categories = []
-    for assertion in test_cases:
-        outcome, error = execute_assertion(code, assertion)
+    details, errors, categories = [], [], []
+    for i in range(n):
+        obj = parsed.get(i)
+        if obj is None:
+            details.append("timeout")
+            errors.append("execution timed out (batch aborted)")
+            categories.append("timeout")
+            continue
+        outcome = obj.get("outcome", "fail")
+        error = obj.get("error", "")
+        category = obj.get("category") or _classify(outcome, error)
         details.append(outcome)
         errors.append(error)
-        categories.append(_classify(outcome, error))
+        categories.append(category)
         if outcome == "pass":
             passed += 1
     return {
         "passed": passed,
-        "total": len(test_cases),
+        "total": n,
         "details": details,
         "errors": errors,
         "categories": categories,
     }
+
+
+def run_test_cases(code: str, test_cases: list, timeout: float = 5.0) -> dict:
+    if not test_cases:
+        return {"passed": 0, "total": 0, "details": [], "errors": [], "categories": []}
+    bodies = []
+    for assertion in test_cases:
+        candidate, rewritten = _prepare_assertion(assertion)
+        aliased = _alias_candidate(code, candidate)
+        bodies.append(aliased + "\n\n" + rewritten + "\n")
+    return _run_bodies_batch(bodies, timeout)
 
 
 def failing_cases(result: dict, limit: int = 3) -> list:

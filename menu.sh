@@ -26,21 +26,11 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Training${NC}"
     echo "  1) Run training              (build/refresh teacher cache, then train, then compare)"
-    echo "  2) Run training --offline    (skip cache build, use existing cache)"
-    echo "  3) Run evaluation            (single checkpoint, val split)"
-    echo "  4) Compare original | teacher | distilled + graph"
+    echo "  2) Compare original | teacher | distilled + graph"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
-    echo "  5) View cached teacher responses"
-    echo "  6) Reset teacher cache (delete all OR failed-only)"
-    echo "  r) Rescore failed cache (recover harness-fixed entries, CPU-only)"
-    echo ""
-    echo -e "  ${BOLD}Docker${NC}"
-    echo "  7) Build Docker image"
-    echo "  8) Open shell inside container"
-    echo ""
-    echo -e "  ${BOLD}GPU Setup${NC}"
-    echo "  9) Install nvidia-container-toolkit (requires sudo)"
+    echo "  3) Reset teacher cache (delete all OR failed-only)"
+    echo "  4) Rescore failed cache        (recover harness-fixed entries, CPU-only)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -385,54 +375,9 @@ while true; do
             stop_sudo_alive
             ;;
         2)
-            header
-            REC_SAMPLES=1000
-            cfg_epochs=$(grep 'num_epochs' config/config.yaml | awk '{print $2}')
-            cfg_seed=$(grep 'seed:' config/config.yaml | awk '{print $2}')
-            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
-            echo -e "  ${BOLD}Offline training${NC} (skip cache build, use existing cache)"
-            echo ""
-            echo -e "  Fixed config: epochs=${cfg_epochs}, seed=${cfg_seed} (edit config/config.yaml to change)"
-            echo ""
-            if show_cache_status "$cache_dir"; then
-                REC_SAMPLES=$((CACHE_MAX_IDX + 1))
-            else
-                echo -e "    ${RED}→ offline training will fail without a cache${NC}"
-            fi
-            echo ""
-            echo -n "  max_samples [default: ${REC_SAMPLES}]: "
-            read -r ns
-            [ -z "$ns" ] && ns=$REC_SAMPLES
-            echo ""
-            prompt_compare_after
-            echo ""
-            keep_sudo_alive
-            run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py --offline --max-samples $ns"
-            stop_sudo_alive
-            ;;
-        3)
-            header
-            ckpt="outputs/final"
-            if [ ! -d "$ckpt" ]; then
-                echo -e "${RED}No checkpoint at ${ckpt}. Run training first.${NC}"
-                echo ""
-                read -rp "Press Enter to return to menu..."
-            else
-                echo -e "Checkpoint: ${GREEN}${ckpt}${NC}"
-                echo -n "Verbose output? (y/n) [default: n]: "
-                read -r vb
-                vflag=""
-                [ "$vb" = "y" ] || [ "$vb" = "Y" ] && vflag=" --verbose"
-                run_cmd "sudo docker compose run --rm evaluate python scripts/evaluate.py --checkpoint /workspace/$ckpt$vflag"
-            fi
-            ;;
-        4)
             run_compare_eval
             ;;
-        5)
-            view_cache
-            ;;
-        6)
+        3)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
             cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
@@ -534,7 +479,7 @@ PYEOF
                 read -rp "Press Enter to return to menu..."
             fi
             ;;
-        r|R)
+        4)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
             cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
@@ -556,21 +501,6 @@ PYEOF
                 echo ""
                 read -rp "Press Enter to return to menu..."
             fi
-            ;;
-        7)
-            header
-            run_cmd "sudo docker compose build"
-            ;;
-        8)
-            header
-            echo -e "${YELLOW}▶ Opening shell inside train container...${NC}"
-            echo ""
-            sudo docker compose run --rm train bash
-            echo ""
-            read -rp "Press Enter to return to menu..."
-            ;;
-        9)
-            install_nvidia_toolkit
             ;;
         q|Q)
             echo -e "${NC}Bye."

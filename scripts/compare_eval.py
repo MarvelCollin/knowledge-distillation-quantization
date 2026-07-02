@@ -281,7 +281,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
     available_for_vllm = free_gb / total_gb
     safety_margin = 0.05
-    base_util = 0.82
+    base_util = 0.90
     ceiling_util = MEM_CEILING_GB / total_gb
     gpu_mem_util = min(base_util, available_for_vllm - safety_margin, ceiling_util)
     gpu_mem_util = max(gpu_mem_util, 0.30)
@@ -607,7 +607,7 @@ def main() -> None:
     distilled_path = args.distilled
     if distilled_path is None:
         out_dir = Path(config["training"]["output_dir"])
-        for name in ("final_last", "final"):
+        for name in ("final", "final_last"):
             cand = out_dir / name
             if (cand / "model.safetensors").exists():
                 distilled_path = str(cand)

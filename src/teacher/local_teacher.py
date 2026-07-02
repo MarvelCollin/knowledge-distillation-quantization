@@ -1,6 +1,7 @@
 import gc
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -55,6 +56,7 @@ class LocalTeacherModel:
             max_model_len=max_model_len,
             trust_remote_code=True,
             enforce_eager=enforce_eager,
+            enable_prefix_caching=True,
         )
         if enable_chunked_prefill:
             llm_kwargs["enable_chunked_prefill"] = True
@@ -134,6 +136,15 @@ class LocalTeacherModel:
         outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=True)
         return [self._extract_result(o) for o in outputs]
 
+    def _generate_raw(self, prompts: list) -> list:
+        """Generate one trajectory per prompt, returning raw vLLM outputs.
+
+        Logprob->student extraction is deferred to _extract_one so it runs only on
+        the trajectory finally kept for each prompt (see precompute_and_cache)."""
+        formatted = [self._format_prompt(p) for p in prompts]
+        outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=True)
+        return [o.outputs[0] for o in outputs]
+
     def sample_candidates_batch(self, prompts: list, n: int,
                                 temperature: float, top_p: float) -> list:
         from vllm import SamplingParams
@@ -148,15 +159,25 @@ class LocalTeacherModel:
         )
         formatted = [self._format_prompt(p) for p in prompts]
         outputs = self.llm.generate(formatted, sp, use_tqdm=True)
-        return [[self._extract_one(g) for g in o.outputs] for o in outputs]
+        return [list(o.outputs) for o in outputs]
 
     @staticmethod
     def _fully_passed(test_passed, test_total) -> bool:
         return test_total is not None and test_total > 0 and test_passed == test_total
 
     def _score_result(self, result: dict, test_cases: list) -> tuple:
+        return self._score_text(result.get("text", ""), test_cases)
+
+    def _score_gen(self, gen, test_cases: list) -> tuple:
+        """Score a raw vLLM output by decoding only its text (no logprob extraction)."""
+        return self._score_text(
+            self.tokenizer.decode(list(gen.token_ids), skip_special_tokens=True),
+            test_cases,
+        )
+
+    def _score_text(self, text: str, test_cases: list) -> tuple:
         try:
-            code = extract_code(result.get("text", ""))
+            code = extract_code(text)
             r = run_test_cases(code, test_cases)
             return r["passed"], r["total"]
         except Exception as exc:
@@ -167,6 +188,7 @@ class LocalTeacherModel:
                              test_cases_per_prompt: list = None,
                              chunk_size: int = 64,
                              rejection_samples: int = 0,
+                             rejection_wave: int = 2,
                              rejection_temperature: float = 1.0,
                              rejection_top_p: float = 0.95) -> None:
         cache_path = Path(cache_dir)
@@ -222,36 +244,61 @@ class LocalTeacherModel:
             chunk_t0 = time.time()
             print(f"\n[chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts via vLLM...")
 
-            results = self.get_responses_batch(chunk_prompts)
+            results = self._generate_raw(chunk_prompts)
 
             scored = []
-            for (idx, prompt), result in zip(chunk, results):
-                test_passed = None
-                test_total = None
-                if test_cases_per_prompt is not None:
-                    test_passed, test_total = self._score_result(
-                        result, test_cases_per_prompt[idx])
-                scored.append([idx, prompt, result, test_passed, test_total])
+            if test_cases_per_prompt is not None:
+                with ThreadPoolExecutor(max_workers=min(16, len(chunk))) as ex:
+                    score_out = list(ex.map(
+                        lambda ir: self._score_gen(ir[1], test_cases_per_prompt[ir[0]]),
+                        [(idx, gen) for (idx, _), gen in zip(chunk, results)]))
+                for (idx, prompt), gen, (test_passed, test_total) in zip(chunk, results, score_out):
+                    scored.append([idx, prompt, gen, test_passed, test_total])
+            else:
+                for (idx, prompt), gen in zip(chunk, results):
+                    scored.append([idx, prompt, gen, None, None])
 
             if rejection_samples > 0 and test_cases_per_prompt is not None:
-                failed = [s for s in scored
-                          if s[4] is not None and not self._fully_passed(s[3], s[4])]
-                if failed:
-                    print(f"  rejection sampling {len(failed)} failed prompts "
-                          f"(n={rejection_samples}, temp={rejection_temperature})...")
-                    candidate_lists = self.sample_candidates_batch(
-                        [s[1] for s in failed], rejection_samples,
-                        rejection_temperature, rejection_top_p)
+                remaining = [s for s in scored
+                             if s[4] is not None and not self._fully_passed(s[3], s[4])]
+                failed_count = len(remaining)
+                if remaining:
+                    wave = max(1, rejection_wave)
+                    print(f"  rejection sampling {failed_count} failed prompts "
+                          f"(n={rejection_samples}, wave={wave}, temp={rejection_temperature})...")
                     recovered = 0
-                    for s, candidates in zip(failed, candidate_lists):
-                        tcs = test_cases_per_prompt[s[0]]
-                        for candidate in candidates:
-                            cand_passed, cand_total = self._score_result(candidate, tcs)
-                            if self._fully_passed(cand_passed, cand_total):
-                                s[2], s[3], s[4] = candidate, cand_passed, cand_total
-                                recovered += 1
-                                break
-                    print(f"  rejection recovered {recovered}/{len(failed)} prompts.")
+                    generated = 0
+                    while remaining and generated < rejection_samples:
+                        n_this = min(wave, rejection_samples - generated)
+                        candidate_lists = self.sample_candidates_batch(
+                            [s[1] for s in remaining], n_this,
+                            rejection_temperature, rejection_top_p)
+                        generated += n_this
+                        tasks = []
+                        for ri, (s, candidates) in enumerate(zip(remaining, candidate_lists)):
+                            tcs = test_cases_per_prompt[s[0]]
+                            for ci, candidate in enumerate(candidates):
+                                tasks.append((ri, ci, candidate, tcs))
+                        with ThreadPoolExecutor(max_workers=min(16, max(1, len(tasks)))) as ex:
+                            task_scores = list(ex.map(
+                                lambda t: self._score_result(t[2], t[3]), tasks))
+                        by_prompt = {}
+                        for (ri, ci, candidate, _), (cand_passed, cand_total) in zip(tasks, task_scores):
+                            by_prompt.setdefault(ri, []).append((ci, candidate, cand_passed, cand_total))
+                        still = []
+                        for ri, s in enumerate(remaining):
+                            hit = False
+                            for ci, candidate, cand_passed, cand_total in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
+                                if self._fully_passed(cand_passed, cand_total):
+                                    s[2], s[3], s[4] = candidate, cand_passed, cand_total
+                                    recovered += 1
+                                    hit = True
+                                    break
+                            if not hit:
+                                still.append(s)
+                        remaining = still
+                    print(f"  rejection recovered {recovered}/{failed_count} prompts "
+                          f"(generated up to {generated}/{rejection_samples} per prompt).")
 
             for idx, prompt, result, test_passed, test_total in scored:
                 if test_total is not None:

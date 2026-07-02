@@ -72,7 +72,7 @@ def budget_forced_generate(llm, prompts, signatures, num_samples,
             think_prompts.append(prompt)
             think_params.append(SamplingParams(
                 temperature=temp, top_p=tp, max_tokens=think_budget, n=1,
-                stop=[THINK_END_TAG], include_stop_str_in_output=True, seed=seed + j,
+                stop=[THINK_END_TAG], include_stop_str_in_output=True, repetition_penalty=1.05, seed=seed + j,
             ))
             sample_index.append((i, j))
     phase1 = llm.generate(think_prompts, think_params, use_tqdm=True)
@@ -88,7 +88,7 @@ def budget_forced_generate(llm, prompts, signatures, num_samples,
         cont_prompts.append(prompts[i] + closed + primer)
         code_params.append(SamplingParams(
             temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
-            stop=["```"], include_stop_str_in_output=False, seed=seed + j,
+            stop=["```"], include_stop_str_in_output=False, repetition_penalty=1.05, seed=seed + j,
         ))
         meta.append((i, j, closed, primer))
 
