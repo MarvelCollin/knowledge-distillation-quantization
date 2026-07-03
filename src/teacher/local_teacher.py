@@ -168,17 +168,14 @@ class LocalTeacherModel:
         outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=True)
         return [self._extract_result(o) for o in outputs]
 
-    def _generate_raw(self, prompts: list) -> list:
-        """Generate one trajectory per prompt, returning raw vLLM outputs.
-
-        Logprob->student extraction is deferred to _extract_one so it runs only on
-        the trajectory finally kept for each prompt (see precompute_and_cache)."""
-        formatted = [self._format_prompt(p) for p in prompts]
-        outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=True)
-        return [o.outputs[0] for o in outputs]
-
     def sample_candidates_batch(self, prompts: list, n: int,
                                 temperature: float, top_p: float) -> list:
+        """Generate n rejection candidates per prompt WITHOUT logprobs.
+
+        Candidates only need text to be test-scored; computing top-k logprobs here
+        would be wasted on the ~all discarded candidates (and their objects are what
+        blows up host RAM). The single winning candidate gets exact logprobs later via
+        _teacher_force_batch. Returns lightweight {text, token_ids} dicts."""
         from vllm import SamplingParams
 
         sp = SamplingParams(
@@ -186,25 +183,67 @@ class LocalTeacherModel:
             temperature=temperature,
             top_p=top_p,
             max_tokens=self.max_tokens,
-            logprobs=self.top_logprobs,
+            logprobs=None,
             repetition_penalty=1.05,
         )
         formatted = [self._format_prompt(p) for p in prompts]
         outputs = self.llm.generate(formatted, sp, use_tqdm=True)
-        return [list(o.outputs) for o in outputs]
+        return [[{"text": self.tokenizer.decode(list(g.token_ids), skip_special_tokens=True),
+                  "token_ids": list(g.token_ids)} for g in o.outputs] for o in outputs]
+
+    def _teacher_force_batch(self, items: list) -> list:
+        """Recover exact teacher logprobs for kept trajectories in one forward pass.
+
+        items: list of (prompt_text, response_token_ids). Teacher-forces prompt+response
+        with prompt_logprobs, yielding the true top-k distribution over the response
+        tokens — identical to what sampling-with-logprobs would have produced, so this
+        is quality-neutral. Reuses the rescore path."""
+        from vllm import SamplingParams
+
+        sp = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=1,
+                            prompt_logprobs=self.top_logprobs)
+        cap = self.max_model_len - 1
+        token_prompts, prompt_lens = [], []
+        for prompt_text, resp_ids in items:
+            p_ids = self.tokenizer(self._format_prompt(prompt_text),
+                                   add_special_tokens=False).input_ids
+            full_ids = (list(p_ids) + list(resp_ids))[:cap]
+            token_prompts.append({"prompt_token_ids": full_ids})
+            prompt_lens.append(len(p_ids))
+        outputs = self.llm.generate(token_prompts, sp, use_tqdm=False)
+        return [self._rescore_one(o.prompt_token_ids, o.prompt_logprobs or [], plen)
+                for o, plen in zip(outputs, prompt_lens)]
 
     @staticmethod
     def _fully_passed(test_passed, test_total) -> bool:
         return test_total is not None and test_total > 0 and test_passed == test_total
 
-    def _score_gen(self, gen, test_cases: list) -> dict:
-        """Score a raw vLLM output by decoding only its text (no logprob extraction).
+    @staticmethod
+    def _cached_fully_passed(cache_path, idx: int) -> bool:
+        """True if the cache file for idx already holds a fully-passing trajectory.
+        Tail-read only (labels are the last keys) so it stays cheap on big files."""
+        f = cache_path / f"{idx}.json"
+        if not f.exists():
+            return False
+        try:
+            with open(f, "rb") as fh:
+                size = fh.seek(0, 2)
+                fh.seek(max(0, size - 400))
+                tail = fh.read()
+            mp = re.search(rb'"test_passed":\s*(\d+)', tail)
+            mt = re.search(rb'"test_total":\s*(\d+)', tail)
+            return (mp is not None and mt is not None
+                    and int(mt.group(1)) > 0 and int(mp.group(1)) == int(mt.group(1)))
+        except Exception:
+            return False
+
+    def _score_result(self, result: dict, test_cases: list) -> dict:
+        """Score an already-extracted trajectory dict by its text.
 
         Returns the full run_test_cases dict (passed/total/details/errors/categories)
         so failures can be logged with root-cause detail."""
-        text = self.tokenizer.decode(list(gen.token_ids), skip_special_tokens=True)
         try:
-            return run_test_cases(extract_code(text), test_cases)
+            return run_test_cases(extract_code(result.get("text", "")), test_cases)
         except Exception as exc:
             print(f"  test exec error: {type(exc).__name__}: {exc}")
             return {"passed": None, "total": None, "details": [], "errors": [], "categories": []}
@@ -304,19 +343,19 @@ class LocalTeacherModel:
             chunk_t0 = time.time()
             print(f"\n[chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts via vLLM...")
 
-            results = self._generate_raw(chunk_prompts)
+            results = self.get_responses_batch(chunk_prompts)
 
             scored = []
             if test_cases_per_prompt is not None:
                 with ThreadPoolExecutor(max_workers=min(16, len(chunk))) as ex:
                     score_out = list(ex.map(
-                        lambda ir: self._score_gen(ir[1], test_cases_per_prompt[ir[0]]),
-                        [(idx, gen) for (idx, _), gen in zip(chunk, results)]))
-                for (idx, prompt), gen, score in zip(chunk, results, score_out):
-                    scored.append([idx, prompt, gen, score["passed"], score["total"], score])
+                        lambda ir: self._score_result(ir[1], test_cases_per_prompt[ir[0]]),
+                        [(idx, result) for (idx, _), result in zip(chunk, results)]))
+                for (idx, prompt), result, score in zip(chunk, results, score_out):
+                    scored.append([idx, prompt, result, score["passed"], score["total"], score])
             else:
-                for (idx, prompt), gen in zip(chunk, results):
-                    scored.append([idx, prompt, gen, None, None, None])
+                for (idx, prompt), result in zip(chunk, results):
+                    scored.append([idx, prompt, result, None, None, None])
 
             if rejection_samples > 0 and test_cases_per_prompt is not None:
                 remaining = [s for s in scored
@@ -328,6 +367,7 @@ class LocalTeacherModel:
                           f"(n={rejection_samples}, wave={wave}, temp={rejection_temperature})...")
                     recovered = 0
                     generated = 0
+                    recovered_winners = []
                     while remaining and generated < rejection_samples:
                         n_this = min(wave, rejection_samples - generated)
                         candidate_lists = self.sample_candidates_batch(
@@ -341,7 +381,7 @@ class LocalTeacherModel:
                                 tasks.append((ri, ci, candidate, tcs))
                         with ThreadPoolExecutor(max_workers=min(16, max(1, len(tasks)))) as ex:
                             task_scores = list(ex.map(
-                                lambda t: self._score_gen(t[2], t[3]), tasks))
+                                lambda t: self._score_result(t[2], t[3]), tasks))
                         by_prompt = {}
                         for (ri, ci, candidate, _), score in zip(tasks, task_scores):
                             by_prompt.setdefault(ri, []).append((ci, candidate, score))
@@ -351,6 +391,7 @@ class LocalTeacherModel:
                             for ci, candidate, score in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
                                 if self._fully_passed(score["passed"], score["total"]):
                                     s[2], s[3], s[4], s[5] = candidate, score["passed"], score["total"], score
+                                    recovered_winners.append((s, candidate["token_ids"]))
                                     recovered += 1
                                     hit = True
                                     break
@@ -364,6 +405,11 @@ class LocalTeacherModel:
                         remaining = still
                     print(f"  rejection recovered {recovered}/{failed_count} prompts "
                           f"(generated up to {generated}/{rejection_samples} per prompt).")
+                    if recovered_winners:
+                        forced = self._teacher_force_batch(
+                            [(s[1], tids) for s, tids in recovered_winners])
+                        for (s, _), full_result in zip(recovered_winners, forced):
+                            s[2] = full_result
 
             if test_cases_per_prompt is not None:
                 failed = [(f"prompt {s[0]}", s[5]) for s in scored
@@ -372,14 +418,21 @@ class LocalTeacherModel:
                     print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
                     self._log_failures(failed)
 
-            for idx, prompt, gen, test_passed, test_total, score in scored:
+            for idx, prompt, result, test_passed, test_total, score in scored:
+                new_pass = self._fully_passed(test_passed, test_total)
+                # Monotonic cache: never downgrade an already-passing trajectory with a
+                # worse re-attempt. Rejection sampling is stochastic, so a prompt that
+                # passed on a prior run can fail this one — keep the good trajectory.
+                if test_total is not None and not new_pass and self._cached_fully_passed(cache_path, idx):
+                    pass_count += 1
+                    continue
+
                 if test_total is not None:
-                    if self._fully_passed(test_passed, test_total):
+                    if new_pass:
                         pass_count += 1
                     else:
                         fail_count += 1
 
-                result = self._extract_one(gen)
                 payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
                 if test_total is not None:
                     payload["test_passed"] = test_passed

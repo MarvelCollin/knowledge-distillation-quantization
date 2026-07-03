@@ -31,6 +31,7 @@ show_menu() {
     echo -e "  ${BOLD}Cache${NC}"
     echo "  3) Reset teacher cache (delete all OR failed-only)"
     echo "  4) Rescore failed cache        (recover harness-fixed entries, CPU-only)"
+    echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -457,6 +458,31 @@ PYEOF
             read -r ans
             if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
                 run_cmd "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
+            else
+                echo ""
+                echo -e "  Cancelled."
+                echo ""
+                read -rp "Press Enter to return to menu..."
+            fi
+            ;;
+        5)
+            header
+            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
+            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
+            echo -e "  ${BOLD}Diagnose teacher cache${NC} (${cache_dir})"
+            echo ""
+            echo -e "  Two CPU-only checks (no GPU, safe alongside a GPU job):"
+            echo -e "    ${CYAN}prompt-match${NC} : how many cached prompts still match the current builder"
+            echo -e "                   (stale prompts = passing entries pointlessly re-generated)"
+            echo -e "    ${CYAN}failure-cause${NC}: why the failing trajectories fail"
+            echo -e "                   (syntax_error / wrong_answer / timeout / missing_function)"
+            echo ""
+            echo -n "  Run diagnostics now? (y/n): "
+            read -r ans
+            if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+                run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/check_cache_prompts.py"
+                echo ""
+                run_cmd "sudo docker compose run --rm compare_eval python scripts/analyze_failures.py"
             else
                 echo ""
                 echo -e "  Cancelled."
