@@ -1,16 +1,16 @@
 data:
   dataset_name: newfacade/LeetCodeDataset
   max_samples: 2600
-  teacher_cache_dir: cache/teacher_logprobs_coder15b
+  teacher_cache_dir: cache/teacher_logprobs_ocr7b
   train_ratio: 0.9
 evaluation:
-  max_new_tokens: 15360
+  max_new_tokens: 20480
   output_dir: outputs/eval
 student:
   max_length: 16384
   model_name: Qwen/Qwen2.5-Coder-1.5B-Instruct
 teacher:
-  local_model_path: cache/teacher-model-r1-7b
+  local_model_path: cache/teacher-model-ocr-7b
   max_tokens: 16384
   temperature: 0.6
   top_p: 0.95
@@ -22,8 +22,8 @@ teacher:
   max_num_batched_tokens: 4096
   max_num_seqs: 16
   cache_chunk_size: 16
-  rejection_samples: 1
-  rejection_wave: 1
+  rejection_samples: 0
+  rejection_wave: 0
   rejection_temperature: 1.0
   rejection_top_p: 0.95
 training:

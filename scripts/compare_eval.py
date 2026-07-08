@@ -50,11 +50,15 @@ _INTERMEDIATE = Path("outputs/eval/intermediate")
 MEM_CEILING_GB = 22.0
 
 COLORS = {
-    "Student (original)":            "#4e79a7",
-    "Teacher (R1-Distill-Qwen-7B)":  "#f28e2b",
-    "Student (distilled)":           "#59a14f",
+    "Student original":  "#4e79a7",
+    "Teacher":           "#f28e2b",
+    "Student distilled": "#59a14f",
 }
 FALLBACK_COLOR = "#888888"
+
+
+def _color(name: str) -> str:
+    return next((c for k, c in COLORS.items() if name.startswith(k)), FALLBACK_COLOR)
 
 
 def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> list:
@@ -423,7 +427,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     n_problems = summaries[0]["num_problems"]
     matrix     = np.array([[r["solved"] for r in s["per_problem"]] for s in summaries],
                            dtype=float)
-    colors     = [COLORS.get(n, FALLBACK_COLOR) for n in names]
+    colors     = [_color(n) for n in names]
 
     fig = plt.figure(figsize=(18, 11))
     fig.patch.set_facecolor("#0f0f1a")
@@ -463,7 +467,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
         baseline = np.array([r["solved"] for r in summaries[0]["per_problem"]], dtype=float)
         for j, s in enumerate(summaries[1:], start=1):
             delta = np.array([r["solved"] for r in s["per_problem"]], dtype=float) - baseline
-            col = COLORS.get(s["name"], FALLBACK_COLOR)
+            col = _color(s["name"])
             ax_delta.bar(
                 np.arange(n_problems) + (j - 1) * 0.3, delta,
                 width=0.28, color=col, alpha=0.85, label=s["name"],
@@ -474,7 +478,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
         ax_delta.set_xticklabels(np.arange(n_problems), fontsize=7, color="#aaaaaa")
         ax_delta.set_xlabel("Problem index (test split)", color="#aaaaaa", fontsize=10)
         ax_delta.set_title(
-            f"Δ vs Student (original)  — +1 = newly solved, -1 = regression",
+            f"Δ vs {summaries[0]['name']}  — +1 = newly solved, -1 = regression",
             color="white", fontsize=12, pad=8,
         )
         ax_delta.set_ylim(-1.4, 1.4)
@@ -509,12 +513,12 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
         lbl.set_color("white")
 
     summary_lines = [
-        f"{'Model':<30}  {'test-case':>10}  {'solved':>10}",
-        "─" * 56,
+        f"{'Model':<48}  {'test-case':>10}  {'solved':>10}",
+        "─" * 74,
     ]
     for s in summaries:
         summary_lines.append(
-            f"{s['name']:<30}"
+            f"{s['name']:<48}"
             f"  {s['test_pass_rate']:>9.1%}"
             f"  {s['problems_solved']:>3}/{s['num_problems']}"
         )
@@ -580,8 +584,10 @@ def main() -> None:
 
     summaries = []
 
+    student_base = student_model.split("/")[-1]
+
     summaries.append(evaluate_model(
-        "Student (original)", student_model,
+        f"Student original ({student_base})", student_model,
         problems, max_new_tokens, device, is_teacher=False,
         dataset_name=dataset_name,
         num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
@@ -590,7 +596,7 @@ def main() -> None:
 
     if not args.skip_teacher:
         summaries.append(evaluate_model(
-            "Teacher (R1-Distill-Qwen-7B)", teacher_path,
+            "Teacher (OpenCodeReasoning-Nemotron-7B)", teacher_path,
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
@@ -608,7 +614,7 @@ def main() -> None:
                 break
     if distilled_path:
         summaries.append(evaluate_model(
-            "Student (distilled)", distilled_path,
+            f"Student distilled ({student_base})", distilled_path,
             problems, max_new_tokens, device, is_teacher=False,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
@@ -627,35 +633,35 @@ def main() -> None:
         out_png = Path(args.out) if args.out else out_dir / "comparison.png"
         plot_comparison(summaries, out_png)
 
-    print(f"\n{'═' * 60}")
-    print(f"  {'Model':<30}  {'test-case':>10}  {'solved':>10}")
-    print(f"{'─' * 60}")
+    print(f"\n{'═' * 78}")
+    print(f"  {'Model':<48}  {'test-case':>10}  {'solved':>10}")
+    print(f"{'─' * 78}")
     for s in summaries:
         print(
-            f"  {s['name']:<30}"
+            f"  {s['name']:<48}"
             f"  {s['test_pass_rate']:>9.1%}"
             f"  {s['problems_solved']:>3}/{s['num_problems']}"
         )
-    print(f"{'═' * 60}")
+    print(f"{'═' * 78}")
 
     diffs = [d["difficulty"] for d in summaries[0]["by_difficulty"]]
     if len(diffs) > 1:
         print(f"\n  Solved by difficulty:")
-        print(f"  {'Model':<30}" + "".join(f"{d:>12}" for d in diffs))
+        print(f"  {'Model':<48}" + "".join(f"{d:>12}" for d in diffs))
         for s in summaries:
             cells = "".join(f"{b['solved']}/{b['num_problems']:}".rjust(12)
                             for b in s["by_difficulty"])
-            print(f"  {s['name']:<30}{cells}")
+            print(f"  {s['name']:<48}{cells}")
 
     short = {"syntax_error": "syntax", "wrong_answer": "wrong_answer",
              "runtime_error": "runtime", "missing_function": "missing_fn",
              "timeout": "timeout"}
     print(f"\n  Failure causes (failing test cases, first sample; truncated = problems hitting the token cap):")
-    print(f"  {'Model':<30}" + "".join(f"{short[c]:>14}" for c in _FAILURE_CATEGORIES) + f"{'truncated':>14}")
+    print(f"  {'Model':<48}" + "".join(f"{short[c]:>14}" for c in _FAILURE_CATEGORIES) + f"{'truncated':>14}")
     for s in summaries:
         fc = s["failure_counts"]
         row = "".join(f"{fc.get(c, 0):>14}" for c in _FAILURE_CATEGORIES)
-        print(f"  {s['name']:<30}{row}{s['truncated']:>14}")
+        print(f"  {s['name']:<48}{row}{s['truncated']:>14}")
 
 
 if __name__ == "__main__":

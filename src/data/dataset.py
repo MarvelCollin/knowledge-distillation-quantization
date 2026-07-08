@@ -150,7 +150,44 @@ class CodingDataset(Dataset):
         self.teacher_responses = teacher_responses
         self.original_indices = original_indices
         self.lengths = lengths or []
-        self._cache = {}
+        self._items = self._pretokenize()
+
+    def _pretokenize(self) -> list:
+        eos_id = self.tokenizer.eos_token_id
+        items = []
+        for idx in range(len(self.problems)):
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_user_content(self.problems[idx])},
+            ]
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            response = self.teacher_responses[self.original_indices[idx]]["text"]
+
+            prompt_ids = self.tokenizer(prompt, add_special_tokens=False).input_ids
+            response_ids = self.tokenizer(response, add_special_tokens=False).input_ids
+            if eos_id is not None:
+                response_ids = response_ids + [eos_id]
+
+            prompt_length = min(len(prompt_ids), self.max_length - 1)
+            prompt_ids = prompt_ids[:prompt_length]
+            response_ids = response_ids[:self.max_length - len(prompt_ids)]
+
+            combined = prompt_ids + response_ids
+            input_ids = torch.tensor(combined, dtype=torch.long)
+            attention_mask = torch.ones(len(combined), dtype=torch.long)
+            labels = input_ids.clone()
+            labels[:prompt_length] = -100
+
+            items.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "prompt_length": torch.tensor(prompt_length, dtype=torch.long),
+                "idx": torch.tensor(idx, dtype=torch.long),
+            })
+        return items
 
     def __len__(self) -> int:
         return len(self.problems)
@@ -183,42 +220,7 @@ class CodingDataset(Dataset):
         return [i for _, i in scored]
 
     def __getitem__(self, idx: int) -> dict:
-        cached = self._cache.get(idx)
-        if cached is not None:
-            return cached
-        prompt = self.get_chat_prompt(idx)
-        response = self.get_reference(idx)
-
-        prompt_ids = self.tokenizer(prompt, add_special_tokens=False).input_ids
-        response_ids = self.tokenizer(response, add_special_tokens=False).input_ids
-
-        eos_id = self.tokenizer.eos_token_id
-        if eos_id is not None:
-            response_ids = response_ids + [eos_id]
-
-        prompt_length = min(len(prompt_ids), self.max_length - 1)
-        prompt_ids = prompt_ids[:prompt_length]
-        remaining = self.max_length - len(prompt_ids)
-        response_ids = response_ids[:remaining]
-
-        combined = prompt_ids + response_ids
-        attn = [1] * len(combined)
-
-        input_ids = torch.tensor(combined, dtype=torch.long)
-        attention_mask = torch.tensor(attn, dtype=torch.long)
-
-        labels = input_ids.clone()
-        labels[:prompt_length] = -100
-
-        item = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-            "prompt_length": torch.tensor(prompt_length, dtype=torch.long),
-            "idx": torch.tensor(idx, dtype=torch.long),
-        }
-        self._cache[idx] = item
-        return item
+        return self._items[idx]
 
 
 def load_problems(config: dict) -> list:

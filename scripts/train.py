@@ -29,6 +29,7 @@ from src.distillation.loss import (
 from src.distillation.qead import fused_qead_kld_pass, teacher_confidence_weights
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
+from src.utils.runlog import RunLog, eta_str, show_progress_bars
 from src.config import load_config
 
 
@@ -175,6 +176,12 @@ def main():
         max_length=config["student"]["max_length"],
     )
     student.to(device)
+    try:
+        student.model = torch.compile(student.model, mode="reduce-overhead")
+        print("  torch.compile: ON (reduce-overhead)")
+    except Exception as e:
+        print(f"  torch.compile: SKIP ({e})")
+
 
     loader_generator = torch.Generator()
     loader_generator.manual_seed(seed)
@@ -360,7 +367,13 @@ def main():
 
     best_val_loss = run_validation(student, val_loader, device)
     student.save(str(output_dir / "final"))
+    torch.cuda.empty_cache()
     print(f"Baseline (untrained): val_loss={best_val_loss:.4f}  → saved as initial best (floor).")
+
+    runlog = RunLog("logs/train_metrics.jsonl")
+    runlog.event("train_start", total_steps=total_steps, n_train=n_train_samples,
+                 epochs=config["training"]["num_epochs"], baseline_val_loss=round(best_val_loss, 4))
+    loop_t0 = time.time()
 
     for epoch in range(config["training"]["num_epochs"]):
         student.train()
@@ -371,7 +384,8 @@ def main():
         t_data = t_compute = t_val = 0.0
         t_mark = time.time()
 
-        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config['training']['num_epochs']}")):
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config['training']['num_epochs']}",
+                                          disable=not show_progress_bars())):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
@@ -456,26 +470,44 @@ def main():
                 if global_step % 10 == 0:
                     epoch_pct = epoch_samples_seen / max(n_train_samples, 1) * 100
                     total_pct = global_step / max(total_steps, 1) * 100
+                    lr_now = scheduler.get_last_lr()[0]
+                    eta = (time.time() - loop_t0) / global_step * (total_steps - global_step)
+                    gpu_gb = torch.cuda.memory_reserved() / 1024 ** 3
                     print(
                         f"[ep {epoch + 1}/{config['training']['num_epochs']}] "
                         f"step={global_step}/{total_steps} ({total_pct:.0f}%) "
                         f"samples={epoch_samples_seen}/{n_train_samples} ({epoch_pct:.0f}% of epoch) "
                         f"total={total_val:.4f} "
                         f"distill={distill_val:.4f} "
-                        f"task={task_val:.4f}"
+                        f"task={task_val:.4f} "
+                        f"lr={lr_now:.2e} "
+                        f"gpu={gpu_gb:.1f}GB "
+                        f"ETA {eta_str(eta)}"
+                    )
+                    runlog.event(
+                        "step", step=global_step, epoch=epoch + 1,
+                        total=round(total_val, 4), distill=round(distill_val, 4),
+                        task=round(task_val, 4), lr=lr_now,
+                        samples=samples_seen, gpu_gb=round(gpu_gb, 1),
                     )
 
                 if global_step % eval_steps == 0:
                     v0 = time.time()
                     val_loss = run_validation(student, val_loader, device)
-                    line = f"step {global_step}/{total_steps}  val_loss={val_loss:.4f}"
-                    if val_loss < best_val_loss:
+                    delta = val_loss - best_val_loss
+                    improved = val_loss < best_val_loss
+                    line = (f"step {global_step}/{total_steps}  val_loss={val_loss:.4f}  "
+                            f"Δbest={delta:+.4f}")
+                    if improved:
                         best_val_loss = val_loss
                         student.save(str(output_dir / "final"))
                         print(line + "  ✓ saved best")
                     else:
-                        print(line + f"  (best val_loss={best_val_loss:.4f})")
+                        print(line + f"  (best={best_val_loss:.4f})")
+                    runlog.event("val", step=global_step, val_loss=round(val_loss, 4),
+                                 best=round(best_val_loss, 4), improved=improved)
                     student.train()
+                    torch.cuda.empty_cache()
                     t_val += time.time() - v0
 
                 t_mark = time.time()
@@ -490,11 +522,15 @@ def main():
               f"(compute {t_compute / 60:.1f}m | val+select {t_val / 60:.1f}m | data wait {t_data / 60:.1f}m)  "
               f"best_val_loss: {best_val_loss:.4f}")
         print()
+        runlog.event("epoch_done", epoch=epoch + 1, secs=int(epoch_elapsed),
+                     compute_min=round(t_compute / 60, 1), val_min=round(t_val / 60, 1),
+                     data_wait_min=round(t_data / 60, 1), best_val_loss=round(best_val_loss, 4))
 
     student.save(str(output_dir / "final_last"))
     print(f"Last-epoch (fully-trained) checkpoint saved at outputs/final_last for evaluation.")
 
     print(f"Training complete. Best val_loss={best_val_loss:.4f} saved at outputs/final.")
+    runlog.event("train_done", best_val_loss=round(best_val_loss, 4), steps=global_step)
 
     elapsed = time.time() - train_start
     hours = int(elapsed // 3600)

@@ -1,0 +1,3 @@
+{"t": 0.0, "kind": "build_start", "pending": 2600, "total": 2600, "chunk_size": 16}
+{"t": 0.0, "kind": "build_start", "pending": 2600, "total": 2600, "chunk_size": 16}
+{"t": 405.2, "kind": "chunk", "idx": 1, "of": 163, "secs": 405.2, "s_per_prompt": 25.3, "chunk_pass": 14, "chunk_fail": 2, "total_pass": 14, "tested": 16, "pass_rate": 0.875, "fail_causes": {"wrong_answer": 2}, "gpu_gb": 22.1, "eta_s": 65432}

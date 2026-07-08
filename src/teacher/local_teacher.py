@@ -2,6 +2,7 @@ import gc
 import json
 import re
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from transformers import AutoTokenizer
 from src.evaluation.evaluator import failing_cases, run_test_cases
 from src.utils.gpu import gpu_used_gb
 from src.utils.reasoning import SYSTEM_PROMPT, extract_code
+from src.utils.runlog import RunLog, eta_str, show_progress_bars
 
 
 class LocalTeacherModel:
@@ -165,7 +167,7 @@ class LocalTeacherModel:
 
     def get_responses_batch(self, prompts: list) -> list:
         formatted = [self._format_prompt(p) for p in prompts]
-        outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=True)
+        outputs = self.llm.generate(formatted, self.sampling_params, use_tqdm=show_progress_bars())
         return [self._extract_result(o) for o in outputs]
 
     def sample_candidates_batch(self, prompts: list, n: int,
@@ -181,7 +183,7 @@ class LocalTeacherModel:
             repetition_penalty=1.05,
         )
         formatted = [self._format_prompt(p) for p in prompts]
-        outputs = self.llm.generate(formatted, sp, use_tqdm=True)
+        outputs = self.llm.generate(formatted, sp, use_tqdm=show_progress_bars())
         return [[self._extract_one(g) for g in o.outputs] for o in outputs]
 
     @staticmethod
@@ -290,6 +292,8 @@ class LocalTeacherModel:
 
         print(f"Caching {len(pending)}/{len(prompts)} teacher responses via vLLM continuous batching...")
         print(f"  chunk_size={chunk_size}  (save progress every chunk)")
+        runlog = RunLog("logs/cache_build.jsonl")
+        runlog.event("build_start", pending=len(pending), total=len(prompts), chunk_size=chunk_size)
         total_start = time.time()
         pass_count = 0
         fail_count = 0
@@ -363,9 +367,13 @@ class LocalTeacherModel:
                     print(f"  rejection recovered {recovered}/{failed_count} prompts "
                           f"(generated up to {generated}/{rejection_samples} per prompt).")
 
+            fail_causes = Counter()
             if test_cases_per_prompt is not None:
                 failed = [(f"prompt {s[0]}", s[5]) for s in scored
                           if s[4] is not None and not self._fully_passed(s[3], s[4]) and s[5] is not None]
+                for _, score in failed:
+                    non_pass = [c for c in score.get("categories", []) if c != "pass"]
+                    fail_causes[Counter(non_pass).most_common(1)[0][0] if non_pass else "unknown"] += 1
                 if failed:
                     print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
                     self._log_failures(failed)
@@ -403,6 +411,8 @@ class LocalTeacherModel:
 
             tested = pass_count + fail_count
             rate = pass_count / max(tested, 1)
+            causes = ("  |  fails: " + ", ".join(f"{c}×{n}" for c, n in fail_causes.most_common())
+                      if fail_causes else "")
             print(
                 f"  chunk done in {chunk_elapsed:.1f}s  "
                 f"({chunk_elapsed / len(chunk):.1f}s/prompt avg)  "
@@ -410,6 +420,15 @@ class LocalTeacherModel:
                 f"|  total pass {pass_count}/{tested} ({rate:.1%})  "
                 f"|  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  "
                 f"|  GPU {gpu_used_gb():.1f}GB"
+                f"{causes}"
+            )
+            runlog.event(
+                "chunk", idx=chunk_idx, of=total_chunks, secs=round(chunk_elapsed, 1),
+                s_per_prompt=round(chunk_elapsed / len(chunk), 1),
+                chunk_pass=chunk_pass, chunk_fail=chunk_fail,
+                total_pass=pass_count, tested=tested, pass_rate=round(rate, 4),
+                fail_causes=dict(fail_causes), gpu_gb=round(gpu_used_gb(), 1),
+                eta_s=int(eta_sec),
             )
 
         if test_cases_per_prompt is not None:
@@ -418,6 +437,8 @@ class LocalTeacherModel:
             total_min = (time.time() - total_start) / 60
             print(f"\n  Cache build complete in {total_min:.1f} min: "
                   f"{pass_count}/{tested} pass all tests ({rate:.1%}).")
+            runlog.event("build_done", minutes=round(total_min, 1),
+                         total_pass=pass_count, tested=tested, pass_rate=round(rate, 4))
 
     def _rescore_one(self, full_token_ids: list, prompt_logprobs: list, prompt_len: int) -> dict:
         tokens = []

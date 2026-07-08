@@ -21,7 +21,7 @@ show_menu() {
     teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     header
-    echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local R1-Distill-Qwen-7B, bf16)${NC}"
+    echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local OpenCodeReasoning-Nemotron-7B, bf16)${NC}"
     echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
@@ -101,15 +101,22 @@ set_fixed_compare_params() {
 
 compare_cache_status() {
     [ -d outputs/eval/intermediate ] || { echo -e "  ${YELLOW}No cached evals yet — all models will run.${NC}"; echo ""; return 0; }
+    local student_model
+    student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}:"
-    python3 - "$CMP_NP" "$CMP_DIFFICULTY" <<'PY'
+    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" <<'PY'
 import json, os, sys
 np = int(sys.argv[1]); diff = sys.argv[2]
-checks = [("Student (original)", "Student_original.json"),
-          ("Teacher (R1-Distill-Qwen-7B)", "Teacher_R1-Distill-Qwen-7B.json")]
+base = sys.argv[3].split("/")[-1]
+
+def safe(label):
+    return label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
+
+checks = [f"Student original ({base})",
+          "Teacher (OpenCodeReasoning-Nemotron-7B)"]
 d = "outputs/eval/intermediate"
-for label, fn in checks:
-    p = os.path.join(d, fn)
+for label in checks:
+    p = os.path.join(d, safe(label) + ".json")
     reused = False
     if os.path.exists(p):
         try:
@@ -119,8 +126,8 @@ for label, fn in checks:
                       and c.get("temperature") == 0.7 and c.get("top_p") == 0.95)
         except Exception:
             reused = False
-    print(f"    {label:<32} {'REUSED (cached, skipped)' if reused else 'will RUN'}")
-print(f"    {'Student (distilled)':<32} always RUN (new checkpoint)")
+    print(f"    {label:<50} {'REUSED (cached, skipped)' if reused else 'will RUN'}")
+print(f"    {f'Student distilled ({base})':<50} always RUN (new checkpoint)")
 PY
     echo ""
 }
