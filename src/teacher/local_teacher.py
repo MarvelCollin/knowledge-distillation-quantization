@@ -304,6 +304,15 @@ class LocalTeacherModel:
         bg_thread = None
         bg_error = [None]
 
+        diff_pass = Counter()
+        diff_fail = Counter()
+        diff_causes = {}
+
+        def _get_diff(idx):
+            if difficulty_per_prompt and idx < len(difficulty_per_prompt):
+                return difficulty_per_prompt[idx] or "?"
+            return "?"
+
         def _test_and_save(chunk, results, chunk_idx, total_chunks, chunk_t0):
             nonlocal pass_count, fail_count
             try:
@@ -365,69 +374,92 @@ class LocalTeacherModel:
                         print(f"  rejection recovered {recovered}/{failed_count} prompts "
                               f"(generated up to {generated}/{rejection_samples} per prompt).")
 
-                fail_causes = Counter()
-                if test_cases_per_prompt is not None:
-                    failed = [(f"prompt {s[0]}", s[5]) for s in scored
-                              if s[4] is not None and not self._fully_passed(s[3], s[4]) and s[5] is not None]
-                    for _, score in failed:
-                        non_pass = [c for c in score.get("categories", []) if c != "pass"]
-                        fail_causes[Counter(non_pass).most_common(1)[0][0] if non_pass else "unknown"] += 1
-                    if failed:
-                        print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
-                        self._log_failures(failed)
-
                 chunk_pass = chunk_fail = 0
+                chunk_diff_pass = Counter()
+                chunk_diff_fail = Counter()
+                chunk_fail_causes = {}
                 for idx, prompt, result, test_passed, test_total, score in scored:
+                    diff = _get_diff(idx)
                     new_pass = self._fully_passed(test_passed, test_total)
                     if test_total is not None and not new_pass and self._cached_fully_passed(cache_path, idx):
                         pass_count += 1
                         chunk_pass += 1
+                        diff_pass[diff] += 1
+                        chunk_diff_pass[diff] += 1
                         continue
 
                     if test_total is not None:
                         if new_pass:
                             pass_count += 1
                             chunk_pass += 1
+                            diff_pass[diff] += 1
+                            chunk_diff_pass[diff] += 1
                         else:
                             fail_count += 1
                             chunk_fail += 1
+                            diff_fail[diff] += 1
+                            chunk_diff_fail[diff] += 1
+                            if score is not None:
+                                non_pass = [c for c in score.get("categories", []) if c != "pass"]
+                                cause = Counter(non_pass).most_common(1)[0][0] if non_pass else "unknown"
+                                chunk_fail_causes.setdefault(diff, Counter())[cause] += 1
+                                diff_causes.setdefault(diff, Counter())[cause] += 1
 
                     payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
                     if test_total is not None:
                         payload["test_passed"] = test_passed
                         payload["test_total"] = test_total
+                        if score is not None and not new_pass:
+                            non_pass = [c for c in score.get("categories", []) if c != "pass"]
+                            payload["fail_cause"] = Counter(non_pass).most_common(1)[0][0] if non_pass else "unknown"
                     with open(cache_path / f"{idx}.json", "w") as f:
                         json.dump(payload, f)
 
                 chunk_elapsed = time.time() - chunk_t0
-                done_count = (chunk_idx) * chunk_size
-                done_count = min(done_count, len(pending))
+                done_count = min(chunk_idx * chunk_size, len(pending))
                 total_elapsed = time.time() - total_start
                 avg_per_prompt = total_elapsed / max(done_count, 1)
                 eta_sec = avg_per_prompt * (len(pending) - done_count)
-                eta_m, eta_s = divmod(int(eta_sec), 60)
-                eta_h, eta_m = divmod(eta_m, 60)
 
                 tested = pass_count + fail_count
                 rate = pass_count / max(tested, 1)
-                causes = ("  |  fails: " + ", ".join(f"{c}×{n}" for c, n in fail_causes.most_common())
-                          if fail_causes else "")
+
                 print(
                     f"  chunk {chunk_idx}/{total_chunks} done in {chunk_elapsed:.1f}s  "
-                    f"({chunk_elapsed / len(chunk):.1f}s/prompt avg)  "
-                    f"|  this chunk: {chunk_pass} pass / {chunk_fail} fail  "
-                    f"|  total pass {pass_count}/{tested} ({rate:.1%})  "
-                    f"|  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  "
+                    f"({chunk_elapsed / len(chunk):.1f}s/prompt)  "
+                    f"|  pass {chunk_pass}/{len(chunk)}  "
+                    f"|  total {pass_count}/{tested} ({rate:.1%})  "
+                    f"|  ETA {eta_str(eta_sec)}  "
                     f"|  GPU {gpu_used_gb():.1f}GB"
-                    f"{causes}"
                 )
+                all_diffs = sorted(set(list(chunk_diff_pass) + list(chunk_diff_fail)),
+                                   key=lambda d: {"Easy": 0, "Medium": 1, "Hard": 2}.get(d, 3))
+                for d in all_diffs:
+                    cp = chunk_diff_pass.get(d, 0)
+                    cf = chunk_diff_fail.get(d, 0)
+                    tp = diff_pass.get(d, 0)
+                    tf = diff_fail.get(d, 0)
+                    causes_str = ""
+                    if d in chunk_fail_causes:
+                        causes_str = "  " + ", ".join(
+                            f"{c}={n}" for c, n in chunk_fail_causes[d].most_common())
+                    print(
+                        f"    {d:<8} {cp}/{cp+cf} solved  "
+                        f"(total {tp}/{tp+tf}  {tp/max(tp+tf,1):.0%})"
+                        f"{causes_str}"
+                    )
+
                 runlog.event(
                     "chunk", idx=chunk_idx, of=total_chunks, secs=round(chunk_elapsed, 1),
                     s_per_prompt=round(chunk_elapsed / len(chunk), 1),
                     chunk_pass=chunk_pass, chunk_fail=chunk_fail,
                     total_pass=pass_count, tested=tested, pass_rate=round(rate, 4),
-                    fail_causes=dict(fail_causes), gpu_gb=round(gpu_used_gb(), 1),
-                    eta_s=int(eta_sec),
+                    by_difficulty={
+                        d: {"pass": diff_pass.get(d, 0), "fail": diff_fail.get(d, 0),
+                            "causes": dict(diff_causes.get(d, {}))}
+                        for d in set(list(diff_pass) + list(diff_fail))
+                    },
+                    gpu_gb=round(gpu_used_gb(), 1), eta_s=int(eta_sec),
                 )
             except Exception as e:
                 bg_error[0] = e

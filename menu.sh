@@ -17,12 +17,15 @@ header() {
 }
 
 show_menu() {
-    local teacher_path student_model
+    local teacher_path student_model cache_dir
     teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
+    cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
     header
     echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local OpenCodeReasoning-Nemotron-7B, bf16)${NC}"
     echo -e "  Student: ${GREEN}${student_model}${NC}"
+    echo ""
+    show_cache_status "${cache_dir:-cache/teacher_logprobs_ocr7b}"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
     echo "  1) Run training              (build/refresh teacher cache, then train, then compare)"
@@ -254,14 +257,43 @@ show_cache_status() {
     CACHE_MAX_IDX=$(find "$dir" -maxdepth 1 -name '*.json' -printf '%f\n' 2>/dev/null | sed 's/\.json$//' | sort -n | tail -1)
     echo -e "    Total cached files   : ${GREEN}${CACHE_TOTAL}${NC}"
     echo -e "    Problem index range  : 0-${CACHE_MAX_IDX}  (max_samples ${GREEN}$((CACHE_MAX_IDX + 1))${NC} covers the full cache)"
-    local stats
-    stats=$(python3 - "$dir" <<'PYEOF'
-import glob, os, re, sys
-files = glob.glob(os.path.join(sys.argv[1], '*.json'))
+    python3 - "$dir" <<'PYEOF'
+import glob, json, os, re, sys
+from collections import Counter
+
+cache_dir = sys.argv[1]
+files = glob.glob(os.path.join(cache_dir, '*.json'))
 pat_p = re.compile(rb'"test_passed":\s*(\d+)')
 pat_t = re.compile(rb'"test_total":\s*(\d+)')
-passed = tested = 0
+
+prob_file = None
+for candidate in glob.glob("cache/problems_*.json"):
+    prob_file = candidate
+    break
+
+difficulties = {}
+if prob_file and os.path.exists(prob_file):
+    try:
+        probs = json.load(open(prob_file))
+        for i, p in enumerate(probs):
+            difficulties[i] = p.get("difficulty", "") or "?"
+    except Exception:
+        pass
+
+G = '\033[0;32m'
+R = '\033[0;31m'
+Y = '\033[1;33m'
+B = '\033[1m'
+C = '\033[0;36m'
+N = '\033[0m'
+
+diff_pass = Counter()
+diff_fail = Counter()
+diff_fail_causes = {}
+
 for f in files:
+    idx = int(os.path.basename(f).replace('.json', ''))
+    diff = difficulties.get(idx, "?")
     try:
         with open(f, 'rb') as fh:
             sz = os.fstat(fh.fileno()).st_size
@@ -269,22 +301,38 @@ for f in files:
             tail = fh.read()
         mp, mt = pat_p.search(tail), pat_t.search(tail)
         if mp and mt and int(mt.group(1)) > 0:
-            tested += 1
             if int(mp.group(1)) == int(mt.group(1)):
-                passed += 1
+                diff_pass[diff] += 1
+            else:
+                diff_fail[diff] += 1
+                fc = re.search(rb'"fail_cause":\s*"([^"]+)"', tail)
+                cause = fc.group(1).decode() if fc else "unknown"
+                diff_fail_causes.setdefault(diff, Counter())[cause] += 1
+        else:
+            diff_fail[diff] += 1
     except Exception:
-        pass
-print(f'{passed},{tested}')
+        diff_fail[diff] += 1
+
+total_pass = sum(diff_pass.values())
+total_fail = sum(diff_fail.values())
+total = total_pass + total_fail
+pct = total_pass * 100 // total if total > 0 else 0
+print(f"    Passing (usable)     : {G}{total_pass}/{total}{N} ({pct}%)")
+print()
+print(f"    {B}{'Difficulty':<10} {'Pass':>6} {'Fail':>6} {'Total':>6} {'Rate':>6}  Fail causes{N}")
+print(f"    {'─'*64}")
+order = {"Easy": 0, "Medium": 1, "Hard": 2}
+all_diffs = sorted(set(list(diff_pass) + list(diff_fail)), key=lambda d: order.get(d, 3))
+for d in all_diffs:
+    p = diff_pass.get(d, 0)
+    fl = diff_fail.get(d, 0)
+    t = p + fl
+    r = f"{p*100//t}%" if t > 0 else "-"
+    causes = diff_fail_causes.get(d, {})
+    cause_str = ", ".join(f"{c}={n}" for c, n in sorted(causes.items(), key=lambda x: -x[1])) if causes else "-"
+    color = G if p*100//max(t,1) >= 80 else (Y if p*100//max(t,1) >= 50 else R)
+    print(f"    {d:<10} {p:>6} {fl:>6} {t:>6} {color}{r:>6}{N}  {cause_str}")
 PYEOF
-)
-    local s_pass s_total
-    IFS=',' read -r s_pass s_total <<< "$stats"
-    if [ -n "$s_total" ] && [ "$s_total" -gt 0 ]; then
-        local pct=$((s_pass * 100 / s_total))
-        echo -e "    Passing (usable)     : ${GREEN}${s_pass}/${s_total}${NC} (${pct}% of tested cache, exact count)"
-    else
-        echo -e "    Pass rate            : (no tested entries yet)"
-    fi
     return 0
 }
 
@@ -453,25 +501,55 @@ PYEOF
         4)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
-            echo -e "  ${BOLD}Rescore failed teacher cache${NC} (${cache_dir})"
+            cache_dir=${cache_dir:-cache/teacher_logprobs_ocr7b}
+            echo -e "  ${BOLD}Recover failed teacher cache${NC} (${cache_dir})"
             echo ""
-            echo -e "  Re-runs the unit tests on FAILED cached trajectories with the current"
-            echo -e "  harness and marks any that now PASS as usable for training."
-            echo -e "  ${CYAN}Pure knowledge distillation${NC}: teacher tokens/logprobs are never changed —"
-            echo -e "  only wrongly-failed correct trajectories get un-discarded."
-            echo -e "  ${GREEN}CPU-only${NC} (no GPU), safe to run alongside a GPU job."
+            show_cache_status "$cache_dir"
             echo ""
-            echo -n "  Rescore and update cache now? (y/n): "
-            read -r ans
-            if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-                run_cmd "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
-            else
-                echo ""
-                echo -e "  Cancelled."
-                echo ""
-                read -rp "Press Enter to return to menu..."
-            fi
+            echo -e "  ${BOLD}Step 1: Rescore${NC} ${GREEN}(CPU-only, fast, safe alongside GPU jobs)${NC}"
+            echo -e "    Re-runs tests on existing failed code — recovers harness-misscored entries."
+            echo ""
+            echo -e "  ${BOLD}Step 2: Retry${NC} ${YELLOW}(GPU, slow — loads teacher model, re-generates)${NC}"
+            echo -e "    Rejection-samples new solutions for still-failed problems."
+            echo ""
+            echo "  1) Rescore only (CPU, fast)"
+            echo "  2) Rescore + Retry failed with 3 attempts (GPU)"
+            echo "  3) Rescore + Retry failed with 5 attempts (GPU)"
+            echo "  q) Cancel"
+            echo ""
+            echo -n "  Select option: "
+            read -r recover_choice
+            case "$recover_choice" in
+                1)
+                    keep_sudo_alive
+                    run_cmd "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
+                    stop_sudo_alive
+                    ;;
+                2)
+                    keep_sudo_alive
+                    run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
+                    echo ""
+                    echo -e "  ${YELLOW}Starting rejection sampling on remaining failures (3 attempts)...${NC}"
+                    echo ""
+                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3"
+                    stop_sudo_alive
+                    ;;
+                3)
+                    keep_sudo_alive
+                    run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
+                    echo ""
+                    echo -e "  ${YELLOW}Starting rejection sampling on remaining failures (5 attempts)...${NC}"
+                    echo ""
+                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5"
+                    stop_sudo_alive
+                    ;;
+                *)
+                    echo ""
+                    echo -e "  Cancelled."
+                    echo ""
+                    read -rp "Press Enter to return to menu..."
+                    ;;
+            esac
             ;;
         5)
             header
