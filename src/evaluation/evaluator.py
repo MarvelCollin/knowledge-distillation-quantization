@@ -27,6 +27,8 @@ _LEETCODE_PREAMBLE = '''\
 from typing import *
 from collections import *
 import collections, sys, heapq, math, itertools, functools, bisect, string, re, random, operator, copy
+from datetime import date, datetime, timedelta
+from urllib.parse import urlparse, urlunparse
 from fractions import Fraction
 from decimal import Decimal
 from math import comb, perm, gcd, lcm, factorial, sqrt, isqrt, ceil, floor, inf, log, log2

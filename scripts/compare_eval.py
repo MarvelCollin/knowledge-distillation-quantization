@@ -127,8 +127,8 @@ def _pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.prod((1.0 - k / i) for i in range(n - c + 1, n + 1))
 
 
-def _difficulty_breakdown(results: list, k: int) -> list:
-    """Per-difficulty pass@1 / pass@k / solved, so a single run shows where each
+def _difficulty_breakdown(results: list) -> list:
+    """Per-difficulty test-case rate / solved, so a single run shows where each
     model floors (e.g. Hard) and justifies any difficulty filtering in the report."""
     buckets = {}
     for r in results:
@@ -138,14 +138,12 @@ def _difficulty_breakdown(results: list, k: int) -> list:
     rows = []
     for d in sorted(buckets, key=lambda x: order.index(x) if x in order else len(order)):
         rs = buckets[d]
-        m = len(rs)
-        p1 = sum(_pass_at_k(x.get("num_samples", 1), x.get("num_passing", int(x["solved"])), 1) for x in rs) / m
-        pk = sum(_pass_at_k(x.get("num_samples", 1), x.get("num_passing", int(x["solved"])), k) for x in rs) / m
+        tp = sum(x["passed"] for x in rs)
+        tt = sum(x["total"] for x in rs)
         rows.append({
             "difficulty": d,
-            "num_problems": m,
-            "pass_at_1": p1,
-            "pass_at_k": pk,
+            "num_problems": len(rs),
+            "test_pass_rate": tp / max(tt, 1),
             "solved": sum(1 for x in rs if x["solved"]),
         })
     return rows
@@ -196,7 +194,7 @@ def _finalise(label: str, results: list, dataset_name: str, k: int, meta: dict |
     pass1 = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), 1) for r in results) / max(n, 1)
     passk = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), k) for r in results) / max(n, 1)
 
-    by_difficulty = _difficulty_breakdown(results, k)
+    by_difficulty = _difficulty_breakdown(results)
 
     summary = {
         "name": label,
@@ -218,18 +216,15 @@ def _finalise(label: str, results: list, dataset_name: str, k: int, meta: dict |
     }
     if meta:
         summary.update(meta)
-    print(f"\n  pass@1            : {pass1:.1%}")
-    if k > 1:
-        print(f"  pass@{k:<2}            : {passk:.1%}")
+    print(f"\n  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})  [first sample]")
     print(f"  Problems solved   : {solved}/{n}  (any of {n_samples} samples)")
-    print(f"  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})  [first sample]")
     print(f"  Failure modes     : "
           + ", ".join(f"{c}={failure_counts[c]}" for c in _FAILURE_CATEGORIES if failure_counts[c]))
     if len(by_difficulty) > 1:
         print(f"  By difficulty     :")
         for d in by_difficulty:
-            print(f"      {d['difficulty']:<8} pass@1={d['pass_at_1']:.1%}  "
-                  f"pass@{k}={d['pass_at_k']:.1%}  solved={d['solved']}/{d['num_problems']}")
+            print(f"      {d['difficulty']:<8} test-case={d['test_pass_rate']:.1%}  "
+                  f"solved={d['solved']}/{d['num_problems']}")
     if truncated:
         print(f"  ⚠ Truncated       : {truncated}/{n} hit the token cap — raise evaluation.max_new_tokens")
     _save_intermediate(label, summary)
@@ -423,9 +418,8 @@ def _style_ax(ax) -> None:
 def plot_comparison(summaries: list, out_path: Path) -> None:
     names      = [s["name"] for s in summaries]
     test_rates = [s["test_pass_rate"] for s in summaries]
-    k_value    = summaries[0].get("k", 1)
-    solve_rates= [s.get("pass_at_k", s["problem_solve_rate"]) for s in summaries]
-    solve_title = f"pass@{k_value}  (unbiased estimator)" if k_value > 1 else "Problem Solve Rate  (all tests pass)"
+    solve_rates= [s["problem_solve_rate"] for s in summaries]
+    solve_title = "Problem Solve Rate  (all tests pass)"
     n_problems = summaries[0]["num_problems"]
     matrix     = np.array([[r["solved"] for r in s["per_problem"]] for s in summaries],
                            dtype=float)
@@ -459,7 +453,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
                     color="white", fontsize=12, fontweight="bold")
 
     _bar(fig.add_subplot(gs[0, 0]), test_rates,
-         "Test-Case Pass Rate", "Pass rate (%)")
+         "Overall Test-Case Pass Rate", "Pass rate (%)")
     _bar(fig.add_subplot(gs[0, 1]), solve_rates,
          solve_title, "Solved (%)")
 
@@ -478,7 +472,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
         ax_delta.axhline(0, color="#888888", linewidth=0.8, linestyle="--")
         ax_delta.set_xticks(np.arange(n_problems))
         ax_delta.set_xticklabels(np.arange(n_problems), fontsize=7, color="#aaaaaa")
-        ax_delta.set_xlabel("Problem index (LeetCode test split)", color="#aaaaaa", fontsize=10)
+        ax_delta.set_xlabel("Problem index (test split)", color="#aaaaaa", fontsize=10)
         ax_delta.set_title(
             f"Δ vs Student (original)  — +1 = newly solved, -1 = regression",
             color="white", fontsize=12, pad=8,
@@ -499,7 +493,7 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     ax_heat.set_yticklabels(names, color="white", fontsize=10)
     ax_heat.set_xticks(range(n_problems))
     ax_heat.set_xticklabels(range(n_problems), fontsize=7, color="#aaaaaa")
-    ax_heat.set_xlabel("Problem index (LeetCode test split)", color="#aaaaaa", fontsize=10)
+    ax_heat.set_xlabel("Problem index (test split)", color="#aaaaaa", fontsize=10)
     ax_heat.set_title(
         "Per-Problem Heatmap  (green = solved ✓, red = failed ✗)",
         color="white", fontsize=12, pad=8,
@@ -514,21 +508,19 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     for lbl in cbar.ax.yaxis.get_ticklabels():
         lbl.set_color("white")
 
-    passk_header = f"pass@{k_value}" if k_value > 1 else "pass@1"
     summary_lines = [
-        f"{'Model':<30}  {'pass@1':>8}  {passk_header:>8}  {'test-case':>10}  {'solved':>10}",
-        "─" * 76,
+        f"{'Model':<30}  {'test-case':>10}  {'solved':>10}",
+        "─" * 56,
     ]
     for s in summaries:
         summary_lines.append(
-            f"{s['name']:<30}  {s['pass_at_1']:>7.1%}"
-            f"  {s.get('pass_at_k', s['pass_at_1']):>7.1%}"
+            f"{s['name']:<30}"
             f"  {s['test_pass_rate']:>9.1%}"
             f"  {s['problems_solved']:>3}/{s['num_problems']}"
         )
 
     fig.suptitle(
-        "QEAD Knowledge Distillation — Evaluation on LeetCode Test Split\n"
+        f"QEAD Knowledge Distillation — Evaluation on LeetCode Test Split\n"
         + "\n".join(summary_lines),
         color="white", fontsize=10, fontweight="bold",
         y=0.975, va="top", family="monospace",
@@ -541,12 +533,12 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Three-way model comparison on LeetCode test split")
+    parser = argparse.ArgumentParser(description="Three-way model comparison on the LeetCode test split")
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--distilled", default=None,
                         help="Path to distilled student checkpoint (auto-detected if omitted)")
-    parser.add_argument("--num-problems", type=int, default=30,
-                        help="Number of LeetCode test problems to evaluate (default: 30)")
+    parser.add_argument("--num-problems", type=int, default=228,
+                        help="Number of LeetCode test problems to evaluate (default: 228 = full test split)")
     parser.add_argument("--difficulty", default="all",
                         help="Difficulties to include, comma-separated: easy, medium, hard, "
                              "or all (default: all). e.g. --difficulty easy,medium")
@@ -559,7 +551,8 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--k", type=int, default=None,
                         help="k for pass@k (defaults to --num-samples)")
-    parser.add_argument("--out", default="outputs/eval/comparison.png")
+    parser.add_argument("--out", default=None,
+                        help="Graph output path (default: outputs/eval/comparison_<dataset>.png)")
     parser.add_argument("--seed", type=int, default=1234,
                         help="Sampling seed for reproducible pass@k (static models give identical results each run)")
     parser.add_argument("--fresh", action="store_true",
@@ -626,23 +619,43 @@ def main() -> None:
 
     out_dir = Path(config["evaluation"]["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "comparison.json").write_text(json.dumps(summaries, indent=2))
-    print(f"Full results → {out_dir / 'comparison.json'}")
+    results_json = out_dir / "comparison.json"
+    results_json.write_text(json.dumps(summaries, indent=2))
+    print(f"Full results → {results_json}")
 
     if len(summaries) >= 2:
-        plot_comparison(summaries, Path(args.out))
+        out_png = Path(args.out) if args.out else out_dir / "comparison.png"
+        plot_comparison(summaries, out_png)
 
-    passk_header = f"pass@{k}" if k > 1 else "pass@1"
-    print(f"\n{'═' * 72}")
-    print(f"  {'Model':<30}  {'pass@1':>8}  {passk_header:>8}  {'test-case':>10}")
-    print(f"{'─' * 72}")
+    print(f"\n{'═' * 60}")
+    print(f"  {'Model':<30}  {'test-case':>10}  {'solved':>10}")
+    print(f"{'─' * 60}")
     for s in summaries:
         print(
-            f"  {s['name']:<30}  {s['pass_at_1']:>7.1%}"
-            f"  {s.get('pass_at_k', s['pass_at_1']):>7.1%}"
+            f"  {s['name']:<30}"
             f"  {s['test_pass_rate']:>9.1%}"
+            f"  {s['problems_solved']:>3}/{s['num_problems']}"
         )
-    print(f"{'═' * 72}")
+    print(f"{'═' * 60}")
+
+    diffs = [d["difficulty"] for d in summaries[0]["by_difficulty"]]
+    if len(diffs) > 1:
+        print(f"\n  Solved by difficulty:")
+        print(f"  {'Model':<30}" + "".join(f"{d:>12}" for d in diffs))
+        for s in summaries:
+            cells = "".join(f"{b['solved']}/{b['num_problems']:}".rjust(12)
+                            for b in s["by_difficulty"])
+            print(f"  {s['name']:<30}{cells}")
+
+    short = {"syntax_error": "syntax", "wrong_answer": "wrong_answer",
+             "runtime_error": "runtime", "missing_function": "missing_fn",
+             "timeout": "timeout"}
+    print(f"\n  Failure causes (failing test cases, first sample; truncated = problems hitting the token cap):")
+    print(f"  {'Model':<30}" + "".join(f"{short[c]:>14}" for c in _FAILURE_CATEGORIES) + f"{'truncated':>14}")
+    for s in summaries:
+        fc = s["failure_counts"]
+        row = "".join(f"{fc.get(c, 0):>14}" for c in _FAILURE_CATEGORIES)
+        print(f"  {s['name']:<30}{row}{s['truncated']:>14}")
 
 
 if __name__ == "__main__":

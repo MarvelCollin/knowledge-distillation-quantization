@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""Re-score the cached FAILING teacher trajectories and bucket why they fail.
-
-Categories aren't persisted in the cache, so this re-runs the test harness on each
-non-passing cached trajectory and reports the dominant failure cause per trajectory
-(syntax_error / wrong_answer / timeout / runtime_error / missing_function), plus a few
-syntax_error examples if any exist.
-
-Run inside Docker:
-    sudo docker compose run --rm train python scripts/analyze_failures.py
-"""
+"""Bucket the failing teacher trajectories by cause; saves to outputs/eval/diagnostics/failure_causes.{txt,json}."""
 import json
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,6 +17,8 @@ from src.evaluation.evaluator import run_test_cases
 from src.utils.reasoning import extract_code
 
 _CATS = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
+
+REPORT_DIR = Path("outputs/eval/diagnostics")
 
 
 def _dominant(categories: list) -> str:
@@ -61,39 +55,63 @@ def main() -> None:
     dominant_hist = Counter()
     any_hist = Counter()
     syntax_examples = []
+    per_problem = {}
     with ThreadPoolExecutor(max_workers=16) as ex:
         for idx, dom, r, code in ex.map(_score, failing):
             dominant_hist[dom] += 1
+            per_problem[idx] = {
+                "dominant": dom,
+                "passed": r.get("passed"),
+                "total": r.get("total"),
+            }
             for c in set(r.get("categories", [])):
                 if c and c != "pass":
                     any_hist[c] += 1
             if dom == "syntax_error" and len(syntax_examples) < 3:
                 syntax_examples.append((idx, code))
 
-    print(f"\n{'=' * 60}")
-    print(f"Failure cause breakdown  (dominant category per trajectory)")
-    print(f"{'=' * 60}")
     n = max(len(failing), 1)
+    lines = [
+        "=" * 60,
+        "Failure cause breakdown  (dominant category per trajectory)",
+        f"generated: {time.strftime('%Y-%m-%d %H:%M:%S')}   failing trajectories: {len(failing)}",
+        "=" * 60,
+    ]
     for cat in _CATS:
         c = dominant_hist.get(cat, 0)
-        print(f"  {cat:<16}: {c:>4}  ({c / n:5.1%})")
+        lines.append(f"  {cat:<16}: {c:>4}  ({c / n:5.1%})")
     other = sum(v for k, v in dominant_hist.items() if k not in _CATS and k != "pass")
     if other:
-        print(f"  {'other':<16}: {other:>4}")
+        lines.append(f"  {'other':<16}: {other:>4}")
     reran_pass = dominant_hist.get("pass", 0)
     if reran_pass:
-        print(f"\n  ⚠ {reran_pass} trajectories now PASS on re-score (flaky/timeout-bound tests) —")
-        print(f"    create_datasets(rescore=True) recovers these as labels.")
-
-    print(f"\n  (any-test-had-category, non-exclusive): "
-          + ", ".join(f"{k}={v}" for k, v in any_hist.most_common()))
-
+        lines += [
+            "",
+            f"  ⚠ {reran_pass} trajectories now PASS on re-score (flaky/timeout-bound tests) —",
+            "    create_datasets(rescore=True) recovers these as labels.",
+        ]
+    lines += ["", "  (any-test-had-category, non-exclusive): "
+              + ", ".join(f"{k}={v}" for k, v in any_hist.most_common())]
     if syntax_examples:
-        print(f"\n  Syntax-error examples:")
+        lines += ["", "  Syntax-error examples:"]
         for idx, code in syntax_examples:
             snippet = (code or "").strip().splitlines()
             head = " ".join(snippet[:2])[:160] if snippet else "(no code extracted)"
-            print(f"    prompt {idx}: {head}")
+            lines.append(f"    prompt {idx}: {head}")
+
+    report = "\n".join(lines)
+    print("\n" + report)
+
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    (REPORT_DIR / "failure_causes.txt").write_text(report + "\n")
+    (REPORT_DIR / "failure_causes.json").write_text(json.dumps({
+        "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "num_failing": len(failing),
+        "dominant_histogram": dict(dominant_hist),
+        "per_problem": per_problem,
+    }, indent=2))
+    print(f"\n  Report saved → {REPORT_DIR / 'failure_causes.txt'}")
+    print(f"  Per-problem categories → {REPORT_DIR / 'failure_causes.json'}")
 
 
 if __name__ == "__main__":

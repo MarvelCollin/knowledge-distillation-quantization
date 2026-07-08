@@ -142,12 +142,15 @@ def _load_passing_indices(cache_dir: str, num_problems: int) -> dict:
 
 class CodingDataset(Dataset):
     def __init__(self, problems: list, tokenizer, max_length: int,
-                 teacher_responses: dict, original_indices: list):
+                 teacher_responses: dict, original_indices: list,
+                 lengths: list = None):
         self.problems = problems
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.teacher_responses = teacher_responses
         self.original_indices = original_indices
+        self.lengths = lengths or []
+        self._cache = {}
 
     def __len__(self) -> int:
         return len(self.problems)
@@ -171,14 +174,18 @@ class CodingDataset(Dataset):
         return self.problems[idx]["test_cases"]
 
     def curriculum_order(self) -> list:
-        scored = []
-        for i, orig_idx in enumerate(self.original_indices):
-            length = self.teacher_responses[orig_idx]["token_count"]
-            scored.append((length, i))
+        if self.lengths:
+            scored = [(length, i) for i, length in enumerate(self.lengths)]
+        else:
+            scored = [(self.teacher_responses[orig_idx]["token_count"], i)
+                      for i, orig_idx in enumerate(self.original_indices)]
         scored.sort(key=lambda x: x[0])
         return [i for _, i in scored]
 
     def __getitem__(self, idx: int) -> dict:
+        cached = self._cache.get(idx)
+        if cached is not None:
+            return cached
         prompt = self.get_chat_prompt(idx)
         response = self.get_reference(idx)
 
@@ -203,18 +210,32 @@ class CodingDataset(Dataset):
         labels = input_ids.clone()
         labels[:prompt_length] = -100
 
-        return {
+        item = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
             "prompt_length": torch.tensor(prompt_length, dtype=torch.long),
             "idx": torch.tensor(idx, dtype=torch.long),
         }
+        self._cache[idx] = item
+        return item
 
 
 def load_problems(config: dict) -> list:
     dataset_name = config["data"]["dataset_name"]
     max_samples = config["data"]["max_samples"]
+
+    cache_file = Path("cache") / f"problems_{dataset_name.replace('/', '_')}_{max_samples}.json"
+    src_files = [
+        Path(__file__),
+        Path(__file__).parents[1] / "utils" / "reasoning.py",
+        Path(__file__).parents[1] / "evaluation" / "evaluator.py",
+    ]
+    src_mtime = max(f.stat().st_mtime for f in src_files)
+    if cache_file.exists() and cache_file.stat().st_mtime >= src_mtime:
+        problems = json.loads(cache_file.read_text())
+        print(f"Loaded {len(problems)} problems from processed cache ({cache_file.name}).")
+        return problems
 
     print(f"Loading {dataset_name}...")
     raw = load_dataset(dataset_name, split="train")
@@ -239,7 +260,9 @@ def load_problems(config: dict) -> list:
             "signature": signature,
         })
 
-    print(f"  Loaded {len(problems)} problems with test cases.")
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps(problems))
+    print(f"  Loaded {len(problems)} problems with test cases (processed cache written).")
     return problems
 
 
@@ -262,7 +285,8 @@ def _failed_cache_indices(cache_dir: str, num_problems: int) -> list:
 
 
 def rescore_failed_cache(cache_dir: str, problems: list, apply: bool = True,
-                         sample: int = 0, seed: int = 0, max_workers: int = 16) -> tuple:
+                         sample: int = 0, seed: int = 0, max_workers: int = 16,
+                         timeout: float = 5.0) -> tuple:
     from concurrent.futures import ThreadPoolExecutor
 
     cache_path = Path(cache_dir)
@@ -277,7 +301,7 @@ def rescore_failed_cache(cache_dir: str, problems: list, apply: bool = True,
         f = cache_path / f"{i}.json"
         d = json.loads(f.read_text())
         code = extract_code(d.get("text", ""))
-        r = run_test_cases(code, problems[i]["test_cases"])
+        r = run_test_cases(code, problems[i]["test_cases"], timeout=timeout)
         if r["total"] > 0 and r["passed"] == r["total"]:
             if apply:
                 d["test_passed"] = r["total"]
@@ -308,6 +332,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
     teacher_responses = _load_passing_indices(cache_dir, len(problems))
 
     kept_indices = []
+    lengths_map = {}
     misaligned = 0
     for i in sorted(teacher_responses.keys()):
         messages = [
@@ -321,6 +346,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
             misaligned += 1
         if prompt_len + student_resp_len + 1 <= max_length:
             kept_indices.append(i)
+            lengths_map[i] = prompt_len + student_resp_len + 1
 
     dropped = len(teacher_responses) - len(kept_indices)
     kept_problems = [problems[i] for i in kept_indices]
@@ -335,7 +361,9 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
     split = int(len(kept_problems) * train_ratio)
     return (
         CodingDataset(kept_problems[:split], tokenizer, max_length,
-                      teacher_responses, kept_indices[:split]),
+                      teacher_responses, kept_indices[:split],
+                      [lengths_map[i] for i in kept_indices[:split]]),
         CodingDataset(kept_problems[split:], tokenizer, max_length,
-                      teacher_responses, kept_indices[split:]),
+                      teacher_responses, kept_indices[split:],
+                      [lengths_map[i] for i in kept_indices[split:]]),
     )

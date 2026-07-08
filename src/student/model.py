@@ -21,6 +21,14 @@ class StudentModel(nn.Module):
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
         return outputs.logits
 
+    def forward_hidden(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        outputs = self.model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+        return outputs.last_hidden_state
+
+    @property
+    def lm_head_weight(self) -> torch.Tensor:
+        return self.model.get_output_embeddings().weight
+
     def save(self, path: str) -> None:
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)

@@ -18,6 +18,9 @@ def main():
                     help="If >0, measure recovery on a random sample without writing.")
     ap.add_argument("--apply", action="store_true",
                     help="Re-test ALL failed entries and UPDATE the cache for recoveries.")
+    ap.add_argument("--timeout", type=float, default=30.0,
+                    help="Per-test-case timeout in seconds (default 30 — generous, so "
+                         "slow-but-correct solutions mislabeled as timeout at 5s recover).")
     args = ap.parse_args()
 
     config = load_config(args.config)
@@ -25,7 +28,7 @@ def main():
     problems = load_problems(config)
 
     recovered, tested, total_failed = rescore_failed_cache(
-        cache_dir, problems, apply=args.apply, sample=args.sample
+        cache_dir, problems, apply=args.apply, sample=args.sample, timeout=args.timeout
     )
 
     mode = "APPLIED — cache updated" if args.apply else "DRY-RUN (no write)"

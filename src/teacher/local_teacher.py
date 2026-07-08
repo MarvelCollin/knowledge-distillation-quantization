@@ -170,12 +170,6 @@ class LocalTeacherModel:
 
     def sample_candidates_batch(self, prompts: list, n: int,
                                 temperature: float, top_p: float) -> list:
-        """Generate n rejection candidates per prompt WITHOUT logprobs.
-
-        Candidates only need text to be test-scored; computing top-k logprobs here
-        would be wasted on the ~all discarded candidates (and their objects are what
-        blows up host RAM). The single winning candidate gets exact logprobs later via
-        _teacher_force_batch. Returns lightweight {text, token_ids} dicts."""
         from vllm import SamplingParams
 
         sp = SamplingParams(
@@ -183,36 +177,12 @@ class LocalTeacherModel:
             temperature=temperature,
             top_p=top_p,
             max_tokens=self.max_tokens,
-            logprobs=None,
+            logprobs=self.top_logprobs,
             repetition_penalty=1.05,
         )
         formatted = [self._format_prompt(p) for p in prompts]
         outputs = self.llm.generate(formatted, sp, use_tqdm=True)
-        return [[{"text": self.tokenizer.decode(list(g.token_ids), skip_special_tokens=True),
-                  "token_ids": list(g.token_ids)} for g in o.outputs] for o in outputs]
-
-    def _teacher_force_batch(self, items: list) -> list:
-        """Recover exact teacher logprobs for kept trajectories in one forward pass.
-
-        items: list of (prompt_text, response_token_ids). Teacher-forces prompt+response
-        with prompt_logprobs, yielding the true top-k distribution over the response
-        tokens — identical to what sampling-with-logprobs would have produced, so this
-        is quality-neutral. Reuses the rescore path."""
-        from vllm import SamplingParams
-
-        sp = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=1,
-                            prompt_logprobs=self.top_logprobs)
-        cap = self.max_model_len - 1
-        token_prompts, prompt_lens = [], []
-        for prompt_text, resp_ids in items:
-            p_ids = self.tokenizer(self._format_prompt(prompt_text),
-                                   add_special_tokens=False).input_ids
-            full_ids = (list(p_ids) + list(resp_ids))[:cap]
-            token_prompts.append({"prompt_token_ids": full_ids})
-            prompt_lens.append(len(p_ids))
-        outputs = self.llm.generate(token_prompts, sp, use_tqdm=False)
-        return [self._rescore_one(o.prompt_token_ids, o.prompt_logprobs or [], plen)
-                for o, plen in zip(outputs, prompt_lens)]
+        return [[self._extract_one(g) for g in o.outputs] for o in outputs]
 
     @staticmethod
     def _fully_passed(test_passed, test_total) -> bool:
@@ -220,8 +190,6 @@ class LocalTeacherModel:
 
     @staticmethod
     def _cached_fully_passed(cache_path, idx: int) -> bool:
-        """True if the cache file for idx already holds a fully-passing trajectory.
-        Tail-read only (labels are the last keys) so it stays cheap on big files."""
         f = cache_path / f"{idx}.json"
         if not f.exists():
             return False
@@ -238,10 +206,6 @@ class LocalTeacherModel:
             return False
 
     def _score_result(self, result: dict, test_cases: list) -> dict:
-        """Score an already-extracted trajectory dict by its text.
-
-        Returns the full run_test_cases dict (passed/total/details/errors/categories)
-        so failures can be logged with root-cause detail."""
         try:
             return run_test_cases(extract_code(result.get("text", "")), test_cases)
         except Exception as exc:
@@ -250,16 +214,12 @@ class LocalTeacherModel:
 
     @staticmethod
     def _failure_modes(score: dict) -> str:
-        """Compact 'wrong_answer×5, timeout×1' summary of a failing score dict."""
         cats = [c for c in (score.get("categories") or []) if c and c != "pass"]
         if not cats:
             return "n/a"
         return ", ".join(f"{c}×{cats.count(c)}" for c in dict.fromkeys(cats))
 
     def _log_failures(self, failed: list, prefix: str = "  ") -> None:
-        """Print root-cause detail for a list of (label, score_dict) failed cases:
-        per-case failure modes + a couple of representative Input/Output/Expected
-        diagnostics, plus an aggregate mode histogram across the batch."""
         agg = {}
         for label, score in failed:
             modes = self._failure_modes(score)
@@ -367,7 +327,6 @@ class LocalTeacherModel:
                           f"(n={rejection_samples}, wave={wave}, temp={rejection_temperature})...")
                     recovered = 0
                     generated = 0
-                    recovered_winners = []
                     while remaining and generated < rejection_samples:
                         n_this = min(wave, rejection_samples - generated)
                         candidate_lists = self.sample_candidates_batch(
@@ -391,12 +350,10 @@ class LocalTeacherModel:
                             for ci, candidate, score in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
                                 if self._fully_passed(score["passed"], score["total"]):
                                     s[2], s[3], s[4], s[5] = candidate, score["passed"], score["total"], score
-                                    recovered_winners.append((s, candidate["token_ids"]))
                                     recovered += 1
                                     hit = True
                                     break
                             if not hit:
-                                # keep the best-scoring candidate's diagnostics for logging
                                 best = max(by_prompt.get(ri, []),
                                            key=lambda x: (x[2].get("passed") or 0), default=None)
                                 if best is not None and (best[2].get("passed") or 0) > (s[5].get("passed") or 0):
@@ -405,11 +362,6 @@ class LocalTeacherModel:
                         remaining = still
                     print(f"  rejection recovered {recovered}/{failed_count} prompts "
                           f"(generated up to {generated}/{rejection_samples} per prompt).")
-                    if recovered_winners:
-                        forced = self._teacher_force_batch(
-                            [(s[1], tids) for s, tids in recovered_winners])
-                        for (s, _), full_result in zip(recovered_winners, forced):
-                            s[2] = full_result
 
             if test_cases_per_prompt is not None:
                 failed = [(f"prompt {s[0]}", s[5]) for s in scored
@@ -418,20 +370,21 @@ class LocalTeacherModel:
                     print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
                     self._log_failures(failed)
 
+            chunk_pass = chunk_fail = 0
             for idx, prompt, result, test_passed, test_total, score in scored:
                 new_pass = self._fully_passed(test_passed, test_total)
-                # Monotonic cache: never downgrade an already-passing trajectory with a
-                # worse re-attempt. Rejection sampling is stochastic, so a prompt that
-                # passed on a prior run can fail this one — keep the good trajectory.
                 if test_total is not None and not new_pass and self._cached_fully_passed(cache_path, idx):
                     pass_count += 1
+                    chunk_pass += 1
                     continue
 
                 if test_total is not None:
                     if new_pass:
                         pass_count += 1
+                        chunk_pass += 1
                     else:
                         fail_count += 1
+                        chunk_fail += 1
 
                 payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
                 if test_total is not None:
@@ -453,7 +406,8 @@ class LocalTeacherModel:
             print(
                 f"  chunk done in {chunk_elapsed:.1f}s  "
                 f"({chunk_elapsed / len(chunk):.1f}s/prompt avg)  "
-                f"|  pass {pass_count}/{tested} ({rate:.1%})  "
+                f"|  this chunk: {chunk_pass} pass / {chunk_fail} fail  "
+                f"|  total pass {pass_count}/{tested} ({rate:.1%})  "
                 f"|  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  "
                 f"|  GPU {gpu_used_gb():.1f}GB"
             )

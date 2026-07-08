@@ -29,9 +29,11 @@ teacher:
 training:
   alpha: 0.7
   batch_size: 1
+  batch_token_budget: 16384
+  max_batch_size: 4
   curriculum: length
   distill_temperature: 3.0
-  eval_steps: 25
+  eval_steps: 100
   gradient_accumulation_steps: 4
   learning_rate: 5e-6
   max_grad_norm: 1.0
@@ -42,8 +44,6 @@ training:
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: false
-  select_problems: 20
-  select_max_new_tokens: 15360
   warmup_steps: 30
   weight_decay: 0.01
   neftune_alpha: 5.0

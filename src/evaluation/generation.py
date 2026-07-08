@@ -41,7 +41,9 @@ def build_eval_prompts(problems, tokenizer):
     for prob in problems:
         prompt = PROMPT_TEMPLATE.format(text=prob["text"])
         expected = prob.get("entry_point") or extract_fn_name(prob["test_cases"])
-        signature = extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
+        signature = prob.get("signature") or (
+            extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
+        )
         user_content = build_signature_user_content(prompt, signature)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

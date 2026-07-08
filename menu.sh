@@ -85,14 +85,15 @@ set_fixed_compare_params() {
     local eval_mnt
     eval_mnt=$(grep 'max_new_tokens' config/config.yaml 2>/dev/null | awk '{print $2}')
     CMP_SKIP_FLAG=""
-    CMP_NP=100000
+    CMP_NP=228
     CMP_DIFFICULTY="all"
     COMPARE_AFTER=1
     echo -e "  ${BOLD}Fixed compare config${NC} (auto, no prompts):"
+    echo "    dataset      : LeetCode test split"
     echo "    models       : original + teacher + distilled  (3-way)"
-    echo "    num_problems : full test split"
-    echo "    difficulty   : all  (easy + medium + hard)"
-    echo "    samples/prob : 5  (pass@5)   temperature 0.7   top_p 0.95"
+    echo "    num_problems : 228  (full test split: 48 easy / 101 medium / 79 hard)"
+    echo "    difficulty   : all  (per-difficulty breakdown reported)"
+    echo "    samples/prob : 5   temperature 0.7   top_p 0.95"
     echo "    max_tokens   : ${eval_mnt}   seed 1234"
     echo "    chunk_size   : 24 student / 8 teacher"
     echo "    reuse        : teacher + original cached & reused; only distilled re-runs"
@@ -100,7 +101,7 @@ set_fixed_compare_params() {
 
 compare_cache_status() {
     [ -d outputs/eval/intermediate ] || { echo -e "  ${YELLOW}No cached evals yet — all models will run.${NC}"; echo ""; return 0; }
-    echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}, pass@5:"
+    echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}:"
     python3 - "$CMP_NP" "$CMP_DIFFICULTY" <<'PY'
 import json, os, sys
 np = int(sys.argv[1]); diff = sys.argv[2]
@@ -477,18 +478,9 @@ PYEOF
             echo -e "    ${CYAN}failure-cause${NC}: why the failing trajectories fail"
             echo -e "                   (syntax_error / wrong_answer / timeout / missing_function)"
             echo ""
-            echo -n "  Run diagnostics now? (y/n): "
-            read -r ans
-            if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-                run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/check_cache_prompts.py"
-                echo ""
-                run_cmd "sudo docker compose run --rm compare_eval python scripts/analyze_failures.py"
-            else
-                echo ""
-                echo -e "  Cancelled."
-                echo ""
-                read -rp "Press Enter to return to menu..."
-            fi
+            run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/check_cache_prompts.py"
+            echo ""
+            run_cmd "sudo docker compose run --rm compare_eval python scripts/analyze_failures.py"
             ;;
         q|Q)
             echo -e "${NC}Bye."

@@ -21,19 +21,15 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from transformers.optimization import Adafactor
 
-from src.data.dataset import PROMPT_TEMPLATE, build_user_content, create_datasets, load_problems
+from src.data.dataset import build_user_content, create_datasets, load_problems
 from src.distillation.loss import (
-    adaptive_skew_lambda,
     build_teacher_topk,
     compute_loss_chunked_backward,
-    compute_total_loss,
 )
-from src.distillation.qead import compute_qead_weights, teacher_confidence_weights
-from src.evaluation.evaluator import run_test_cases, failing_cases, write_failure_report
+from src.distillation.qead import fused_qead_kld_pass, teacher_confidence_weights
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
 from src.config import load_config
-from src.evaluation.generation import generate_student_solution
 
 
 def seed_worker(worker_id: int) -> None:
@@ -47,75 +43,32 @@ def run_validation(student: StudentModel, val_loader: DataLoader, device: torch.
     total_loss = 0.0
     total_tokens = 0
 
+    chunk_size = 1024
     with torch.no_grad():
         for batch in val_loader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            logits = student(input_ids, attention_mask)
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            hidden = student.forward_hidden(input_ids, attention_mask)
+            weight = student.lm_head_weight
+            seq_len = hidden.size(1)
+            shift_labels = torch.full_like(labels, -100)
+            shift_labels[..., :-1] = labels[..., 1:]
 
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-                reduction="sum",
-            )
-            total_loss += loss.item()
+            for s in range(0, seq_len, chunk_size):
+                e = min(s + chunk_size, seq_len)
+                logits_chunk = F.linear(hidden[:, s:e], weight)
+                loss = F.cross_entropy(
+                    logits_chunk.reshape(-1, logits_chunk.size(-1)),
+                    shift_labels[:, s:e].reshape(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+                total_loss += loss.item()
             total_tokens += (shift_labels != -100).sum().item()
 
     return total_loss / max(total_tokens, 1)
-
-
-def run_test_validation(student: StudentModel, val_dataset, device: torch.device,
-                        num_problems: int, max_new_tokens: int,
-                        detail_path=None) -> dict:
-    student.eval()
-    n = min(num_problems, len(val_dataset))
-    passed_total = 0
-    test_total = 0
-    solved_count = 0
-    entries = []
-
-    for i in range(n):
-        prompt = val_dataset.get_prompt(i)
-        test_cases = val_dataset.get_test_cases(i)
-        code = ""
-        try:
-            _, code = generate_student_solution(student, prompt, test_cases, max_new_tokens)
-            r = run_test_cases(code, test_cases)
-        except Exception as exc:
-            print(f"  [test-val {i}] generation/exec error: {type(exc).__name__}: {exc}")
-            entries.append({
-                "header": f"Problem {i}  —  generation/exec error",
-                "solved": False, "code": code,
-                "fails": [("runtime_error", f"{type(exc).__name__}: {exc}")],
-            })
-            continue
-        passed_total += r["passed"]
-        test_total += r["total"]
-        solved = r["total"] > 0 and r["passed"] == r["total"]
-        if solved:
-            solved_count += 1
-        entries.append({
-            "header": f"Problem {i}  —  {r['passed']}/{r['total']} test cases",
-            "solved": solved, "code": code,
-            "fails": failing_cases(r, limit=3),
-        })
-
-    if detail_path is not None:
-        try:
-            write_failure_report(detail_path, f"Train selection eval — {Path(detail_path).stem}", entries)
-        except Exception as exc:
-            print(f"  [test-val] could not write detail report: {type(exc).__name__}: {exc}")
-
-    return {
-        "test_pass_rate": passed_total / max(test_total, 1),
-        "problems_solved": solved_count,
-        "problems_total": n,
-    }
 
 
 def main():
@@ -215,7 +168,7 @@ def main():
     else:
         print("Offline mode: skipping teacher cache build. Using existing cache only.")
 
-    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir, rescore=True)
+    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir)
 
     student = StudentModel(
         model_name=config["student"]["model_name"],
@@ -226,31 +179,72 @@ def main():
     loader_generator = torch.Generator()
     loader_generator.manual_seed(seed)
 
+    pad_id = student_tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = student_tokenizer.eos_token_id
+
+    def pad_collate(items):
+        max_len = max(it["input_ids"].size(0) for it in items)
+        input_ids = torch.full((len(items), max_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((len(items), max_len), dtype=torch.long)
+        labels = torch.full((len(items), max_len), -100, dtype=torch.long)
+        for r, it in enumerate(items):
+            n = it["input_ids"].size(0)
+            input_ids[r, :n] = it["input_ids"]
+            attention_mask[r, :n] = it["attention_mask"]
+            labels[r, :n] = it["labels"]
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "prompt_length": torch.stack([it["prompt_length"] for it in items]),
+            "idx": torch.stack([it["idx"] for it in items]),
+        }
+
+    token_budget = int(config["training"].get("batch_token_budget", 16384))
+    max_batch = int(config["training"].get("max_batch_size", 4))
+
+    def pack_by_budget(order, lengths):
+        batches = []
+        cur, cur_max = [], 0
+        for i in order:
+            length = lengths[i]
+            new_max = max(cur_max, length)
+            if cur and (len(cur) + 1 > max_batch or new_max * (len(cur) + 1) > token_budget):
+                batches.append(cur)
+                cur, cur_max = [i], length
+            else:
+                cur.append(i)
+                cur_max = new_max
+        if cur:
+            batches.append(cur)
+        return batches
+
+    class _FixedBatchSampler(Sampler):
+        def __init__(self, batches):
+            self.batches = batches
+
+        def __iter__(self):
+            return iter(self.batches)
+
+        def __len__(self):
+            return len(self.batches)
+
     curriculum_mode = config["training"].get("curriculum", "none")
     if curriculum_mode == "length":
         order = train_dataset.curriculum_order()
-        print(f"Curriculum: ordering {len(order)} samples by teacher response length (easy first).")
-
-        class _FixedOrderSampler(Sampler):
-            def __init__(self, indices):
-                self.indices = list(indices)
-
-            def __iter__(self):
-                return iter(self.indices)
-
-            def __len__(self):
-                return len(self.indices)
+        batches = pack_by_budget(order, train_dataset.lengths)
+        print(f"Curriculum: {len(order)} samples by length (easy first), packed into "
+              f"{len(batches)} batches (token_budget={token_budget}, max_batch={max_batch}).")
 
         train_loader = DataLoader(
             train_dataset,
-            batch_size=config["training"]["batch_size"],
-            sampler=_FixedOrderSampler(order),
-            drop_last=True,
+            batch_sampler=_FixedBatchSampler(batches),
+            collate_fn=pad_collate,
             num_workers=2,
             persistent_workers=True,
             pin_memory=True,
             worker_init_fn=seed_worker,
-            generator=loader_generator,
         )
     else:
         train_loader = DataLoader(
@@ -258,6 +252,7 @@ def main():
             batch_size=config["training"]["batch_size"],
             shuffle=True,
             drop_last=True,
+            collate_fn=pad_collate,
             num_workers=2,
             persistent_workers=True,
             pin_memory=True,
@@ -266,7 +261,9 @@ def main():
         )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config["training"]["batch_size"],
+        batch_sampler=_FixedBatchSampler(
+            pack_by_budget(val_dataset.curriculum_order(), val_dataset.lengths)),
+        collate_fn=pad_collate,
         num_workers=2,
         persistent_workers=True,
         pin_memory=True,
@@ -281,7 +278,8 @@ def main():
         relative_step=False,
         warmup_init=False,
     )
-    optimizer_steps_per_epoch = len(train_loader) // config["training"]["gradient_accumulation_steps"]
+    effective_batch = config["training"]["batch_size"] * config["training"]["gradient_accumulation_steps"]
+    optimizer_steps_per_epoch = max(1, len(train_dataset) // effective_batch)
     total_steps = optimizer_steps_per_epoch * config["training"]["num_epochs"]
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
@@ -292,7 +290,6 @@ def main():
     n_cache_files = len(list(Path(cache_dir).glob("*.json"))) if os.path.isdir(cache_dir) else 0
     n_train_samples = len(train_dataset)
     n_val_samples = len(val_dataset)
-    effective_batch = config["training"]["batch_size"] * config["training"]["gradient_accumulation_steps"]
     print()
     print("═" * 60)
     print("  Training data breakdown")
@@ -316,21 +313,28 @@ def main():
     use_adaptive_skew = config["training"].get("adaptive_skew", False)
     use_confidence = config["training"].get("teacher_confidence_weight", False)
     distill_temp = config["training"]["distill_temperature"]
-    grad_accum = config["training"]["gradient_accumulation_steps"]
     max_grad_norm = config["training"]["max_grad_norm"]
     eval_steps = config["training"]["eval_steps"]
-    select_problems = config["training"]["select_problems"]
-    select_max_new_tokens = config["training"]["select_max_new_tokens"]
 
-    teacher_topk = {}
-    for cache_idx in train_dataset.original_indices:
-        cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
-        if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
-            continue
-        teacher_topk[cache_idx] = build_teacher_topk(
-            cached["top_k_ids"], cached["top_k_vals"],
-            vocab_size, topk, torch.device("cpu"), distill_temp,
-        )
+    newest_json = max((f.stat().st_mtime for f in Path(cache_dir).glob("*.json")), default=0.0)
+    snap_path = Path(cache_dir) / f"topk_snapshot_v{vocab_size}_k{topk}_t{distill_temp}.pt"
+    teacher_topk = None
+    if snap_path.exists() and snap_path.stat().st_mtime >= newest_json:
+        snap = torch.load(snap_path)
+        if snap.get("indices") == list(train_dataset.original_indices):
+            teacher_topk = snap["topk"]
+            print(f"Loaded teacher top-k snapshot ({snap_path.name}).")
+    if teacher_topk is None:
+        teacher_topk = {}
+        for cache_idx in train_dataset.original_indices:
+            cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
+            if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
+                continue
+            teacher_topk[cache_idx] = build_teacher_topk(
+                cached["top_k_ids"], cached["top_k_vals"],
+                vocab_size, topk, torch.device("cpu"), distill_temp,
+            )
+        torch.save({"indices": list(train_dataset.original_indices), "topk": teacher_topk}, snap_path)
     topk_mb = sum(i.nbytes + p.nbytes for i, p in teacher_topk.values()) / 1024**2
     print(f"Preloaded teacher top-k for {len(teacher_topk)}/{n_train_samples} train samples ({topk_mb:.0f} MB CPU).")
 
@@ -354,23 +358,18 @@ def main():
         student.model.get_input_embeddings().register_forward_hook(_neftune_hook)
         print(f"  NEFTune: ON (alpha={neftune_alpha}) -- noisy embeddings during training only")
 
-    base_stats = run_test_validation(
-        student, val_dataset, device,
-        num_problems=select_problems, max_new_tokens=select_max_new_tokens,
-        detail_path=output_dir / "train_details" / "step_00000_base.md",
-    )
-    best_solve_rate = base_stats["test_pass_rate"]
     best_val_loss = run_validation(student, val_loader, device)
     student.save(str(output_dir / "final"))
-    print(f"Baseline (untrained) selection: solve={best_solve_rate:.1%} "
-          f"({base_stats['problems_solved']}/{base_stats['problems_total']})  "
-          f"val_loss={best_val_loss:.4f}  → saved as initial best (floor).")
+    print(f"Baseline (untrained): val_loss={best_val_loss:.4f}  → saved as initial best (floor).")
 
     for epoch in range(config["training"]["num_epochs"]):
         student.train()
         optimizer.zero_grad()
         epoch_start = time.time()
         epoch_samples_seen = 0
+        pending_samples = 0
+        t_data = t_compute = t_val = 0.0
+        t_mark = time.time()
 
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config['training']['num_epochs']}")):
             input_ids = batch["input_ids"].to(device)
@@ -379,14 +378,10 @@ def main():
             prompt_lengths = batch["prompt_length"]
             sample_idxs = batch["idx"]
 
-            student_logits = student(input_ids, attention_mask)
-            seq_len = student_logits.size(1)
+            t_data += time.time() - t_mark
+            t_mark = time.time()
 
-            response_mask = labels != -100
-            predict_mask = torch.zeros_like(response_mask)
-            predict_mask[:, :-1] = response_mask[:, 1:]
-            qead_weights = compute_qead_weights(student_logits, predict_mask)
-
+            seq_len = input_ids.size(1)
             teacher_ids = torch.zeros(len(sample_idxs), seq_len, topk, dtype=torch.long, device=device)
             teacher_probs = torch.zeros(len(sample_idxs), seq_len, topk, device=device)
 
@@ -405,6 +400,17 @@ def main():
                 teacher_ids[i, dist_start : dist_start + aligned_len] = ids_full[:aligned_len].to(device)
                 teacher_probs[i, dist_start : dist_start + aligned_len] = probs_full[:aligned_len].to(device)
 
+            hidden = student.forward_hidden(input_ids, attention_mask)
+            lm_head_weight = student.lm_head_weight
+
+            response_mask = labels != -100
+            predict_mask = torch.zeros_like(response_mask)
+            predict_mask[:, :-1] = response_mask[:, 1:]
+            qead_weights, per_token_kld = fused_qead_kld_pass(
+                hidden, lm_head_weight, predict_mask, teacher_ids, teacher_probs,
+                distill_temp, compute_kld=use_adaptive_skew,
+            )
+
             valid_teacher = teacher_probs.sum(dim=-1) > 1e-8
             qead_weights = qead_weights * valid_teacher.float()
             if use_confidence:
@@ -413,40 +419,39 @@ def main():
             qead_weights = qead_weights / weight_sums
 
             if use_adaptive_skew:
-                effective_lambda = adaptive_skew_lambda(
-                    student_logits, teacher_ids, teacher_probs, qead_weights,
-                    skew_lambda, skew_lambda_max, distill_temp,
-                )
+                per_sample_kld = (qead_weights * per_token_kld).sum(dim=-1) / qead_weights.sum(dim=-1).clamp(min=1e-8)
+                gate = torch.tanh(per_sample_kld / 4.0)
+                effective_lambda = (skew_lambda + (skew_lambda_max - skew_lambda) * gate).clamp(
+                    min=skew_lambda, max=skew_lambda_max)
             else:
                 effective_lambda = skew_lambda
 
             sample_alpha = alpha if bool(valid_teacher.any()) else 0.0
 
-            # Chunked-over-sequence loss + backward: keeps the (chunk, vocab) softmax
-            # working set small so peak VRAM stays under the 22 GB cap even on the
-            # longest (max_length) sequences at the end of the curriculum.
             total_val, distill_val, task_val = compute_loss_chunked_backward(
-                student_logits, teacher_ids, teacher_probs, qead_weights, labels,
-                sample_alpha, effective_lambda, distill_temp, loss_scale=1.0 / grad_accum,
+                hidden, lm_head_weight, teacher_ids, teacher_probs, qead_weights, labels,
+                sample_alpha, effective_lambda, distill_temp,
+                loss_scale=len(sample_idxs) / effective_batch,
             )
 
-            # Free large GPU tensors immediately to keep VRAM below 22 GB cap.
-            del student_logits, teacher_ids, teacher_probs, qead_weights, valid_teacher
-            del effective_lambda, weight_sums
+            del hidden, teacher_ids, teacher_probs, qead_weights, valid_teacher
+            del effective_lambda, weight_sums, per_token_kld
             del response_mask, predict_mask
 
             samples_seen += len(sample_idxs)
             epoch_samples_seen += len(sample_idxs)
+            pending_samples += len(sample_idxs)
 
-            if (step + 1) % grad_accum == 0:
+            t_compute += time.time() - t_mark
+            t_mark = time.time()
+
+            if pending_samples >= effective_batch:
+                pending_samples = 0
                 torch.nn.utils.clip_grad_norm_(student.parameters(), max_grad_norm)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
-
-                if global_step % 50 == 0:
-                    torch.cuda.empty_cache()
 
                 if global_step % 10 == 0:
                     epoch_pct = epoch_samples_seen / max(n_train_samples, 1) * 100
@@ -461,27 +466,19 @@ def main():
                     )
 
                 if global_step % eval_steps == 0:
+                    v0 = time.time()
                     val_loss = run_validation(student, val_loader, device)
-                    stats = run_test_validation(
-                        student, val_dataset, device,
-                        num_problems=select_problems,
-                        max_new_tokens=select_max_new_tokens,
-                        detail_path=output_dir / "train_details" / f"step_{global_step:05d}.md",
-                    )
-                    solve_rate = stats["test_pass_rate"]
-                    line = (
-                        f"step {global_step}/{total_steps}  "
-                        f"solve={solve_rate:.1%} ({stats['problems_solved']}/{stats['problems_total']})  "
-                        f"val_loss={val_loss:.4f}"
-                    )
-                    if (solve_rate, -val_loss) > (best_solve_rate, -best_val_loss):
-                        best_solve_rate = solve_rate
+                    line = f"step {global_step}/{total_steps}  val_loss={val_loss:.4f}"
+                    if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         student.save(str(output_dir / "final"))
                         print(line + "  ✓ saved best")
                     else:
-                        print(line + f"  (best solve={best_solve_rate:.1%})")
+                        print(line + f"  (best val_loss={best_val_loss:.4f})")
                     student.train()
+                    t_val += time.time() - v0
+
+                t_mark = time.time()
 
         epoch_elapsed = time.time() - epoch_start
         epoch_m, epoch_s = divmod(int(epoch_elapsed), 60)
@@ -490,14 +487,14 @@ def main():
               f"samples seen: {epoch_samples_seen}/{n_train_samples}  "
               f"cumulative: {samples_seen}  "
               f"time: {epoch_m}m {epoch_s:02d}s  "
-              f"best_solve: {best_solve_rate:.1%}")
+              f"(compute {t_compute / 60:.1f}m | val+select {t_val / 60:.1f}m | data wait {t_data / 60:.1f}m)  "
+              f"best_val_loss: {best_val_loss:.4f}")
         print()
 
     student.save(str(output_dir / "final_last"))
     print(f"Last-epoch (fully-trained) checkpoint saved at outputs/final_last for evaluation.")
 
-    print(f"Training complete. Best solve_rate={best_solve_rate:.1%} (val_loss={best_val_loss:.4f}) "
-          f"saved at outputs/final — guaranteed >= base ({base_stats['test_pass_rate']:.1%}).")
+    print(f"Training complete. Best val_loss={best_val_loss:.4f} saved at outputs/final.")
 
     elapsed = time.time() - train_start
     hours = int(elapsed // 3600)
