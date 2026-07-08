@@ -137,6 +137,7 @@ def main():
         raw_problems = load_problems(config)
         raw_prompts = [build_user_content(p) for p in raw_problems]
         raw_tests = [p["test_cases"] for p in raw_problems]
+        raw_difficulties = [p.get("difficulty", "") for p in raw_problems]
         local_teacher = LocalTeacherModel(
             model_path=config["teacher"]["local_model_path"],
             max_tokens=config["teacher"]["max_tokens"],
@@ -155,6 +156,7 @@ def main():
         local_teacher.precompute_and_cache(
             raw_prompts, cache_dir,
             test_cases_per_prompt=raw_tests,
+            difficulty_per_prompt=raw_difficulties,
             chunk_size=chunk_size,
             rejection_samples=config["teacher"].get("rejection_samples", 0),
             rejection_wave=config["teacher"].get("rejection_wave", 2),

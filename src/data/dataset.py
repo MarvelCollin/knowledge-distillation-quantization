@@ -260,6 +260,7 @@ def load_problems(config: dict) -> list:
             "test_cases": test_cases,
             "entry_point": entry_point,
             "signature": signature,
+            "difficulty": (item.get("difficulty") or "").strip(),
         })
 
     cache_file.parent.mkdir(parents=True, exist_ok=True)

@@ -239,6 +239,7 @@ class LocalTeacherModel:
 
     def precompute_and_cache(self, prompts: list, cache_dir: str,
                              test_cases_per_prompt: list = None,
+                             difficulty_per_prompt: list = None,
                              chunk_size: int = 64,
                              rejection_samples: int = 0,
                              rejection_wave: int = 2,
@@ -298,6 +299,139 @@ class LocalTeacherModel:
         pass_count = 0
         fail_count = 0
 
+        from threading import Thread
+
+        bg_thread = None
+        bg_error = [None]
+
+        def _test_and_save(chunk, results, chunk_idx, total_chunks, chunk_t0):
+            nonlocal pass_count, fail_count
+            try:
+                scored = []
+                if test_cases_per_prompt is not None:
+                    with ThreadPoolExecutor(max_workers=min(16, len(chunk))) as ex:
+                        score_out = list(ex.map(
+                            lambda ir: self._score_result(ir[1], test_cases_per_prompt[ir[0]]),
+                            [(idx, result) for (idx, _), result in zip(chunk, results)]))
+                    for (idx, prompt), result, score in zip(chunk, results, score_out):
+                        scored.append([idx, prompt, result, score["passed"], score["total"], score])
+                else:
+                    for (idx, prompt), result in zip(chunk, results):
+                        scored.append([idx, prompt, result, None, None, None])
+
+                if rejection_samples > 0 and test_cases_per_prompt is not None:
+                    remaining = [s for s in scored
+                                 if s[4] is not None and not self._fully_passed(s[3], s[4])]
+                    failed_count = len(remaining)
+                    if remaining:
+                        wave = max(1, rejection_wave)
+                        print(f"  rejection sampling {failed_count} failed prompts "
+                              f"(n={rejection_samples}, wave={wave}, temp={rejection_temperature})...")
+                        recovered = 0
+                        generated = 0
+                        while remaining and generated < rejection_samples:
+                            n_this = min(wave, rejection_samples - generated)
+                            candidate_lists = self.sample_candidates_batch(
+                                [s[1] for s in remaining], n_this,
+                                rejection_temperature, rejection_top_p)
+                            generated += n_this
+                            tasks = []
+                            for ri, (s, candidates) in enumerate(zip(remaining, candidate_lists)):
+                                tcs = test_cases_per_prompt[s[0]]
+                                for ci, candidate in enumerate(candidates):
+                                    tasks.append((ri, ci, candidate, tcs))
+                            with ThreadPoolExecutor(max_workers=min(16, max(1, len(tasks)))) as ex:
+                                task_scores = list(ex.map(
+                                    lambda t: self._score_result(t[2], t[3]), tasks))
+                            by_prompt = {}
+                            for (ri, ci, candidate, _), score in zip(tasks, task_scores):
+                                by_prompt.setdefault(ri, []).append((ci, candidate, score))
+                            still = []
+                            for ri, s in enumerate(remaining):
+                                hit = False
+                                for ci, candidate, score in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
+                                    if self._fully_passed(score["passed"], score["total"]):
+                                        s[2], s[3], s[4], s[5] = candidate, score["passed"], score["total"], score
+                                        recovered += 1
+                                        hit = True
+                                        break
+                                if not hit:
+                                    best = max(by_prompt.get(ri, []),
+                                               key=lambda x: (x[2].get("passed") or 0), default=None)
+                                    if best is not None and (best[2].get("passed") or 0) > (s[5].get("passed") or 0):
+                                        s[5] = best[2]
+                                    still.append(s)
+                            remaining = still
+                        print(f"  rejection recovered {recovered}/{failed_count} prompts "
+                              f"(generated up to {generated}/{rejection_samples} per prompt).")
+
+                fail_causes = Counter()
+                if test_cases_per_prompt is not None:
+                    failed = [(f"prompt {s[0]}", s[5]) for s in scored
+                              if s[4] is not None and not self._fully_passed(s[3], s[4]) and s[5] is not None]
+                    for _, score in failed:
+                        non_pass = [c for c in score.get("categories", []) if c != "pass"]
+                        fail_causes[Counter(non_pass).most_common(1)[0][0] if non_pass else "unknown"] += 1
+                    if failed:
+                        print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
+                        self._log_failures(failed)
+
+                chunk_pass = chunk_fail = 0
+                for idx, prompt, result, test_passed, test_total, score in scored:
+                    new_pass = self._fully_passed(test_passed, test_total)
+                    if test_total is not None and not new_pass and self._cached_fully_passed(cache_path, idx):
+                        pass_count += 1
+                        chunk_pass += 1
+                        continue
+
+                    if test_total is not None:
+                        if new_pass:
+                            pass_count += 1
+                            chunk_pass += 1
+                        else:
+                            fail_count += 1
+                            chunk_fail += 1
+
+                    payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
+                    if test_total is not None:
+                        payload["test_passed"] = test_passed
+                        payload["test_total"] = test_total
+                    with open(cache_path / f"{idx}.json", "w") as f:
+                        json.dump(payload, f)
+
+                chunk_elapsed = time.time() - chunk_t0
+                done_count = (chunk_idx) * chunk_size
+                done_count = min(done_count, len(pending))
+                total_elapsed = time.time() - total_start
+                avg_per_prompt = total_elapsed / max(done_count, 1)
+                eta_sec = avg_per_prompt * (len(pending) - done_count)
+                eta_m, eta_s = divmod(int(eta_sec), 60)
+                eta_h, eta_m = divmod(eta_m, 60)
+
+                tested = pass_count + fail_count
+                rate = pass_count / max(tested, 1)
+                causes = ("  |  fails: " + ", ".join(f"{c}×{n}" for c, n in fail_causes.most_common())
+                          if fail_causes else "")
+                print(
+                    f"  chunk {chunk_idx}/{total_chunks} done in {chunk_elapsed:.1f}s  "
+                    f"({chunk_elapsed / len(chunk):.1f}s/prompt avg)  "
+                    f"|  this chunk: {chunk_pass} pass / {chunk_fail} fail  "
+                    f"|  total pass {pass_count}/{tested} ({rate:.1%})  "
+                    f"|  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  "
+                    f"|  GPU {gpu_used_gb():.1f}GB"
+                    f"{causes}"
+                )
+                runlog.event(
+                    "chunk", idx=chunk_idx, of=total_chunks, secs=round(chunk_elapsed, 1),
+                    s_per_prompt=round(chunk_elapsed / len(chunk), 1),
+                    chunk_pass=chunk_pass, chunk_fail=chunk_fail,
+                    total_pass=pass_count, tested=tested, pass_rate=round(rate, 4),
+                    fail_causes=dict(fail_causes), gpu_gb=round(gpu_used_gb(), 1),
+                    eta_s=int(eta_sec),
+                )
+            except Exception as e:
+                bg_error[0] = e
+
         for chunk_start in range(0, len(pending), chunk_size):
             chunk = pending[chunk_start:chunk_start + chunk_size]
             chunk_prompts = [p for _, p in chunk]
@@ -309,127 +443,21 @@ class LocalTeacherModel:
 
             results = self.get_responses_batch(chunk_prompts)
 
-            scored = []
-            if test_cases_per_prompt is not None:
-                with ThreadPoolExecutor(max_workers=min(16, len(chunk))) as ex:
-                    score_out = list(ex.map(
-                        lambda ir: self._score_result(ir[1], test_cases_per_prompt[ir[0]]),
-                        [(idx, result) for (idx, _), result in zip(chunk, results)]))
-                for (idx, prompt), result, score in zip(chunk, results, score_out):
-                    scored.append([idx, prompt, result, score["passed"], score["total"], score])
-            else:
-                for (idx, prompt), result in zip(chunk, results):
-                    scored.append([idx, prompt, result, None, None, None])
+            if bg_thread is not None:
+                bg_thread.join()
+                if bg_error[0] is not None:
+                    raise bg_error[0]
 
-            if rejection_samples > 0 and test_cases_per_prompt is not None:
-                remaining = [s for s in scored
-                             if s[4] is not None and not self._fully_passed(s[3], s[4])]
-                failed_count = len(remaining)
-                if remaining:
-                    wave = max(1, rejection_wave)
-                    print(f"  rejection sampling {failed_count} failed prompts "
-                          f"(n={rejection_samples}, wave={wave}, temp={rejection_temperature})...")
-                    recovered = 0
-                    generated = 0
-                    while remaining and generated < rejection_samples:
-                        n_this = min(wave, rejection_samples - generated)
-                        candidate_lists = self.sample_candidates_batch(
-                            [s[1] for s in remaining], n_this,
-                            rejection_temperature, rejection_top_p)
-                        generated += n_this
-                        tasks = []
-                        for ri, (s, candidates) in enumerate(zip(remaining, candidate_lists)):
-                            tcs = test_cases_per_prompt[s[0]]
-                            for ci, candidate in enumerate(candidates):
-                                tasks.append((ri, ci, candidate, tcs))
-                        with ThreadPoolExecutor(max_workers=min(16, max(1, len(tasks)))) as ex:
-                            task_scores = list(ex.map(
-                                lambda t: self._score_result(t[2], t[3]), tasks))
-                        by_prompt = {}
-                        for (ri, ci, candidate, _), score in zip(tasks, task_scores):
-                            by_prompt.setdefault(ri, []).append((ci, candidate, score))
-                        still = []
-                        for ri, s in enumerate(remaining):
-                            hit = False
-                            for ci, candidate, score in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
-                                if self._fully_passed(score["passed"], score["total"]):
-                                    s[2], s[3], s[4], s[5] = candidate, score["passed"], score["total"], score
-                                    recovered += 1
-                                    hit = True
-                                    break
-                            if not hit:
-                                best = max(by_prompt.get(ri, []),
-                                           key=lambda x: (x[2].get("passed") or 0), default=None)
-                                if best is not None and (best[2].get("passed") or 0) > (s[5].get("passed") or 0):
-                                    s[5] = best[2]
-                                still.append(s)
-                        remaining = still
-                    print(f"  rejection recovered {recovered}/{failed_count} prompts "
-                          f"(generated up to {generated}/{rejection_samples} per prompt).")
-
-            fail_causes = Counter()
-            if test_cases_per_prompt is not None:
-                failed = [(f"prompt {s[0]}", s[5]) for s in scored
-                          if s[4] is not None and not self._fully_passed(s[3], s[4]) and s[5] is not None]
-                for _, score in failed:
-                    non_pass = [c for c in score.get("categories", []) if c != "pass"]
-                    fail_causes[Counter(non_pass).most_common(1)[0][0] if non_pass else "unknown"] += 1
-                if failed:
-                    print(f"  --- {len(failed)} unrecovered failures (root cause) ---")
-                    self._log_failures(failed)
-
-            chunk_pass = chunk_fail = 0
-            for idx, prompt, result, test_passed, test_total, score in scored:
-                new_pass = self._fully_passed(test_passed, test_total)
-                if test_total is not None and not new_pass and self._cached_fully_passed(cache_path, idx):
-                    pass_count += 1
-                    chunk_pass += 1
-                    continue
-
-                if test_total is not None:
-                    if new_pass:
-                        pass_count += 1
-                        chunk_pass += 1
-                    else:
-                        fail_count += 1
-                        chunk_fail += 1
-
-                payload = {"prompt": prompt, "max_tokens": self.max_tokens, **result}
-                if test_total is not None:
-                    payload["test_passed"] = test_passed
-                    payload["test_total"] = test_total
-                with open(cache_path / f"{idx}.json", "w") as f:
-                    json.dump(payload, f)
-
-            chunk_elapsed = time.time() - chunk_t0
-            done = chunk_start + len(chunk)
-            total_elapsed = time.time() - total_start
-            avg_per_prompt = total_elapsed / done
-            eta_sec = avg_per_prompt * (len(pending) - done)
-            eta_m, eta_s = divmod(int(eta_sec), 60)
-            eta_h, eta_m = divmod(eta_m, 60)
-
-            tested = pass_count + fail_count
-            rate = pass_count / max(tested, 1)
-            causes = ("  |  fails: " + ", ".join(f"{c}×{n}" for c, n in fail_causes.most_common())
-                      if fail_causes else "")
-            print(
-                f"  chunk done in {chunk_elapsed:.1f}s  "
-                f"({chunk_elapsed / len(chunk):.1f}s/prompt avg)  "
-                f"|  this chunk: {chunk_pass} pass / {chunk_fail} fail  "
-                f"|  total pass {pass_count}/{tested} ({rate:.1%})  "
-                f"|  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  "
-                f"|  GPU {gpu_used_gb():.1f}GB"
-                f"{causes}"
+            bg_thread = Thread(
+                target=_test_and_save,
+                args=(chunk, results, chunk_idx, total_chunks, chunk_t0),
             )
-            runlog.event(
-                "chunk", idx=chunk_idx, of=total_chunks, secs=round(chunk_elapsed, 1),
-                s_per_prompt=round(chunk_elapsed / len(chunk), 1),
-                chunk_pass=chunk_pass, chunk_fail=chunk_fail,
-                total_pass=pass_count, tested=tested, pass_rate=round(rate, 4),
-                fail_causes=dict(fail_causes), gpu_gb=round(gpu_used_gb(), 1),
-                eta_s=int(eta_sec),
-            )
+            bg_thread.start()
+
+        if bg_thread is not None:
+            bg_thread.join()
+            if bg_error[0] is not None:
+                raise bg_error[0]
 
         if test_cases_per_prompt is not None:
             tested = pass_count + fail_count
