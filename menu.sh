@@ -506,12 +506,11 @@ PYEOF
             echo ""
             show_cache_status "$cache_dir"
             echo ""
-            echo -e "  Rescore (CPU) runs first automatically, then GPU retry generates"
-            echo -e "  ${BOLD}n candidates per problem in ONE vLLM call${NC} (shared prefix KV cache)."
+            echo -e "  GPU retry generates ${BOLD}n candidates per problem in ONE vLLM call${NC} (shared prefix KV cache)."
             echo ""
             echo "  1) Rescore only (CPU, fast — no GPU needed)"
-            echo "  2) Rescore + Retry 3 candidates/problem (GPU)"
-            echo "  3) Rescore + Retry 5 candidates/problem (GPU)"
+            echo "  2) Retry 3 candidates/problem (GPU, no rescore)"
+            echo "  3) Retry 5 candidates/problem (GPU, no rescore)"
             echo "  q) Cancel"
             echo ""
             echo -n "  Select option: "
@@ -524,12 +523,12 @@ PYEOF
                     ;;
                 2)
                     keep_sudo_alive
-                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3"
+                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3 --no-rescore"
                     stop_sudo_alive
                     ;;
                 3)
                     keep_sudo_alive
-                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5"
+                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5 --no-rescore"
                     stop_sudo_alive
                     ;;
                 *)

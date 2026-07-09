@@ -16,7 +16,7 @@ teacher:
   top_p: 0.95
   top_logprobs: 20
   gpu_memory_utilization: 0.92
-  max_model_len: 36864
+  max_model_len: 32768
   kv_cache_dtype: auto
   enable_chunked_prefill: true
   max_num_batched_tokens: 4096
