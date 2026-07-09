@@ -288,10 +288,13 @@ def _failed_cache_indices(cache_dir: str, num_problems: int) -> list:
 
 
 def rescore_failed_cache(cache_dir: str, problems: list, apply: bool = True,
-                         sample: int = 0, seed: int = 0, max_workers: int = 16,
+                         sample: int = 0, seed: int = 0, max_workers: int = 0,
                          timeout: float = 5.0) -> tuple:
+    import os
     from concurrent.futures import ThreadPoolExecutor
 
+    if max_workers <= 0:
+        max_workers = min(os.cpu_count() or 16, 48)
     cache_path = Path(cache_dir)
     failed = _failed_cache_indices(cache_dir, len(problems))
     total_failed = len(failed)

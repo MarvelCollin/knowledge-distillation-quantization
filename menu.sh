@@ -506,15 +506,12 @@ PYEOF
             echo ""
             show_cache_status "$cache_dir"
             echo ""
-            echo -e "  ${BOLD}Step 1: Rescore${NC} ${GREEN}(CPU-only, fast, safe alongside GPU jobs)${NC}"
-            echo -e "    Re-runs tests on existing failed code — recovers harness-misscored entries."
+            echo -e "  Rescore (CPU) runs first automatically, then GPU retry generates"
+            echo -e "  ${BOLD}n candidates per problem in ONE vLLM call${NC} (shared prefix KV cache)."
             echo ""
-            echo -e "  ${BOLD}Step 2: Retry${NC} ${YELLOW}(GPU, slow — loads teacher model, re-generates)${NC}"
-            echo -e "    Rejection-samples new solutions for still-failed problems."
-            echo ""
-            echo "  1) Rescore only (CPU, fast)"
-            echo "  2) Rescore + Retry failed with 3 attempts (GPU)"
-            echo "  3) Rescore + Retry failed with 5 attempts (GPU)"
+            echo "  1) Rescore only (CPU, fast — no GPU needed)"
+            echo "  2) Rescore + Retry 3 candidates/problem (GPU)"
+            echo "  3) Rescore + Retry 5 candidates/problem (GPU)"
             echo "  q) Cancel"
             echo ""
             echo -n "  Select option: "
@@ -527,19 +524,11 @@ PYEOF
                     ;;
                 2)
                     keep_sudo_alive
-                    run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
-                    echo ""
-                    echo -e "  ${YELLOW}Starting rejection sampling on remaining failures (3 attempts)...${NC}"
-                    echo ""
                     run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3"
                     stop_sudo_alive
                     ;;
                 3)
                     keep_sudo_alive
-                    run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
-                    echo ""
-                    echo -e "  ${YELLOW}Starting rejection sampling on remaining failures (5 attempts)...${NC}"
-                    echo ""
                     run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5"
                     stop_sudo_alive
                     ;;

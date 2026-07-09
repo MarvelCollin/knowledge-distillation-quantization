@@ -7,16 +7,16 @@ evaluation:
   max_new_tokens: 20480
   output_dir: outputs/eval
 student:
-  max_length: 16384
+  max_length: 32768
   model_name: Qwen/Qwen2.5-Coder-1.5B-Instruct
 teacher:
   local_model_path: cache/teacher-model-ocr-7b
-  max_tokens: 16384
+  max_tokens: 32768
   temperature: 0.6
   top_p: 0.95
   top_logprobs: 20
   gpu_memory_utilization: 0.92
-  max_model_len: 18432
+  max_model_len: 36864
   kv_cache_dtype: auto
   enable_chunked_prefill: true
   max_num_batched_tokens: 4096
@@ -29,7 +29,7 @@ teacher:
 training:
   alpha: 0.7
   batch_size: 1
-  batch_token_budget: 16384
+  batch_token_budget: 32768
   max_batch_size: 4
   curriculum: length
   distill_temperature: 3.0
