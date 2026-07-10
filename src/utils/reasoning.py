@@ -17,7 +17,7 @@ THINK_BUDGET_RATIO = 0.75
 def _build_code_primer(has_think_end: bool, signature: str) -> str:
     head = "\n```python\n" if has_think_end else "\n</think>\n```python\n"
     if signature:
-        return f"{head}{signature}\n    "
+        return f"{head}{signature}\n"
     return head
 
 
@@ -97,7 +97,7 @@ def extract_fn_name(test_cases: list) -> str | None:
 def build_signature_user_content(base_prompt: str, signature: str) -> str:
     content = base_prompt.rstrip()
     if signature:
-        content += f"\n\nImplement this exact signature:\n```python\n{signature}\n    ...\n```"
+        content += f"\n\nImplement this exact signature:\n```python\n{signature}\n    pass\n```"
     return content
 
 
@@ -165,10 +165,14 @@ def _unwrap_solution(code: str) -> str:
     return ast.unparse(tree)
 
 
+def _normalize_indent(code: str) -> str:
+    return code.replace("\t", "    ")
+
+
 def extract_code(text: str) -> str:
     if not text:
         return ""
-    text = strip_thinking(text).strip()
+    text = _normalize_indent(strip_thinking(text)).strip()
 
     fence = re.search(r'```(?:python)?\s*\n?(.*?)(?:```|$)', text, re.DOTALL | re.IGNORECASE)
     if fence:
@@ -189,6 +193,8 @@ def extract_code(text: str) -> str:
         if not result:
             result.append(line)
         elif not line or line[0] in (' ', '\t'):
+            result.append(line)
+        elif re.match(r'^(?:def |class |@)', line):
             result.append(line)
         else:
             break

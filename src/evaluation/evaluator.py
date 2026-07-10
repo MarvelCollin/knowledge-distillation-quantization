@@ -182,16 +182,30 @@ def extract_signature(test_str: str, entry_point: str) -> str:
         tree = ast.parse(test_str)
     except SyntaxError:
         return ""
+    best_arity = 0
+    best_params = []
     for node in ast.walk(tree):
-        if (
+        if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "candidate"
         ):
-            params = [kw.arg for kw in node.keywords if kw.arg]
-            if params:
-                return f"def {entry_point}({', '.join(params)}):"
-    return f"def {entry_point}():"
+            continue
+        params = []
+        for i, arg in enumerate(node.args):
+            if isinstance(arg, ast.Name):
+                params.append(arg.id)
+            else:
+                params.append(f"arg{i}")
+        for kw in node.keywords:
+            if kw.arg:
+                params.append(kw.arg)
+        if len(params) > best_arity:
+            best_arity = len(params)
+            best_params = params
+    if best_params:
+        return f"def {entry_point}({', '.join(best_params)}):"
+    return ""
 
 
 def _prepare_assertion(assertion: str) -> tuple[str | None, str]:

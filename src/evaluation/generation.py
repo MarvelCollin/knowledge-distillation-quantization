@@ -86,7 +86,7 @@ def budget_forced_generate(llm, prompts, signatures, num_samples,
         sig = signatures[i] if i < len(signatures) else ""
         think_text = out.outputs[0].text
         closed = think_text if THINK_END_TAG in think_text else think_text + "\n" + THINK_END_TAG
-        primer = "\n```python\n" + (f"{sig}\n    " if sig else "")
+        primer = "\n```python\n" + (f"{sig}\n" if sig else "")
         cont_prompts.append(prompts[i] + closed + primer)
         code_params.append(SamplingParams(
             temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
