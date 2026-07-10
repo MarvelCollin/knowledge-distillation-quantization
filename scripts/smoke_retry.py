@@ -1,0 +1,167 @@
+import gc
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import torch
+from dotenv import load_dotenv
+from transformers import AutoTokenizer
+from vllm import SamplingParams
+
+from src.config import load_config
+from src.data.dataset import build_user_content, load_problems, _failed_cache_indices
+from src.evaluation.evaluator import run_test_cases
+from src.teacher.local_teacher import LocalTeacherModel
+from src.utils.reasoning import extract_code
+
+
+RETRY_SYSTEM_PROMPT = (
+    "You are a reasoning coding assistant. First think step by step inside <think>...</think>. "
+    "After </think>, output a single standalone Python function inside ```python ... ```. "
+    "Do NOT wrap it in a class. Do NOT use class Solution. Output only the function."
+)
+
+RETRY_PROMPT_TEMPLATE = (
+    "Write a solution in Python to solve the following problem.\n"
+    "Your answer must be a standalone Python function (not a class method).\n"
+    "Consider edge cases: empty inputs, single elements, negative values, large inputs.\n"
+    "Read the constraints carefully.\n\n"
+    "Problem: {text}\n\n"
+)
+
+
+def _build_retry_prompt(problem, tokenizer):
+    from src.utils.reasoning import build_signature_user_content
+    base = RETRY_PROMPT_TEMPLATE.format(text=problem["text"])
+    content = build_signature_user_content(base, problem.get("signature", ""))
+    messages = [
+        {"role": "system", "content": RETRY_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+
+def main():
+    load_dotenv()
+    config = load_config("config/config.yaml")
+    cache_dir = config["data"]["teacher_cache_dir"]
+    problems = load_problems(config)
+
+    failed = _failed_cache_indices(cache_dir, len(problems))
+    if not failed:
+        print("SKIP: no failed cache entries to test with")
+        return
+
+    smoke_n = min(4, len(failed))
+    smoke_indices = failed[:smoke_n]
+    attempts = 3
+    max_tokens = 8192
+    retry_model_len = min(
+        config["teacher"].get("max_model_len", 10240),
+        max_tokens + 4096,
+    )
+
+    print(f"=== Smoke test: retry {smoke_n} problems, {attempts} candidates each ===")
+    print(f"  max_tokens     = {max_tokens}")
+    print(f"  max_model_len  = {retry_model_len}")
+    print(f"  failed total   = {len(failed)}")
+    print()
+
+    student_tokenizer = AutoTokenizer.from_pretrained(
+        config["student"]["model_name"], trust_remote_code=True
+    )
+    t_load = time.time()
+    teacher = LocalTeacherModel(
+        model_path=config["teacher"]["local_model_path"],
+        max_tokens=config["teacher"]["max_tokens"],
+        temperature=1.0,
+        top_p=0.95,
+        top_logprobs=config["teacher"]["top_logprobs"],
+        student_tokenizer=student_tokenizer,
+        gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
+        max_model_len=retry_model_len,
+        kv_cache_dtype=config["teacher"].get("kv_cache_dtype", "auto"),
+        enable_chunked_prefill=config["teacher"].get("enable_chunked_prefill", False),
+        max_num_batched_tokens=config["teacher"].get("max_num_batched_tokens", None),
+        max_num_seqs=config["teacher"].get("max_num_seqs", None),
+    )
+    load_secs = time.time() - t_load
+    print(f"  model loaded in {load_secs:.1f}s")
+
+    retry_params = SamplingParams(
+        n=attempts,
+        temperature=1.0,
+        top_p=0.95,
+        max_tokens=max_tokens,
+        logprobs=config["teacher"]["top_logprobs"],
+        repetition_penalty=1.05,
+    )
+
+    prompts = [_build_retry_prompt(problems[i], teacher.tokenizer) for i in smoke_indices]
+    prompt_lens = [len(teacher.tokenizer.encode(p)) for p in prompts]
+    print(f"  prompt token lengths: {prompt_lens}")
+
+    t_gen = time.time()
+    outputs = teacher.llm.generate(prompts, retry_params, use_tqdm=True)
+    gen_secs = time.time() - t_gen
+
+    print(f"\n  generation done in {gen_secs:.1f}s  ({gen_secs / smoke_n:.1f}s/problem)")
+
+    recovered = 0
+    for j, idx in enumerate(smoke_indices):
+        diff = problems[idx].get("difficulty", "?")
+        tcs = problems[idx]["test_cases"]
+        orig_prompt = build_user_content(problems[idx])
+        best_score = None
+        best_result = None
+
+        for gen in outputs[j].outputs:
+            result = teacher._extract_one(gen)
+            out_tokens = len(gen.token_ids)
+            code = extract_code(result.get("text", ""))
+            score = run_test_cases(code, tcs, timeout=30.0)
+            passed = score["passed"] == score["total"] and score["total"] > 0
+            status = "PASS" if passed else "FAIL"
+            print(f"  [{idx}] {diff:<8} candidate: {out_tokens:>5} tokens  {status}  "
+                  f"({score['passed']}/{score['total']} tests)")
+            if passed and best_result is None:
+                best_result = result
+                best_score = score
+
+        if best_result is not None:
+            recovered += 1
+            print(f"  [{idx}] -> RECOVERED")
+        else:
+            print(f"  [{idx}] -> still failed")
+
+    print(f"\n=== Results ===")
+    print(f"  recovered    : {recovered}/{smoke_n}")
+    print(f"  gen time     : {gen_secs:.1f}s total, {gen_secs / smoke_n:.1f}s/problem")
+    print(f"  model load   : {load_secs:.1f}s")
+
+    full_eta_min = gen_secs / smoke_n * len(failed) / 60
+    print(f"  full run ETA : {full_eta_min:.0f} min for {len(failed)} problems")
+
+    old_chunk_secs = 3828
+    old_per_problem = old_chunk_secs / 64
+    new_per_problem = gen_secs / smoke_n
+    if new_per_problem > 0:
+        speedup = old_per_problem / new_per_problem
+        print(f"  speedup      : {speedup:.1f}x vs old run ({old_per_problem:.1f}s -> {new_per_problem:.1f}s per problem)")
+
+    teacher.shutdown()
+    del teacher
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print("\nSMOKE TEST PASSED")
+
+
+if __name__ == "__main__":
+    main()

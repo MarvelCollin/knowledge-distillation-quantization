@@ -58,10 +58,10 @@ def main():
     parser.add_argument("--attempts", type=int, default=3,
                         help="Candidates per failed problem (generated in one vLLM call via n=attempts).")
     parser.add_argument("--chunk-size", type=int, default=64)
+    parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--no-rescore", action="store_true",
-                        help="Skip the CPU rescore step before GPU retry.")
+    parser.add_argument("--no-rescore", action="store_true")
     args = parser.parse_args()
 
     load_dotenv()
@@ -82,8 +82,14 @@ def main():
         print("No failed cache entries. Nothing to retry.")
         return
 
+    retry_model_len = min(
+        config["teacher"].get("max_model_len", 10240),
+        args.max_tokens + 4096,
+    )
+
     print(f"Step 2: Retry {len(failed)} failed entries "
-          f"({args.attempts} candidates each, chunk_size={args.chunk_size})")
+          f"({args.attempts} candidates each, chunk_size={args.chunk_size}, "
+          f"max_tokens={args.max_tokens}, max_model_len={retry_model_len})")
 
     student_tokenizer = AutoTokenizer.from_pretrained(
         config["student"]["model_name"], trust_remote_code=True
@@ -96,7 +102,7 @@ def main():
         top_logprobs=config["teacher"]["top_logprobs"],
         student_tokenizer=student_tokenizer,
         gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
-        max_model_len=config["teacher"].get("max_model_len", 10240),
+        max_model_len=retry_model_len,
         kv_cache_dtype=config["teacher"].get("kv_cache_dtype", "auto"),
         enable_chunked_prefill=config["teacher"].get("enable_chunked_prefill", False),
         max_num_batched_tokens=config["teacher"].get("max_num_batched_tokens", None),
@@ -108,7 +114,7 @@ def main():
         n=args.attempts,
         temperature=args.temperature,
         top_p=args.top_p,
-        max_tokens=config["teacher"]["max_tokens"],
+        max_tokens=args.max_tokens,
         logprobs=config["teacher"]["top_logprobs"],
         repetition_penalty=1.05,
     )
