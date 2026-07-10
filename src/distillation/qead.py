@@ -59,3 +59,18 @@ def teacher_confidence_weights(teacher_probs: torch.Tensor) -> torch.Tensor:
         norm_entropy = (entropy / max_entropy).clamp(0.0, 1.0)
         confidence = 1.0 - norm_entropy
         return torch.where(nonempty, confidence, torch.zeros_like(confidence))
+
+
+def entropy_focus_weights(teacher_probs: torch.Tensor, floor: float = 0.1) -> torch.Tensor:
+    """Up-weight tokens where teacher has HIGH entropy (rich distributional signal).
+    Down-weight peaked/deterministic tokens where KD degrades to SFT.
+    Floor prevents zero-weight on confident tokens (they still carry some signal)."""
+    with torch.no_grad():
+        nonempty = teacher_probs.sum(dim=-1) > 1e-8
+        safe = teacher_probs.clamp(min=1e-10)
+        entropy = -(teacher_probs * safe.log()).sum(dim=-1)
+        k_eff = (teacher_probs > 1e-10).float().sum(dim=-1).clamp(min=2.0)
+        max_entropy = torch.log(k_eff)
+        norm_entropy = (entropy / max_entropy).clamp(0.0, 1.0)
+        focused = norm_entropy * (1.0 - floor) + floor
+        return torch.where(nonempty, focused, torch.zeros_like(focused))

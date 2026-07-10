@@ -26,7 +26,7 @@ from src.distillation.loss import (
     build_teacher_topk,
     compute_loss_chunked_backward,
 )
-from src.distillation.qead import fused_qead_kld_pass, teacher_confidence_weights
+from src.distillation.qead import fused_qead_kld_pass, teacher_confidence_weights, entropy_focus_weights
 from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
 from src.utils.runlog import RunLog, eta_str, show_progress_bars
@@ -321,6 +321,7 @@ def main():
     skew_lambda_max = config["training"].get("skew_lambda_max", skew_lambda)
     use_adaptive_skew = config["training"].get("adaptive_skew", False)
     use_confidence = config["training"].get("teacher_confidence_weight", False)
+    use_entropy_focus = config["training"].get("entropy_focus", False)
     distill_temp = config["training"]["distill_temperature"]
     max_grad_norm = config["training"]["max_grad_norm"]
     eval_steps = config["training"]["eval_steps"]
@@ -429,7 +430,9 @@ def main():
 
             valid_teacher = teacher_probs.sum(dim=-1) > 1e-8
             qead_weights = qead_weights * valid_teacher.float()
-            if use_confidence:
+            if use_entropy_focus:
+                qead_weights = qead_weights * entropy_focus_weights(teacher_probs)
+            elif use_confidence:
                 qead_weights = qead_weights * teacher_confidence_weights(teacher_probs)
             weight_sums = qead_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
             qead_weights = qead_weights / weight_sums

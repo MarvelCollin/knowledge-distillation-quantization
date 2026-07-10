@@ -32,7 +32,7 @@ training:
   batch_token_budget: 32768
   max_batch_size: 4
   curriculum: length
-  distill_temperature: 3.0
+  distill_temperature: 5.0
   eval_steps: 100
   gradient_accumulation_steps: 4
   learning_rate: 5e-6
@@ -44,6 +44,7 @@ training:
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: false
+  entropy_focus: true
   warmup_steps: 30
   weight_decay: 0.01
   neftune_alpha: 5.0
