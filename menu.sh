@@ -96,7 +96,7 @@ set_fixed_compare_params() {
     echo "    models       : original + teacher + distilled  (3-way)"
     echo "    num_problems : 228  (full test split: 48 easy / 101 medium / 79 hard)"
     echo "    difficulty   : all  (per-difficulty breakdown reported)"
-    echo "    samples/prob : 5   temperature 0.7   top_p 0.95"
+    echo "    samples/prob : 5   temperature 0.6   top_p 0.95"
     echo "    max_tokens   : ${eval_mnt}   seed 1234"
     echo "    chunk_size   : 24 student / 8 teacher"
     echo "    reuse        : teacher + original cached & reused; only distilled re-runs"
@@ -138,7 +138,7 @@ PY
 # Run compare-eval using already-collected CMP_* params (NO prompts).
 run_compare_with_params() {
     compare_cache_status
-    run_cmd "sudo docker compose run --rm compare_eval python scripts/compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.7 --top-p 0.95 $CMP_SKIP_FLAG"
+    run_cmd "sudo docker compose run --rm compare_eval python scripts/compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.6 --top-p 0.95 $CMP_SKIP_FLAG"
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }
 

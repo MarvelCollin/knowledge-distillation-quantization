@@ -4,7 +4,7 @@ data:
   teacher_cache_dir: cache/teacher_logprobs_ocr7b
   train_ratio: 0.9
 evaluation:
-  max_new_tokens: 20480
+  max_new_tokens: 16384
   output_dir: outputs/eval
 student:
   max_length: 32768
@@ -44,7 +44,7 @@ training:
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: false
-  entropy_focus: true
+  entropy_focus: false
   warmup_steps: 30
   weight_decay: 0.01
   neftune_alpha: 5.0

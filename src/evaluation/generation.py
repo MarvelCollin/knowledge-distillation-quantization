@@ -55,6 +55,38 @@ def build_eval_prompts(problems, tokenizer):
     return formatted, signatures
 
 
+def free_generate(llm, prompts, num_samples,
+                  temperature, top_p, max_new_tokens, seed=1234):
+    """Free generation matching teacher cache build: no budget forcing,
+    model decides when to stop thinking and write code naturally."""
+    from vllm import SamplingParams
+
+    do_sample = num_samples > 1
+    temp = temperature if do_sample else 0.0
+    tp = top_p if do_sample else 1.0
+
+    all_prompts = []
+    all_params = []
+    sample_index = []
+    for i, prompt in enumerate(prompts):
+        for j in range(num_samples):
+            all_prompts.append(prompt)
+            all_params.append(SamplingParams(
+                temperature=temp, top_p=tp, max_tokens=max_new_tokens, n=1,
+                repetition_penalty=1.05, seed=seed + j,
+            ))
+            sample_index.append((i, j))
+
+    outputs = llm.generate(all_prompts, all_params, use_tqdm=True)
+
+    grid = [[None] * num_samples for _ in range(len(prompts))]
+    for (i, j), out in zip(sample_index, outputs):
+        gen = out.outputs[0]
+        truncated = gen.finish_reason == "length"
+        grid[i][j] = (gen.text, truncated)
+    return grid
+
+
 def budget_forced_generate(llm, prompts, signatures, num_samples,
                            temperature, top_p, max_new_tokens,
                            think_ratio=0.75, seed=1234):

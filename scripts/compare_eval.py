@@ -40,7 +40,7 @@ from src.evaluation.evaluator import (
     failing_cases,
     write_failure_report,
 )
-from src.evaluation.generation import build_eval_prompts, budget_forced_generate
+from src.evaluation.generation import build_eval_prompts, budget_forced_generate, free_generate
 from src.utils.gpu import cleanup_vllm, gpu_total_gb, gpu_used_gb, wait_for_gpu_freed
 from src.utils.reasoning import extract_code
 
@@ -355,9 +355,10 @@ def evaluate_model(label: str, model_path: str, problems: list,
             print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
 
             eval_chunk_size = 8 if is_teacher else 24
+            gen_mode = "free" if is_teacher else "budget-forced"
             total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
             print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
-                  f"(budget-forced think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
+                  f"({gen_mode} think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
             gen_grid = [None] * len(formatted_prompts)
             for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
                 chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
@@ -365,10 +366,16 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 chunk_idx = chunk_start // eval_chunk_size + 1
                 chunk_t0 = time.time()
                 print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
-                chunk_grid = budget_forced_generate(
-                    llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
-                    seed=seed,
-                )
+                if is_teacher:
+                    chunk_grid = free_generate(
+                        llm, chunk, num_samples, temperature, top_p, max_new_tokens,
+                        seed=seed,
+                    )
+                else:
+                    chunk_grid = budget_forced_generate(
+                        llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
+                        seed=seed,
+                    )
                 for off, row in enumerate(chunk_grid):
                     gen_grid[chunk_start + off] = row
                 chunk_elapsed = time.time() - chunk_t0
@@ -604,7 +611,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--num-samples", type=int, default=1,
                         help="Samples per problem for pass@k (default: 1 = greedy)")
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--k", type=int, default=None,
                         help="k for pass@k (defaults to --num-samples)")
