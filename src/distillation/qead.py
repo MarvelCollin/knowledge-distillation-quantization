@@ -61,7 +61,7 @@ def teacher_confidence_weights(teacher_probs: torch.Tensor) -> torch.Tensor:
         return torch.where(nonempty, confidence, torch.zeros_like(confidence))
 
 
-def entropy_focus_weights(teacher_probs: torch.Tensor, floor: float = 0.1) -> torch.Tensor:
+def entropy_focus_weights(teacher_probs: torch.Tensor, floor: float = 0.3) -> torch.Tensor:
     """Up-weight tokens where teacher has HIGH entropy (rich distributional signal).
     Down-weight peaked/deterministic tokens where KD degrades to SFT.
     Floor prevents zero-weight on confident tokens (they still carry some signal)."""
