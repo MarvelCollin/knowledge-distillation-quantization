@@ -114,6 +114,29 @@ def _load_intermediate(label: str, dataset_name: str) -> dict | None:
     return None
 
 
+def _gen_cache_path(label: str) -> Path:
+    safe = label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
+    return _INTERMEDIATE / f"{safe}_gen.json"
+
+
+def _save_gen_grid(label: str, gen_grid: list, cache_key: dict) -> None:
+    _INTERMEDIATE.mkdir(parents=True, exist_ok=True)
+    payload = {"cache_key": cache_key, "gen_grid": gen_grid}
+    _gen_cache_path(label).write_text(json.dumps(payload))
+    print(f"  Saved generation cache → {_gen_cache_path(label)}")
+
+
+def _load_gen_grid(label: str, cache_key: dict) -> list | None:
+    p = _gen_cache_path(label)
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text())
+    if d.get("cache_key") != cache_key:
+        return None
+    print(f"  ✓ Reusing cached generations for: {label}")
+    return d["gen_grid"]
+
+
 def _model_fingerprint(model_path: str) -> str:
     weights = Path(model_path) / "model.safetensors"
     if weights.exists():
@@ -131,9 +154,7 @@ def _pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.prod((1.0 - k / i) for i in range(n - c + 1, n + 1))
 
 
-def _difficulty_breakdown(results: list) -> list:
-    """Per-difficulty test-case rate / solved, so a single run shows where each
-    model floors (e.g. Hard) and justifies any difficulty filtering in the report."""
+def _difficulty_breakdown(results: list, k: int = 5) -> list:
     buckets = {}
     for r in results:
         d = (r.get("difficulty") or "unknown").strip().lower() or "unknown"
@@ -144,11 +165,16 @@ def _difficulty_breakdown(results: list) -> list:
         rs = buckets[d]
         tp = sum(x["passed"] for x in rs)
         tt = sum(x["total"] for x in rs)
+        n = len(rs)
+        p1 = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), 1) for r in rs) / max(n, 1)
+        pk = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), min(k, r.get("num_samples", 1))) for r in rs) / max(n, 1)
         rows.append({
             "difficulty": d,
-            "num_problems": len(rs),
+            "num_problems": n,
             "test_pass_rate": tp / max(tt, 1),
             "solved": sum(1 for x in rs if x["solved"]),
+            "pass_at_1": p1,
+            "pass_at_k": pk,
         })
     return rows
 
@@ -198,7 +224,7 @@ def _finalise(label: str, results: list, dataset_name: str, k: int, meta: dict |
     pass1 = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), 1) for r in results) / max(n, 1)
     passk = sum(_pass_at_k(r.get("num_samples", 1), r.get("num_passing", int(r["solved"])), k) for r in results) / max(n, 1)
 
-    by_difficulty = _difficulty_breakdown(results)
+    by_difficulty = _difficulty_breakdown(results, k)
 
     summary = {
         "name": label,
@@ -220,17 +246,30 @@ def _finalise(label: str, results: list, dataset_name: str, k: int, meta: dict |
     }
     if meta:
         summary.update(meta)
-    print(f"\n  Test cases passed : {tp}/{tt}  ({summary['test_pass_rate']:.1%})  [first sample]")
-    print(f"  Problems solved   : {solved}/{n}  (any of {n_samples} samples)")
-    print(f"  Failure modes     : "
+    print(f"\n{'─' * 70}")
+    print(f"  {label}")
+    print(f"{'─' * 70}")
+    print(f"  test_pass_rate : {summary['test_pass_rate']:.1%}  ({tp}/{tt})")
+    print(f"  pass@1         : {pass1:.1%}")
+    if n_samples > 1:
+        print(f"  pass@{k}         : {passk:.1%}  ({solved}/{n} solved)")
+    print(f"  failure modes  : "
           + ", ".join(f"{c}={failure_counts[c]}" for c in _FAILURE_CATEGORIES if failure_counts[c]))
-    if len(by_difficulty) > 1:
-        print(f"  By difficulty     :")
-        for d in by_difficulty:
-            print(f"      {d['difficulty']:<8} test-case={d['test_pass_rate']:.1%}  "
-                  f"solved={d['solved']}/{d['num_problems']}")
     if truncated:
-        print(f"  ⚠ Truncated       : {truncated}/{n} hit the token cap — raise evaluation.max_new_tokens")
+        print(f"  truncated      : {truncated}/{n}")
+    if len(by_difficulty) > 1:
+        print()
+        header = f"  {'difficulty':<10} {'problems':>8} {'test_pass':>10} {'pass@1':>8}"
+        if n_samples > 1:
+            header += f" {'pass@' + str(k):>8} {'solved':>8}"
+        print(header)
+        print(f"  {'─' * (len(header) - 2)}")
+        for d in by_difficulty:
+            row = f"  {d['difficulty']:<10} {d['num_problems']:>8} {d['test_pass_rate']:>9.1%} {d['pass_at_1']:>8.1%}"
+            if n_samples > 1:
+                row += f" {d['pass_at_k']:>8.1%} {d['solved']:>5}/{d['num_problems']}"
+            print(row)
+    print(f"{'─' * 70}")
     _save_intermediate(label, summary)
     _dump_failure_report(label, results)
     return summary
@@ -265,75 +304,98 @@ def evaluate_model(label: str, model_path: str, problems: list,
     print(f"  Model path: {model_path}")
     print(f"{'═' * 62}")
 
-    total_gb = gpu_total_gb()
-    pre_used = gpu_used_gb()
-    print(f"  GPU before load: {pre_used:.1f}GB used / {total_gb:.1f}GB total")
+    gen_grid = _load_gen_grid(label, cache_key)
 
-    required_gb = 20.0
-    free_gb = total_gb - pre_used
-    if free_gb < required_gb:
-        print(f"  WARNING: only {free_gb:.1f}GB free, need ≥{required_gb:.1f}GB. Forcing cleanup...")
-        free_gb = wait_for_gpu_freed(target_free_gb=required_gb, max_retries=5, retry_sleep=3.0)
+    if gen_grid is not None:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        llm = None
+    else:
+        total_gb = gpu_total_gb()
+        pre_used = gpu_used_gb()
+        print(f"  GPU before load: {pre_used:.1f}GB used / {total_gb:.1f}GB total")
+
+        required_gb = 20.0
+        free_gb = total_gb - pre_used
         if free_gb < required_gb:
-            print(f"  ERROR: GPU still has only {free_gb:.1f}GB free after retries. Memory leak suspected.")
-            raise RuntimeError(f"Insufficient GPU memory: need {required_gb:.1f}GB, have {free_gb:.1f}GB")
+            print(f"  WARNING: only {free_gb:.1f}GB free, need ≥{required_gb:.1f}GB. Forcing cleanup...")
+            free_gb = wait_for_gpu_freed(target_free_gb=required_gb, max_retries=5, retry_sleep=3.0)
+            if free_gb < required_gb:
+                print(f"  ERROR: GPU still has only {free_gb:.1f}GB free after retries. Memory leak suspected.")
+                raise RuntimeError(f"Insufficient GPU memory: need {required_gb:.1f}GB, have {free_gb:.1f}GB")
 
-    available_for_vllm = free_gb / total_gb
-    safety_margin = 0.05
-    base_util = 0.90
-    ceiling_util = MEM_CEILING_GB / total_gb
-    gpu_mem_util = min(base_util, available_for_vllm - safety_margin, ceiling_util)
-    gpu_mem_util = max(gpu_mem_util, 0.30)
-    max_model_len = max_new_tokens + 2048
+        available_for_vllm = free_gb / total_gb
+        safety_margin = 0.05
+        base_util = 0.90
+        ceiling_util = MEM_CEILING_GB / total_gb
+        gpu_mem_util = min(base_util, available_for_vllm - safety_margin, ceiling_util)
+        gpu_mem_util = max(gpu_mem_util, 0.30)
+        max_model_len = max_new_tokens + 2048
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util:.2f} "
-          f"≈{gpu_mem_util * total_gb:.1f}GB, ceiling={MEM_CEILING_GB:.0f}GB, max_model_len={max_model_len})...")
-    llm = None
-    try:
-        llm = LLM(
-            model=model_path,
-            dtype="bfloat16",
-            gpu_memory_utilization=gpu_mem_util,
-            max_model_len=max_model_len,
-            trust_remote_code=True,
-            enforce_eager=False,
-            enable_prefix_caching=True,
-        )
-
-        formatted_prompts, signatures = build_eval_prompts(problems, tokenizer)
-
-        post_load = gpu_used_gb()
-        print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
-
-        eval_chunk_size = 8 if is_teacher else 24
-        total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
-        print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
-              f"(budget-forced think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
-        gen_grid = [None] * len(formatted_prompts)
-        for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
-            chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
-            chunk_sigs = signatures[chunk_start:chunk_start + eval_chunk_size]
-            chunk_idx = chunk_start // eval_chunk_size + 1
-            chunk_t0 = time.time()
-            print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
-            chunk_grid = budget_forced_generate(
-                llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
-                seed=seed,
+        print(f"  Loading vLLM (gpu_memory_utilization={gpu_mem_util:.2f} "
+              f"≈{gpu_mem_util * total_gb:.1f}GB, ceiling={MEM_CEILING_GB:.0f}GB, max_model_len={max_model_len})...")
+        llm = None
+        try:
+            llm = LLM(
+                model=model_path,
+                dtype="bfloat16",
+                gpu_memory_utilization=gpu_mem_util,
+                max_model_len=max_model_len,
+                trust_remote_code=True,
+                enforce_eager=False,
+                enable_prefix_caching=True,
             )
-            for off, row in enumerate(chunk_grid):
-                gen_grid[chunk_start + off] = row
-            chunk_elapsed = time.time() - chunk_t0
-            done = chunk_start + len(chunk)
-            avg = chunk_elapsed / len(chunk)
-            eta_remaining = avg * (len(formatted_prompts) - done) * 1.05
-            eta_m, eta_s = divmod(int(eta_remaining), 60)
-            eta_h, eta_m = divmod(eta_m, 60)
-            print(f"    chunk done in {chunk_elapsed:.1f}s ({avg:.1f}s/prompt avg)  |  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  |  GPU {gpu_used_gb():.1f}GB")
 
+            formatted_prompts, signatures = build_eval_prompts(problems, tokenizer)
+
+            post_load = gpu_used_gb()
+            print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
+
+            eval_chunk_size = 8 if is_teacher else 24
+            total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
+            print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
+                  f"(budget-forced think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
+            gen_grid = [None] * len(formatted_prompts)
+            for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
+                chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
+                chunk_sigs = signatures[chunk_start:chunk_start + eval_chunk_size]
+                chunk_idx = chunk_start // eval_chunk_size + 1
+                chunk_t0 = time.time()
+                print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
+                chunk_grid = budget_forced_generate(
+                    llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
+                    seed=seed,
+                )
+                for off, row in enumerate(chunk_grid):
+                    gen_grid[chunk_start + off] = row
+                chunk_elapsed = time.time() - chunk_t0
+                done = chunk_start + len(chunk)
+                avg = chunk_elapsed / len(chunk)
+                eta_remaining = avg * (len(formatted_prompts) - done) * 1.05
+                eta_m, eta_s = divmod(int(eta_remaining), 60)
+                eta_h, eta_m = divmod(eta_m, 60)
+                print(f"    chunk done in {chunk_elapsed:.1f}s ({avg:.1f}s/prompt avg)  |  ETA {eta_h}h {eta_m:02d}m {eta_s:02d}s  |  GPU {gpu_used_gb():.1f}GB")
+
+            _save_gen_grid(label, gen_grid, cache_key)
+
+        finally:
+            print(f"  Cleaning up vLLM...")
+            cleanup_vllm(llm)
+            llm = None
+            del tokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            for _ in range(3):
+                gc.collect()
+            torch.cuda.empty_cache()
+            time.sleep(2)
+
+    if gen_grid is None or any(g is None for g in gen_grid):
+        raise RuntimeError(f"Generation incomplete for {label} — missing entries in gen_grid")
+
+    try:
         print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
         eval_tasks = []
         for i, prob in enumerate(problems):
@@ -388,21 +450,12 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
         summary = _finalise(label, results, dataset_name, k, meta=cache_key)
 
-    finally:
-        print(f"  Cleaning up vLLM...")
-        cleanup_vllm(llm)
-        llm = None
-        del tokenizer
-        for _ in range(3):
-            gc.collect()
-        torch.cuda.empty_cache()
-        time.sleep(2)
-        post_cleanup = gpu_used_gb()
-        print(f"  GPU after cleanup: {post_cleanup:.1f}GB used  (started at {pre_used:.1f}GB)")
-        residual = post_cleanup - pre_used
-        if residual > 1.0:
-            print(f"  ⚠ Residual leak detected: +{residual:.1f}GB above baseline. Forcing extra cleanup...")
-            wait_for_gpu_freed(target_free_gb=total_gb - pre_used - 1.0, max_retries=3, retry_sleep=2.0)
+        gen_cache = _gen_cache_path(label)
+        if gen_cache.exists():
+            gen_cache.unlink()
+
+    except Exception:
+        raise
 
     return summary
 
@@ -594,15 +647,6 @@ def main() -> None:
         difficulty=args.difficulty, seed=args.seed,
     ))
 
-    if not args.skip_teacher:
-        summaries.append(evaluate_model(
-            "Teacher (OpenCodeReasoning-Nemotron-7B)", teacher_path,
-            problems, max_new_tokens, device, is_teacher=True,
-            dataset_name=dataset_name,
-            num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-            difficulty=args.difficulty, seed=args.seed,
-        ))
-
     distilled_path = args.distilled
     if distilled_path is None:
         out_dir = Path(config["training"]["output_dir"])
@@ -622,6 +666,15 @@ def main() -> None:
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
+
+    if not args.skip_teacher:
+        summaries.append(evaluate_model(
+            "Teacher (OpenCodeReasoning-Nemotron-7B)", teacher_path,
+            problems, max_new_tokens, device, is_teacher=True,
+            dataset_name=dataset_name,
+            num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
+            difficulty=args.difficulty, seed=args.seed,
+        ))
 
     out_dir = Path(config["evaluation"]["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
