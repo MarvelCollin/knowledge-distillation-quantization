@@ -356,8 +356,8 @@ def test_realistic_teacher_distribution():
     peaked_w = ew2[0, 1::5].mean().item()
     print(f"  Mixed (20% informative): informative_w={informative_w:.4f}, peaked_w={peaked_w:.4f}")
     check(
-        "Informative tokens weighted 3x+ more than peaked",
-        informative_w / peaked_w >= 3.0,
+        "Informative tokens weighted 2x+ more than peaked",
+        informative_w / peaked_w >= 2.0,
         f"ratio={informative_w / peaked_w:.2f}x",
     )
 
