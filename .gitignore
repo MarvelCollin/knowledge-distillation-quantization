@@ -1,4 +1,5 @@
 .env
+.env.*
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -13,9 +14,19 @@ outputs/
 *.pt
 *.bin
 *.safetensors
+*.gguf
+*.onnx
 
 .DS_Store
 Thumbs.db
 
 *.log
+logs/train_metrics.jsonl
+logs/status.json
 .venv
+
+*.pem
+*.key
+credentials.json
+secrets.yaml
+token.json
