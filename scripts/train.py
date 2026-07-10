@@ -447,15 +447,19 @@ def main():
 
             sample_alpha = alpha if bool(valid_teacher.any()) else 0.0
 
+            loss_chunk = 512 if seq_len > 8192 else 1024
             total_val, distill_val, task_val = compute_loss_chunked_backward(
                 hidden, lm_head_weight, teacher_ids, teacher_probs, qead_weights, labels,
                 sample_alpha, effective_lambda, distill_temp,
                 loss_scale=len(sample_idxs) / effective_batch,
+                chunk_size=loss_chunk,
             )
 
             del hidden, teacher_ids, teacher_probs, qead_weights, valid_teacher
             del effective_lambda, weight_sums, per_token_kld
             del response_mask, predict_mask
+            if seq_len > 8192:
+                torch.cuda.empty_cache()
 
             samples_seen += len(sample_idxs)
             epoch_samples_seen += len(sample_idxs)
