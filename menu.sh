@@ -63,7 +63,7 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
     echo "  3) Reset teacher cache (delete all OR failed-only)"
-    echo "  4) Rescore failed cache        (recover harness-fixed entries, CPU-only)"
+    echo "  4) Re-test failed cache        (re-run harness on failed entries, CPU-only)"
     echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
     echo "  6) Build FULL-DIST cache       (R1 rescores its own traces, full top-20 logits, GPU)"
     echo "  7) Free disk                   (delete redundant checkpoint backups)"
@@ -136,19 +136,21 @@ set_fixed_compare_params() {
 
 compare_cache_status() {
     [ -d outputs/eval/intermediate ] || { echo -e "  ${YELLOW}No cached evals yet — all models will run.${NC}"; echo ""; return 0; }
-    local student_model
+    local student_model teacher_path
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
+    teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
     echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}:"
-    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" <<'PY'
+    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" "$teacher_path" <<'PY'
 import json, os, sys
 np = int(sys.argv[1]); diff = sys.argv[2]
 base = sys.argv[3].split("/")[-1]
+teacher = ("Teacher (R1-Distill-Qwen-7B)" if "r1" in sys.argv[4].lower()
+           else "Teacher (OpenCodeReasoning-Nemotron-7B)")
 
 def safe(label):
     return label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
 
-checks = [f"Student original ({base})",
-          "Teacher (OpenCodeReasoning-Nemotron-7B)"]
+checks = [f"Student original ({base})", teacher]
 d = "outputs/eval/intermediate"
 for label in checks:
     p = os.path.join(d, safe(label) + ".json")
@@ -158,7 +160,7 @@ for label in checks:
             c = json.load(open(p))
             reused = (c.get("num_problems") == np and c.get("difficulty") == diff
                       and c.get("num_samples") == 5 and c.get("k") == 5
-                      and c.get("temperature") == 0.7 and c.get("top_p") == 0.95)
+                      and c.get("temperature") == 0.6 and c.get("top_p") == 0.95)
         except Exception:
             reused = False
     print(f"    {label:<50} {'REUSED (cached, skipped)' if reused else 'will RUN'}")
@@ -202,72 +204,6 @@ run_training_then_optionally_compare() {
         return
     fi
     echo -e "  ${GREEN}✓ Training complete. (compare skipped per your choice)${NC}"
-    echo ""
-    read -rp "Press Enter to return to menu..."
-}
-
-view_cache() {
-    local cache_dir
-    cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-    cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
-    header
-    local total
-    total=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
-    if [ "$total" -eq 0 ]; then
-        echo -e "${RED}No cached responses found in $cache_dir${NC}"
-        echo ""
-        read -rp "Press Enter to return to menu..."
-        return
-    fi
-    echo -e "  Found ${GREEN}$total${NC} cached responses."
-    echo -e "  Use ${BOLD}arrow keys / PgUp PgDn${NC} to scroll, ${BOLD}q${NC} to return.\n"
-    python3 - "$cache_dir" <<'PYEOF' | less -R
-import json, os, sys, textwrap, glob
-
-cache_dir = sys.argv[1]
-files = sorted(
-    glob.glob(os.path.join(cache_dir, '*.json')),
-    key=lambda f: int(os.path.basename(f).replace('.json', ''))
-)
-
-CYAN  = '\033[0;36m'
-BOLD  = '\033[1m'
-NC    = '\033[0m'
-
-for f in files:
-    num = os.path.basename(f).replace('.json', '')
-    with open(f) as fh:
-        d = json.load(fh)
-    prompt = d.get('prompt', '').replace('\n', ' ').strip()
-    text   = d.get('text', '').strip() or '(empty)'
-
-    print(f'{BOLD}{CYAN}{"─" * 60}')
-    print(f'  Entry #{num}  ({os.path.basename(f)}){NC}')
-    print(f'{BOLD}{CYAN}{"─" * 60}{NC}')
-    print(f'{BOLD}PROMPT:{NC}')
-    for line in textwrap.wrap(prompt, width=78):
-        print('  ' + line)
-    print()
-    print(f'{BOLD}RESPONSE:{NC}')
-    for line in text.splitlines():
-        print('  ' + line)
-    print()
-PYEOF
-}
-
-install_nvidia_toolkit() {
-    header
-    echo -e "${YELLOW}Installing nvidia-container-toolkit...${NC}"
-    echo ""
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-    echo ""
-    echo -e "${GREEN}✓ nvidia-container-toolkit installed. Docker restarted.${NC}"
     echo ""
     read -rp "Press Enter to return to menu..."
 }
@@ -451,7 +387,7 @@ while true; do
         3)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
+
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
             stats=$(python3 - "$cache_dir" <<'PYEOF'
 import glob, os, re, sys
@@ -557,9 +493,9 @@ PYEOF
             echo ""
             show_cache_status "$cache_dir"
             echo ""
-            echo -e "  ${YELLOW}Note: rescore and retry change passing counts and therefore n_train; skip them to reproduce the control run exactly.${NC}"
+            echo -e "  ${YELLOW}Note: re-test and retry change passing counts and therefore n_train; skip them to reproduce the control run exactly.${NC}"
             echo ""
-            echo "  1) Rescore only (CPU, fast — no GPU needed)"
+            echo "  1) Re-test only (CPU, fast — no GPU needed)"
             echo "  2) Retry 3 candidates/problem with R1 teacher (GPU, no rescore)"
             echo "  3) Retry 5 candidates/problem with R1 teacher (GPU, no rescore)"
             echo "  q) Cancel"
@@ -593,7 +529,7 @@ PYEOF
         5)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
+
             echo -e "  ${BOLD}Diagnose teacher cache${NC} (${cache_dir})"
             echo ""
             echo -e "  Two CPU-only checks (no GPU, safe alongside a GPU job):"
