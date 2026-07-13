@@ -66,7 +66,7 @@ show_menu() {
     echo "  4) Re-test failed cache        (re-run harness on failed entries, CPU-only)"
     echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
     echo "  6) Build FULL-DIST cache       (R1 rescores its own traces, full top-20 logits, GPU)"
-    echo "  7) Free disk                   (delete redundant checkpoint backups)"
+    echo "  7) Free disk                   (delete redundant checkpoints and the retired ocr cache)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -136,21 +136,18 @@ set_fixed_compare_params() {
 
 compare_cache_status() {
     [ -d outputs/eval/intermediate ] || { echo -e "  ${YELLOW}No cached evals yet — all models will run.${NC}"; echo ""; return 0; }
-    local student_model teacher_path
+    local student_model
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
-    teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
     echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}:"
-    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" "$teacher_path" <<'PY'
+    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" <<'PY'
 import json, os, sys
 np = int(sys.argv[1]); diff = sys.argv[2]
 base = sys.argv[3].split("/")[-1]
-teacher = ("Teacher (R1-Distill-Qwen-7B)" if "r1" in sys.argv[4].lower()
-           else "Teacher (OpenCodeReasoning-Nemotron-7B)")
 
 def safe(label):
     return label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
 
-checks = [f"Student original ({base})", teacher]
+checks = [f"Student original ({base})", "Teacher (R1-Distill-Qwen-7B)"]
 d = "outputs/eval/intermediate"
 for label in checks:
     p = os.path.join(d, safe(label) + ".json")
@@ -566,7 +563,7 @@ PYEOF
             header
             echo -e "  ${BOLD}Free disk${NC} — redundant checkpoint backups:"
             echo ""
-            for d in outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy; do
+            for d in outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy cache/teacher_logprobs_ocr7b; do
                 [ -d "$d" ] && echo "    $(du -sh "$d" 2>/dev/null)"
             done
             echo ""
@@ -576,7 +573,7 @@ PYEOF
             echo -n "  Delete the listed dirs? (yes/n): "
             read -r ans
             if [ "$ans" = "yes" ]; then
-                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy
+                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy cache/teacher_logprobs_ocr7b
                 echo -e "  ${GREEN}✓ Deleted. Free now: $(df -h / | tail -1 | awk '{print $4}')${NC}"
             else
                 echo "  Cancelled."

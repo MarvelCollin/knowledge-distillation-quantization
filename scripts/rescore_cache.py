@@ -23,8 +23,6 @@ def main() -> None:
                         help="Source cache dir with existing (passing) trajectories to reuse.")
     parser.add_argument("--dst", default=None,
                         help="Output cache dir (default: data.teacher_cache_dir from config).")
-    parser.add_argument("--model", default=None,
-                        help="Override teacher.local_model_path (e.g. the OCR teacher for aligned rescoring).")
     parser.add_argument("--chunk-size", type=int, default=2)
     parser.add_argument("--gpu-mem", type=float, default=0.70)
     parser.add_argument("--max-model-len", type=int, default=8192)
@@ -42,7 +40,7 @@ def main() -> None:
     )
 
     teacher = LocalTeacherModel(
-        model_path=args.model or config["teacher"]["local_model_path"],
+        model_path=config["teacher"]["local_model_path"],
         max_tokens=config["teacher"]["max_tokens"],
         temperature=1.0,
         top_p=1.0,
