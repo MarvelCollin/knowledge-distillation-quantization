@@ -528,12 +528,17 @@ class LocalTeacherModel:
 
         files = sorted(src.glob("*.json"), key=lambda p: int(p.stem) if p.stem.isdigit() else 1 << 30)
         pending = []
+        resumed = 0
         for f in files:
+            if (dst / f.name).exists():
+                resumed += 1
+                continue
             d = json.loads(f.read_text())
             if d.get("prompt") and d.get("text") and d.get("tokens"):
                 pending.append((int(f.stem), d))
 
-        print(f"Rescoring {len(pending)} cached trajectories: {src_cache_dir} -> {dst_cache_dir}")
+        print(f"Rescoring {len(pending)} cached trajectories: {src_cache_dir} -> {dst_cache_dir}"
+              + (f"  (resuming — {resumed} already done)" if resumed else ""))
         print(f"  prompt_logprobs={self.top_logprobs}  temperature=1.0  top_p=1.0  (true teacher distribution)")
 
         score_params = SamplingParams(
