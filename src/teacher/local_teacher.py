@@ -546,9 +546,10 @@ class LocalTeacherModel:
             chunk = pending[chunk_start:chunk_start + chunk_size]
             token_prompts = []
             metas = []
+            enc = self.student_tokenizer or self.tokenizer
             for idx, d in chunk:
-                p_ids = self.tokenizer(d["prompt"], add_special_tokens=False).input_ids
-                r_ids = self.tokenizer(d["text"], add_special_tokens=False).input_ids
+                p_ids = enc(d["prompt"], add_special_tokens=False).input_ids
+                r_ids = enc(d["text"], add_special_tokens=False).input_ids
                 full_ids = (p_ids + r_ids)[:cap]
                 token_prompts.append({"prompt_token_ids": full_ids})
                 metas.append((idx, d, len(p_ids)))

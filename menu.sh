@@ -65,7 +65,7 @@ show_menu() {
     echo "  3) Reset teacher cache (delete all OR failed-only)"
     echo "  4) Rescore failed cache        (recover harness-fixed entries, CPU-only)"
     echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
-    echo "  6) Build ALIGNED cache         (OCR teacher rescores R1 traces, full top-20 logits, GPU)"
+    echo "  6) Build FULL-DIST cache       (R1 rescores its own traces, full top-20 logits, GPU)"
     echo "  7) Free disk                   (delete redundant checkpoint backups)"
     echo ""
     echo "  q) Quit"
@@ -421,7 +421,7 @@ while true; do
             echo -e "  ${BOLD}Teacher cache mode${NC} (the only question)"
             echo -e "     1  build/refresh missing entries first with the R1 teacher  (slow — regenerates every missing/failed problem)"
             echo -e "     ${GREEN}2${NC}  offline: train NOW on the current passing cache only (exact control run repro)"
-            echo -e "     3  offline on the ALIGNED cache (OCR-rescored R1 traces — build it with option 6 first)"
+            echo -e "     3  offline on the FULL-DIST cache (R1-rescored R1 traces — build it with option 6 first)"
             echo ""
             echo -n "  cache mode [default: 2]: "
             read -r cache_mode
@@ -429,13 +429,13 @@ while true; do
             if [ "$cache_mode" = "1" ]; then
                 echo -e "  ${GREEN}→ Cache build/refresh with R1 teacher will run before training.${NC}"
             elif [ "$cache_mode" = "3" ]; then
-                if [ ! -d cache/teacher_logprobs_r1text_ocr ]; then
-                    echo -e "  ${RED}Aligned cache not found — run option 6 first.${NC}"
+                if [ ! -d cache/teacher_logprobs_r1_full ]; then
+                    echo -e "  ${RED}Full-distribution cache not found — run option 6 first.${NC}"
                     read -rp "Press Enter to return to menu..."
                     continue
                 fi
-                TRAIN_FLAGS="$TRAIN_FLAGS --offline --cache-dir cache/teacher_logprobs_r1text_ocr"
-                echo -e "  ${YELLOW}→ OFFLINE on aligned cache: full top-20 OCR logits on R1 traces.${NC}"
+                TRAIN_FLAGS="$TRAIN_FLAGS --offline --cache-dir cache/teacher_logprobs_r1_full"
+                echo -e "  ${YELLOW}→ OFFLINE on full-distribution cache: R1's own full top-20 logits on its traces.${NC}"
             else
                 TRAIN_FLAGS="$TRAIN_FLAGS --offline"
                 echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
@@ -608,12 +608,12 @@ PYEOF
             ;;
         6)
             header
-            echo -e "  ${BOLD}Build ALIGNED cache${NC}"
+            echo -e "  ${BOLD}Build FULL-DISTRIBUTION cache${NC} (pure R1 knowledge distillation)"
             echo ""
-            echo -e "  OCR teacher (same tokenizer as student) rescores the R1 traces via one"
-            echo -e "  teacher-forced pass, recovering the FULL top-20 distribution at every position"
-            echo -e "  (37.9% of current cache positions are one-hot from top-p truncation)."
-            echo -e "  Source: cache/teacher_logprobs_coder15b  ->  cache/teacher_logprobs_r1text_ocr"
+            echo -e "  The R1 teacher rescores its OWN traces via one teacher-forced pass at the"
+            echo -e "  student's token positions (shared vocab table), recovering the FULL top-20"
+            echo -e "  distribution everywhere (37.9% of current positions are one-hot from top-p truncation)."
+            echo -e "  Source: cache/teacher_logprobs_coder15b  ->  cache/teacher_logprobs_r1_full"
             echo ""
             free_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
             if [ "$free_gb" -lt 12 ]; then
@@ -623,7 +623,7 @@ PYEOF
                 continue
             fi
             keep_sudo_alive
-            run_cmd "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/teacher_logprobs_coder15b --dst cache/teacher_logprobs_r1text_ocr --model cache/teacher-model-ocr-7b --max-model-len 32768 --gpu-mem 0.90"
+            run_cmd "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/teacher_logprobs_coder15b --dst cache/teacher_logprobs_r1_full --max-model-len 32768 --gpu-mem 0.90"
             stop_sudo_alive
             ;;
         7)
