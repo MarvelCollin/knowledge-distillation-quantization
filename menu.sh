@@ -25,12 +25,18 @@ if not os.path.isfile(cj):
     raise SystemExit
 G, C, B, N = '\033[0;32m', '\033[0;36m', '\033[1m', '\033[0m'
 print(f"  {B}Latest compare{N} — R1 distillation, full 228 problems, all test cases")
+teacher_live = None
 for e in json.load(open(cj)):
     if e['name'].startswith('Teacher'):
+        if 'R1' in e['name']:
+            teacher_live = e
         continue
     label = 'Student distilled (R1 teacher)' if 'distilled' in e['name'] else 'Student original'
     print(f"    {label:<31} {G}{e['problems_solved']:>3}/{e['num_problems']}{N} solved   pass@1 {e['pass_at_1']*100:4.1f}%   pass@5 {e['pass_at_k']*100:4.1f}%   test cases {e['test_pass_rate']*100:4.1f}%")
-if os.path.isfile(md):
+if teacher_live:
+    e = teacher_live
+    print(f"    {'Teacher R1 Distill Qwen 7B':<31} {G}{e['problems_solved']:>3}/{e['num_problems']}{N} solved   pass@1 {e['pass_at_1']*100:4.1f}%   pass@5 {e['pass_at_k']*100:4.1f}%   test cases {e['test_pass_rate']*100:4.1f}%")
+elif os.path.isfile(md):
     n = [int(x) for x in re.findall(r'## [✓✗] Problem \d+.*?—\s+(\d)/5 samples passed', open(md).read())]
     if n:
         solved = sum(1 for x in n if x)
@@ -44,7 +50,7 @@ show_menu() {
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
     header
-    echo -e "  Teacher: ${GREEN}R1-Distill-Qwen-7B${NC}  ${CYAN}(offline logprob cache only, weights deleted; eval 3-way teacher: ${teacher_path})${NC}"
+    echo -e "  Teacher: ${GREEN}R1-Distill-Qwen-7B${NC}  ${CYAN}(local weights: ${teacher_path})${NC}"
     echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
     show_cache_status "$cache_dir"
@@ -399,8 +405,19 @@ while true; do
             echo ""
             set_fixed_compare_params
             echo ""
-            TRAIN_FLAGS="--max-samples $NS --offline"
-            echo -e "  ${YELLOW}→ OFFLINE only on this branch: R1 teacher weights are deleted; a cache build would regenerate entries with the OCR teacher and poison the R1 cache.${NC}"
+            echo -e "  ${BOLD}Teacher cache mode${NC} (the only question)"
+            echo -e "     1  build/refresh missing entries first with the R1 teacher  (slow — regenerates every missing/failed problem)"
+            echo -e "     ${GREEN}2${NC}  offline: train NOW on the current passing cache only (exact control run repro, n_train 1615)"
+            echo ""
+            echo -n "  cache mode [default: 2]: "
+            read -r cache_mode
+            TRAIN_FLAGS="--max-samples $NS"
+            if [ "$cache_mode" = "1" ]; then
+                echo -e "  ${GREEN}→ Cache build/refresh with R1 teacher will run before training.${NC}"
+            else
+                TRAIN_FLAGS="$TRAIN_FLAGS --offline"
+                echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
+            fi
             echo ""
             keep_sudo_alive
             run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py $TRAIN_FLAGS"
@@ -518,10 +535,11 @@ PYEOF
             echo ""
             show_cache_status "$cache_dir"
             echo ""
-            echo -e "  ${YELLOW}GPU retry removed on this branch: R1 teacher weights are deleted; retry would write OCR entries into the R1 cache.${NC}"
-            echo -e "  ${YELLOW}Note: rescore changes passing counts and therefore n_train; skip it to reproduce the control run exactly.${NC}"
+            echo -e "  ${YELLOW}Note: rescore and retry change passing counts and therefore n_train; skip them to reproduce the control run exactly.${NC}"
             echo ""
             echo "  1) Rescore only (CPU, fast — no GPU needed)"
+            echo "  2) Retry 3 candidates/problem with R1 teacher (GPU, no rescore)"
+            echo "  3) Retry 5 candidates/problem with R1 teacher (GPU, no rescore)"
             echo "  q) Cancel"
             echo ""
             echo -n "  Select option: "
@@ -530,6 +548,16 @@ PYEOF
                 1)
                     keep_sudo_alive
                     run_cmd "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
+                    stop_sudo_alive
+                    ;;
+                2)
+                    keep_sudo_alive
+                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3 --no-rescore"
+                    stop_sudo_alive
+                    ;;
+                3)
+                    keep_sudo_alive
+                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5 --no-rescore"
                     stop_sudo_alive
                     ;;
                 *)
