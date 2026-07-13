@@ -1,7 +1,7 @@
 data:
   dataset_name: newfacade/LeetCodeDataset
   max_samples: 2600
-  teacher_cache_dir: cache/teacher_logprobs_ocr7b
+  teacher_cache_dir: cache/teacher_logprobs_coder15b
   train_ratio: 0.9
 evaluation:
   max_new_tokens: 30720

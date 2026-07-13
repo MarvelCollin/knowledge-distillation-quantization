@@ -22,13 +22,13 @@ show_menu() {
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
     header
-    echo -e "  Teacher: ${GREEN}${teacher_path}${NC}  ${CYAN}(local OpenCodeReasoning-Nemotron-7B, bf16)${NC}"
+    echo -e "  Teacher: ${GREEN}R1-Distill-Qwen-7B${NC}  ${CYAN}(offline logprob cache only, weights deleted; eval 3-way teacher: ${teacher_path})${NC}"
     echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
-    show_cache_status "${cache_dir:-cache/teacher_logprobs_ocr7b}"
+    show_cache_status "$cache_dir"
     echo ""
     echo -e "  ${BOLD}Training${NC}"
-    echo "  1) Run training              (build/refresh teacher cache, then train, then compare)"
+    echo "  1) Run training              (offline on R1 cache, then train, then compare)"
     echo "  2) Compare original | teacher | distilled + graph"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
@@ -358,7 +358,7 @@ while true; do
             cfg_temp=$(grep 'distill_temperature' config/config.yaml | awk '{print $2}')
             cfg_alen=$(grep 'max_length' config/config.yaml | awk '{print $2}')
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
-            echo -e "  ${BOLD}Training${NC} (build/refresh teacher cache, then train, then full 3-way compare)"
+            echo -e "  ${BOLD}Training${NC} (offline train on R1 cache, then full 3-way compare)"
             echo ""
             echo -e "  ${BOLD}Fixed config${NC} (edit config/config.yaml to change):"
             echo "    max_samples         : ${NS}  (full LeetCode train split)"
@@ -375,19 +375,8 @@ while true; do
             echo ""
             set_fixed_compare_params
             echo ""
-            echo -e "  ${BOLD}Teacher cache mode${NC} (the only question)"
-            echo -e "     ${GREEN}1${NC}  build/refresh missing entries first  (slow — regenerates every missing/failed problem)"
-            echo "     2  offline: train NOW on the current passing cache only (skips generation entirely)"
-            echo ""
-            echo -n "  cache mode [default: 1]: "
-            read -r cache_mode
-            TRAIN_FLAGS="--max-samples $NS"
-            if [ "$cache_mode" = "2" ]; then
-                TRAIN_FLAGS="$TRAIN_FLAGS --offline"
-                echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
-            else
-                echo -e "  ${GREEN}→ Cache build/refresh will run before training.${NC}"
-            fi
+            TRAIN_FLAGS="--max-samples $NS --offline"
+            echo -e "  ${YELLOW}→ OFFLINE only on this branch: R1 teacher weights are deleted; a cache build would regenerate entries with the OCR teacher and poison the R1 cache.${NC}"
             echo ""
             keep_sudo_alive
             run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py $TRAIN_FLAGS"
@@ -501,17 +490,14 @@ PYEOF
         4)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_ocr7b}
             echo -e "  ${BOLD}Recover failed teacher cache${NC} (${cache_dir})"
             echo ""
             show_cache_status "$cache_dir"
             echo ""
-            echo -e "  GPU retry generates ${BOLD}n candidates per problem in ONE vLLM call${NC} (shared prefix KV cache)."
+            echo -e "  ${YELLOW}GPU retry removed on this branch: R1 teacher weights are deleted; retry would write OCR entries into the R1 cache.${NC}"
+            echo -e "  ${YELLOW}Note: rescore changes passing counts and therefore n_train; skip it to reproduce the control run exactly.${NC}"
             echo ""
             echo "  1) Rescore only (CPU, fast — no GPU needed)"
-            echo "  2) Retry 3 candidates/problem (GPU, no rescore)"
-            echo "  3) Retry 5 candidates/problem (GPU, no rescore)"
-            echo "  s) Smoke test — 4 problems only, measures speed (GPU)"
             echo "  q) Cancel"
             echo ""
             echo -n "  Select option: "
@@ -520,21 +506,6 @@ PYEOF
                 1)
                     keep_sudo_alive
                     run_cmd "sudo docker compose run --rm compare_eval python scripts/rescore_tests.py --apply"
-                    stop_sudo_alive
-                    ;;
-                2)
-                    keep_sudo_alive
-                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3 --no-rescore"
-                    stop_sudo_alive
-                    ;;
-                3)
-                    keep_sudo_alive
-                    run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5 --no-rescore"
-                    stop_sudo_alive
-                    ;;
-                s|S)
-                    keep_sudo_alive
-                    run_cmd "sudo docker compose run --rm train python scripts/smoke_retry.py"
                     stop_sudo_alive
                     ;;
                 *)
