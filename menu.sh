@@ -16,6 +16,28 @@ header() {
     echo -e "${NC}"
 }
 
+show_compare_results() {
+    python3 - <<'PYEOF'
+import json, os, re
+cj = 'outputs/eval/comparison.json'
+md = 'outputs/eval/details/Teacher_R1-Distill-Qwen-7B.md'
+if not os.path.isfile(cj):
+    raise SystemExit
+G, C, B, N = '\033[0;32m', '\033[0;36m', '\033[1m', '\033[0m'
+print(f"  {B}Latest compare{N} — R1 distillation, full 228 problems, all test cases")
+for e in json.load(open(cj)):
+    if e['name'].startswith('Teacher'):
+        continue
+    label = 'Student distilled (R1 teacher)' if 'distilled' in e['name'] else 'Student original'
+    print(f"    {label:<31} {G}{e['problems_solved']:>3}/{e['num_problems']}{N} solved   pass@1 {e['pass_at_1']*100:4.1f}%   pass@5 {e['pass_at_k']*100:4.1f}%   test cases {e['test_pass_rate']*100:4.1f}%")
+if os.path.isfile(md):
+    n = [int(x) for x in re.findall(r'## [✓✗] Problem \d+.*?—\s+(\d)/5 samples passed', open(md).read())]
+    if n:
+        solved = sum(1 for x in n if x)
+        print(f"    {'Teacher R1 Distill Qwen 7B':<31} {G}{solved:>3}/{len(n)}{N} solved   pass@1 {100*sum(n)/(5*len(n)):4.1f}%   pass@5 {100*solved/len(n):4.1f}%   {C}archived Jul 6 eval, old harness{N}")
+PYEOF
+}
+
 show_menu() {
     local teacher_path student_model cache_dir
     teacher_path=$(grep 'local_model_path' config/config.yaml 2>/dev/null | awk '{print $2}')
@@ -26,6 +48,8 @@ show_menu() {
     echo -e "  Student: ${GREEN}${student_model}${NC}"
     echo ""
     show_cache_status "$cache_dir"
+    echo ""
+    show_compare_results
     echo ""
     echo -e "  ${BOLD}Training${NC}"
     echo "  1) Run training              (offline on R1 cache, then train, then compare)"
