@@ -16,11 +16,12 @@ import torch.nn.functional as F
 
 from dotenv import load_dotenv
 import gc
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from transformers.optimization import Adafactor
 
+from src.data.batching import FixedBatchSampler, make_pad_collate, pack_by_budget, seed_worker
 from src.data.dataset import create_datasets
 from src.data.problems import build_user_content, load_problems
 from src.data.teacher_cache import load_cached
@@ -33,12 +34,6 @@ from src.student.model import StudentModel
 from src.teacher.local_teacher import LocalTeacherModel
 from src.utils.runlog import RunLog, eta_str, show_progress_bars
 from src.config import load_config
-
-
-def seed_worker(worker_id: int) -> None:
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
 
 
 def run_validation(student: StudentModel, val_loader: DataLoader, device: torch.device) -> float:
@@ -180,64 +175,21 @@ def main():
     pad_id = student_tokenizer.pad_token_id
     if pad_id is None:
         pad_id = student_tokenizer.eos_token_id
-
-    def pad_collate(items):
-        max_len = max(it["input_ids"].size(0) for it in items)
-        input_ids = torch.full((len(items), max_len), pad_id, dtype=torch.long)
-        attention_mask = torch.zeros((len(items), max_len), dtype=torch.long)
-        labels = torch.full((len(items), max_len), -100, dtype=torch.long)
-        for r, it in enumerate(items):
-            n = it["input_ids"].size(0)
-            input_ids[r, :n] = it["input_ids"]
-            attention_mask[r, :n] = it["attention_mask"]
-            labels[r, :n] = it["labels"]
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-            "prompt_length": torch.stack([it["prompt_length"] for it in items]),
-            "idx": torch.stack([it["idx"] for it in items]),
-        }
+    pad_collate = make_pad_collate(pad_id)
 
     token_budget = int(config["training"].get("batch_token_budget", 16384))
     max_batch = int(config["training"].get("max_batch_size", 4))
 
-    def pack_by_budget(order, lengths):
-        batches = []
-        cur, cur_max = [], 0
-        for i in order:
-            length = lengths[i]
-            new_max = max(cur_max, length)
-            if cur and (len(cur) + 1 > max_batch or new_max * (len(cur) + 1) > token_budget):
-                batches.append(cur)
-                cur, cur_max = [i], length
-            else:
-                cur.append(i)
-                cur_max = new_max
-        if cur:
-            batches.append(cur)
-        return batches
-
-    class _FixedBatchSampler(Sampler):
-        def __init__(self, batches):
-            self.batches = batches
-
-        def __iter__(self):
-            return iter(self.batches)
-
-        def __len__(self):
-            return len(self.batches)
-
     curriculum_mode = config["training"].get("curriculum", "none")
     if curriculum_mode == "length":
         order = train_dataset.curriculum_order()
-        batches = pack_by_budget(order, train_dataset.lengths)
+        batches = pack_by_budget(order, train_dataset.lengths, token_budget, max_batch)
         print(f"Curriculum: {len(order)} samples by length (easy first), packed into "
               f"{len(batches)} batches (token_budget={token_budget}, max_batch={max_batch}).")
 
         train_loader = DataLoader(
             train_dataset,
-            batch_sampler=_FixedBatchSampler(batches),
+            batch_sampler=FixedBatchSampler(batches),
             collate_fn=pad_collate,
             num_workers=2,
             persistent_workers=True,
@@ -259,8 +211,8 @@ def main():
         )
     val_loader = DataLoader(
         val_dataset,
-        batch_sampler=_FixedBatchSampler(
-            pack_by_budget(val_dataset.curriculum_order(), val_dataset.lengths)),
+        batch_sampler=FixedBatchSampler(
+            pack_by_budget(val_dataset.curriculum_order(), val_dataset.lengths, token_budget, max_batch)),
         collate_fn=pad_collate,
         num_workers=2,
         persistent_workers=True,
