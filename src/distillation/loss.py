@@ -37,6 +37,27 @@ def build_teacher_topk(
     return ids_out, probs_out
 
 
+def _lambda_view(skew_lambda):
+    if torch.is_tensor(skew_lambda) and skew_lambda.dim() == 1:
+        return skew_lambda.view(-1, 1, 1)
+    return skew_lambda
+
+
+def skew_kld_per_token(
+    student_logits: torch.Tensor,
+    teacher_ids: torch.Tensor,
+    teacher_probs: torch.Tensor,
+    lam,
+    temperature: float,
+) -> torch.Tensor:
+    scaled = student_logits / temperature
+    log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
+    student_at = (torch.gather(scaled, -1, teacher_ids).float() - log_z).exp()
+    mixture = (lam * student_at + (1 - lam) * teacher_probs).clamp(min=1e-10)
+    safe_teacher = teacher_probs.clamp(min=1e-10)
+    return (teacher_probs * (safe_teacher.log() - mixture.log())).sum(dim=-1)
+
+
 def skew_kld_loss(
     student_logits: torch.Tensor,
     teacher_ids: torch.Tensor,
@@ -45,47 +66,9 @@ def skew_kld_loss(
     skew_lambda,
     temperature: float,
 ) -> torch.Tensor:
-    scaled = student_logits / temperature
-    log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
-    student_at = (torch.gather(scaled, -1, teacher_ids).float() - log_z).exp()
-
-    if torch.is_tensor(skew_lambda) and skew_lambda.dim() == 1:
-        lam = skew_lambda.view(-1, 1, 1)
-    else:
-        lam = skew_lambda
-
-    mixture = (lam * student_at + (1 - lam) * teacher_probs).clamp(min=1e-10)
-    safe_teacher = teacher_probs.clamp(min=1e-10)
-
-    kld_per_token = (teacher_probs * (safe_teacher.log() - mixture.log())).sum(dim=-1)
+    lam = _lambda_view(skew_lambda)
+    kld_per_token = skew_kld_per_token(student_logits, teacher_ids, teacher_probs, lam, temperature)
     return (qead_weights * kld_per_token).sum() / qead_weights.sum().clamp(min=1e-8)
-
-
-
-def task_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    shift_labels = torch.full_like(labels, -100)
-    shift_labels[..., :-1] = labels[..., 1:]
-    return F.cross_entropy(
-        logits.reshape(-1, logits.size(-1)),
-        shift_labels.reshape(-1),
-        ignore_index=-100,
-    )
-
-
-def compute_total_loss(
-    student_logits: torch.Tensor,
-    teacher_ids: torch.Tensor,
-    teacher_probs: torch.Tensor,
-    qead_weights: torch.Tensor,
-    labels: torch.Tensor,
-    alpha: float,
-    skew_lambda,
-    temperature: float,
-) -> tuple:
-    l_distill = skew_kld_loss(student_logits, teacher_ids, teacher_probs, qead_weights, skew_lambda, temperature)
-    l_task = task_ce_loss(student_logits, labels)
-    l_total = alpha * l_distill + (1 - alpha) * l_task
-    return l_total, l_distill, l_task
 
 
 def compute_loss_chunked_backward(
@@ -110,10 +93,7 @@ def compute_loss_chunked_backward(
     shift_labels[..., :-1] = labels[..., 1:]
     per_sample_valid = (shift_labels != -100).sum(dim=-1).clamp(min=1)
 
-    if torch.is_tensor(skew_lambda) and skew_lambda.dim() == 1:
-        lam = skew_lambda.view(-1, 1, 1)
-    else:
-        lam = skew_lambda
+    lam = _lambda_view(skew_lambda)
 
     distill_val = 0.0
     task_val = 0.0
@@ -121,13 +101,7 @@ def compute_loss_chunked_backward(
         e = min(s + chunk_size, seq_len)
         lc = F.linear(hidden_d[:, s:e], lm_head_weight)
 
-        scaled = lc / temperature
-        log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
-        student_at = (torch.gather(scaled, -1, teacher_ids[:, s:e]).float() - log_z).exp()
-        tp = teacher_probs[:, s:e]
-        mixture = (lam * student_at + (1 - lam) * tp).clamp(min=1e-10)
-        safe_teacher = tp.clamp(min=1e-10)
-        kld_per_token = (tp * (safe_teacher.log() - mixture.log())).sum(dim=-1)
+        kld_per_token = skew_kld_per_token(lc, teacher_ids[:, s:e], teacher_probs[:, s:e], lam, temperature)
         distill_chunk = (qead_weights[:, s:e] * kld_per_token).sum() / w_sum
 
         task_flat = F.cross_entropy(

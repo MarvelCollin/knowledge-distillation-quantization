@@ -1,7 +1,6 @@
 import ast
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -13,14 +12,6 @@ from pathlib import Path
 _MEMORY_LIMIT_BYTES = 1024 ** 3
 _CPU_TIME_LIMIT_SEC = 30
 _STACK_LIMIT_BYTES = 64 * 1024 * 1024
-
-_LIMIT_BOOTSTRAP = (
-    "import resource as _r; "
-    f"_r.setrlimit(_r.RLIMIT_AS, ({_MEMORY_LIMIT_BYTES}, {_MEMORY_LIMIT_BYTES})); "
-    f"_r.setrlimit(_r.RLIMIT_DATA, ({_MEMORY_LIMIT_BYTES}, {_MEMORY_LIMIT_BYTES})); "
-    f"_r.setrlimit(_r.RLIMIT_CPU, ({_CPU_TIME_LIMIT_SEC}, {_CPU_TIME_LIMIT_SEC})); "
-    f"_r.setrlimit(_r.RLIMIT_STACK, ({_STACK_LIMIT_BYTES}, {_STACK_LIMIT_BYTES}))\n"
-)
 
 
 _LEETCODE_PREAMBLE = '''\
@@ -261,55 +252,6 @@ def _alias_candidate(code: str, candidate: str | None) -> str:
     if matched is None:
         return code
     return code + f"\n{candidate} = {matched}\n"
-
-
-def execute_assertion(code: str, assertion: str, timeout: int = 10) -> tuple:
-    candidate, rewritten = _prepare_assertion(assertion)
-    code = _alias_candidate(code, candidate)
-    full_code = _LIMIT_BOOTSTRAP + _LEETCODE_PREAMBLE + "\n" + code + "\n\n" + rewritten + "\n"
-    workdir = tempfile.mkdtemp(prefix="exec_")
-    script = os.path.join(workdir, "solution.py")
-    with open(script, "w") as f:
-        f.write(full_code)
-    proc = subprocess.Popen(
-        [sys.executable, script],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        cwd=workdir,
-        env={"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
-        start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.communicate()
-        return "timeout", "execution timed out"
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-    if proc.returncode == 0:
-        return "pass", ""
-    combined = "\n".join(p for p in (out.rstrip(), err.rstrip()) if p)
-    return "fail", combined
-
-
-def _format_error(err: str) -> str:
-    if not err:
-        return ""
-    lines = err.splitlines()
-    diag = [l for l in lines if l.lstrip().startswith(("Input:", "Output:", "Expected:", "Failed:"))]
-    if diag:
-        return "\n".join(diag)
-    name_match = re.search(r"NameError: name '(\w+)' is not defined", err)
-    if name_match:
-        return f"NameError: '{name_match.group(1)}' not defined"
-    last = lines[-1] if lines else ""
-    assert_line = next((l.strip() for l in lines if l.strip().startswith("assert ")), "")
-    if assert_line and last:
-        return f"{assert_line}  →  {last}"
-    return last or err[:200]
 
 
 def _classify(outcome: str, error: str) -> str:

@@ -59,9 +59,12 @@ def _color(name: str) -> str:
     return next((c for k, c in COLORS.items() if name.startswith(k)), FALLBACK_COLOR)
 
 
+def _safe_label(label: str) -> str:
+    return label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
+
+
 def _cache_path(label: str) -> Path:
-    safe = label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
-    return _INTERMEDIATE / f"{safe}.json"
+    return _INTERMEDIATE / f"{_safe_label(label)}.json"
 
 
 def _save_intermediate(label: str, data: dict) -> None:
@@ -79,8 +82,7 @@ def _load_intermediate(label: str, dataset_name: str) -> dict | None:
 
 
 def _gen_cache_path(label: str) -> Path:
-    safe = label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
-    return _INTERMEDIATE / f"{safe}_gen.json"
+    return _INTERMEDIATE / f"{_safe_label(label)}_gen.json"
 
 
 def _save_gen_grid(label: str, gen_grid: list, cache_key: dict) -> None:
@@ -166,8 +168,7 @@ def _dump_failure_report(label: str, results: list) -> None:
             "code": rep.get("code", ""),
             "fails": failing_cases(rep, limit=3),
         })
-    safe = label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
-    out_path = _INTERMEDIATE.parent / "details" / f"{safe}.md"
+    out_path = _INTERMEDIATE.parent / "details" / f"{_safe_label(label)}.md"
     write_failure_report(out_path, f"Failure report — {label}", entries)
     print(f"  Detail report     : {out_path}")
 
@@ -367,67 +368,63 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if gen_grid is None or any(g is None for g in gen_grid):
         raise RuntimeError(f"Generation incomplete for {label} — missing entries in gen_grid")
 
-    try:
-        print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
-        eval_tasks = []
-        for i, prob in enumerate(problems):
-            for j in range(num_samples):
-                final_text, truncated = gen_grid[i][j]
-                code = extract_code(final_text)
-                eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
+    print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
+    eval_tasks = []
+    for i, prob in enumerate(problems):
+        for j in range(num_samples):
+            final_text, truncated = gen_grid[i][j]
+            code = extract_code(final_text)
+            eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
 
-        def _run_one(task):
-            i, j, code, truncated, tcs = task
-            r = run_test_cases(code, tcs)
-            return i, j, code, truncated, r
+    def _run_one(task):
+        i, j, code, truncated, tcs = task
+        r = run_test_cases(code, tcs)
+        return i, j, code, truncated, r
 
-        sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
-                i, j, code, truncated, r = fut
-                sample_solved = r["passed"] == r["total"] and r["total"] > 0
-                sample_records_by_problem[i][j] = {
-                    **r, "solved": sample_solved, "code": code, "truncated": truncated,
-                }
+    sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
+            i, j, code, truncated, r = fut
+            sample_solved = r["passed"] == r["total"] and r["total"] > 0
+            sample_records_by_problem[i][j] = {
+                **r, "solved": sample_solved, "code": code, "truncated": truncated,
+            }
 
-        results = []
-        for i, prob in enumerate(problems):
-            sample_records = sample_records_by_problem[i]
-            num_passing = sum(1 for s in sample_records if s["solved"])
-            any_solved = num_passing > 0
-            any_truncated = any(s["truncated"] for s in sample_records)
-            first = sample_records[0]
+    results = []
+    for i, prob in enumerate(problems):
+        sample_records = sample_records_by_problem[i]
+        num_passing = sum(1 for s in sample_records if s["solved"])
+        any_solved = num_passing > 0
+        any_truncated = any(s["truncated"] for s in sample_records)
+        first = sample_records[0]
 
-            results.append({
-                "idx": i,
-                "difficulty": prob.get("difficulty", ""),
-                "passed": first["passed"], "total": first["total"],
-                "details": first["details"], "errors": first["errors"], "categories": first["categories"],
-                "solved": any_solved, "code": first["code"], "truncated": any_truncated,
-                "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
-            })
+        results.append({
+            "idx": i,
+            "difficulty": prob.get("difficulty", ""),
+            "passed": first["passed"], "total": first["total"],
+            "details": first["details"], "errors": first["errors"], "categories": first["categories"],
+            "solved": any_solved, "code": first["code"], "truncated": any_truncated,
+            "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
+        })
 
-            diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
-            trunc_tag = " ⚠ TRUNCATED" if any_truncated else ""
-            if num_samples > 1:
-                print(
-                    f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
-                    f"  {num_passing}/{num_samples} samples solved{trunc_tag}"
-                )
-            else:
-                print(
-                    f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
-                    f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
-                )
+        diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
+        trunc_tag = " ⚠ TRUNCATED" if any_truncated else ""
+        if num_samples > 1:
+            print(
+                f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
+                f"  {num_passing}/{num_samples} samples solved{trunc_tag}"
+            )
+        else:
+            print(
+                f"  {'✓' if any_solved else '✗'} [{i+1:>3}/{len(problems)}] {diff_tag}"
+                f"  {first['passed']}/{first['total']} test cases{trunc_tag}"
+            )
 
-        summary = _finalise(label, results, dataset_name, k, meta=cache_key)
+    summary = _finalise(label, results, dataset_name, k, meta=cache_key)
 
-        gen_cache = _gen_cache_path(label)
-        if gen_cache.exists():
-            gen_cache.unlink()
-
-    except Exception:
-        raise
+    gen_cache = _gen_cache_path(label)
+    if gen_cache.exists():
+        gen_cache.unlink()
 
     return summary
 
