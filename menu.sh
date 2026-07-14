@@ -63,10 +63,10 @@ show_menu() {
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
     echo "  3) Reset teacher cache (delete all OR failed-only)"
-    echo "  4) Rescore failed cache        (recover harness-fixed entries, CPU-only)"
+    echo "  4) Re-test failed cache        (re-run harness on failed entries, CPU-only)"
     echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
     echo "  6) Build FULL-DIST cache       (R1 rescores its own traces, full top-20 logits, GPU)"
-    echo "  7) Free disk                   (delete redundant checkpoint backups)"
+    echo "  7) Free disk                   (delete redundant checkpoints and the retired ocr cache)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -147,8 +147,7 @@ base = sys.argv[3].split("/")[-1]
 def safe(label):
     return label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
 
-checks = [f"Student original ({base})",
-          "Teacher (OpenCodeReasoning-Nemotron-7B)"]
+checks = [f"Student original ({base})", "Teacher (R1-Distill-Qwen-7B)"]
 d = "outputs/eval/intermediate"
 for label in checks:
     p = os.path.join(d, safe(label) + ".json")
@@ -158,7 +157,7 @@ for label in checks:
             c = json.load(open(p))
             reused = (c.get("num_problems") == np and c.get("difficulty") == diff
                       and c.get("num_samples") == 5 and c.get("k") == 5
-                      and c.get("temperature") == 0.7 and c.get("top_p") == 0.95)
+                      and c.get("temperature") == 0.6 and c.get("top_p") == 0.95)
         except Exception:
             reused = False
     print(f"    {label:<50} {'REUSED (cached, skipped)' if reused else 'will RUN'}")
@@ -202,72 +201,6 @@ run_training_then_optionally_compare() {
         return
     fi
     echo -e "  ${GREEN}✓ Training complete. (compare skipped per your choice)${NC}"
-    echo ""
-    read -rp "Press Enter to return to menu..."
-}
-
-view_cache() {
-    local cache_dir
-    cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-    cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
-    header
-    local total
-    total=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
-    if [ "$total" -eq 0 ]; then
-        echo -e "${RED}No cached responses found in $cache_dir${NC}"
-        echo ""
-        read -rp "Press Enter to return to menu..."
-        return
-    fi
-    echo -e "  Found ${GREEN}$total${NC} cached responses."
-    echo -e "  Use ${BOLD}arrow keys / PgUp PgDn${NC} to scroll, ${BOLD}q${NC} to return.\n"
-    python3 - "$cache_dir" <<'PYEOF' | less -R
-import json, os, sys, textwrap, glob
-
-cache_dir = sys.argv[1]
-files = sorted(
-    glob.glob(os.path.join(cache_dir, '*.json')),
-    key=lambda f: int(os.path.basename(f).replace('.json', ''))
-)
-
-CYAN  = '\033[0;36m'
-BOLD  = '\033[1m'
-NC    = '\033[0m'
-
-for f in files:
-    num = os.path.basename(f).replace('.json', '')
-    with open(f) as fh:
-        d = json.load(fh)
-    prompt = d.get('prompt', '').replace('\n', ' ').strip()
-    text   = d.get('text', '').strip() or '(empty)'
-
-    print(f'{BOLD}{CYAN}{"─" * 60}')
-    print(f'  Entry #{num}  ({os.path.basename(f)}){NC}')
-    print(f'{BOLD}{CYAN}{"─" * 60}{NC}')
-    print(f'{BOLD}PROMPT:{NC}')
-    for line in textwrap.wrap(prompt, width=78):
-        print('  ' + line)
-    print()
-    print(f'{BOLD}RESPONSE:{NC}')
-    for line in text.splitlines():
-        print('  ' + line)
-    print()
-PYEOF
-}
-
-install_nvidia_toolkit() {
-    header
-    echo -e "${YELLOW}Installing nvidia-container-toolkit...${NC}"
-    echo ""
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-    echo ""
-    echo -e "${GREEN}✓ nvidia-container-toolkit installed. Docker restarted.${NC}"
     echo ""
     read -rp "Press Enter to return to menu..."
 }
@@ -451,7 +384,7 @@ while true; do
         3)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
+
             count=$(find "$cache_dir" -name '*.json' 2>/dev/null | wc -l)
             stats=$(python3 - "$cache_dir" <<'PYEOF'
 import glob, os, re, sys
@@ -557,9 +490,9 @@ PYEOF
             echo ""
             show_cache_status "$cache_dir"
             echo ""
-            echo -e "  ${YELLOW}Note: rescore and retry change passing counts and therefore n_train; skip them to reproduce the control run exactly.${NC}"
+            echo -e "  ${YELLOW}Note: re-test and retry change passing counts and therefore n_train; skip them to reproduce the control run exactly.${NC}"
             echo ""
-            echo "  1) Rescore only (CPU, fast — no GPU needed)"
+            echo "  1) Re-test only (CPU, fast — no GPU needed)"
             echo "  2) Retry 3 candidates/problem with R1 teacher (GPU, no rescore)"
             echo "  3) Retry 5 candidates/problem with R1 teacher (GPU, no rescore)"
             echo "  q) Cancel"
@@ -593,7 +526,7 @@ PYEOF
         5)
             header
             cache_dir=$(grep 'teacher_cache_dir' config/config.yaml 2>/dev/null | awk '{print $2}')
-            cache_dir=${cache_dir:-cache/teacher_logprobs_coder15b}
+
             echo -e "  ${BOLD}Diagnose teacher cache${NC} (${cache_dir})"
             echo ""
             echo -e "  Two CPU-only checks (no GPU, safe alongside a GPU job):"
@@ -630,7 +563,7 @@ PYEOF
             header
             echo -e "  ${BOLD}Free disk${NC} — redundant checkpoint backups:"
             echo ""
-            for d in outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy; do
+            for d in outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy cache/teacher_logprobs_ocr7b; do
                 [ -d "$d" ] && echo "    $(du -sh "$d" 2>/dev/null)"
             done
             echo ""
@@ -640,7 +573,7 @@ PYEOF
             echo -n "  Delete the listed dirs? (yes/n): "
             read -r ans
             if [ "$ans" = "yes" ]; then
-                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy
+                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy cache/teacher_logprobs_ocr7b
                 echo -e "  ${GREEN}✓ Deleted. Free now: $(df -h / | tail -1 | awk '{print $4}')${NC}"
             else
                 echo "  Cancelled."

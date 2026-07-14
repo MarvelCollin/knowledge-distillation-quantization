@@ -323,7 +323,7 @@ def test_fused_qead_with_entropy():
 
 
 def test_realistic_teacher_distribution():
-    print("\n=== Test 9: Realistic OCR-Nemotron-7B distribution (77% peaked) ===")
+    print("\n=== Test 9: Realistic peaked teacher distribution (77% one-hot) ===")
     torch.manual_seed(42)
     B, S, K = 1, 100, 20
 

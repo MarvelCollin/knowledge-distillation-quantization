@@ -678,10 +678,8 @@ def main() -> None:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
 
     if not args.skip_teacher:
-        teacher_label = ("Teacher (R1-Distill-Qwen-7B)" if "r1" in teacher_path.lower()
-                         else "Teacher (OpenCodeReasoning-Nemotron-7B)")
         summaries.append(evaluate_model(
-            teacher_label, teacher_path,
+            "Teacher (R1-Distill-Qwen-7B)", teacher_path,
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
