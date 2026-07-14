@@ -104,7 +104,7 @@ def _model_fingerprint(model_path: str) -> str:
 
 _FAILURE_CATEGORIES = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
 
-_DECODE_DEFAULTS = {"think_ratio": 0.75, "repetition_penalty": 1.05}
+_DECODE_DEFAULTS = {"think_ratio": 0.5, "repetition_penalty": 1.05}
 
 
 def _pass_at_k(n: int, c: int, k: int) -> float:
@@ -235,7 +235,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    dataset_name: str = "", num_samples: int = 1,
                    temperature: float = 0.7, top_p: float = 0.95,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
-                   think_ratio: float = 0.75, repetition_penalty: float = 1.05) -> dict:
+                   think_ratio: float = 0.5, repetition_penalty: float = 1.05) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -566,7 +566,7 @@ def main() -> None:
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation to save time (~1 min/problem)")
     parser.add_argument("--max-new-tokens", type=int, default=None)
-    parser.add_argument("--think-ratio", type=float, default=0.75,
+    parser.add_argument("--think-ratio", type=float, default=0.5,
                         help="Fraction of the token budget for the think phase of budget-forced student decoding.")
     parser.add_argument("--repetition-penalty", type=float, default=1.05,
                         help="Decoding repetition penalty; raise (e.g. 1.15) to curb degenerate loops that cause truncation.")

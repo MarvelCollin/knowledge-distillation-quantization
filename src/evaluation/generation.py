@@ -11,7 +11,7 @@ from src.utils.reasoning import (
     extract_fn_name,
 )
 
-THINK_BUDGET_RATIO = 0.75
+THINK_BUDGET_RATIO = 0.5
 
 
 def _build_code_primer(has_think_end: bool, signature: str) -> str:
@@ -161,7 +161,7 @@ def free_generate(llm, prompts, num_samples,
 
 def budget_forced_generate(llm, prompts, signatures, num_samples,
                            temperature, top_p, max_new_tokens,
-                           think_ratio=0.75, seed=1234,
+                           think_ratio=0.5, seed=1234,
                            repetition_penalty=1.05):
     from vllm import SamplingParams
 
