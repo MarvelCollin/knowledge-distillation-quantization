@@ -37,7 +37,7 @@ training:
   gradient_accumulation_steps: 4
   learning_rate: 5e-6
   max_grad_norm: 1.0
-  num_epochs: 3
+  num_epochs: 2
   output_dir: outputs
   seed: 42
   skew_lambda: 0.2
