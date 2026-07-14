@@ -10,9 +10,9 @@ from dotenv import load_dotenv
 
 from src.config import load_config
 from src.data.dataset import create_datasets
+from src.data.teacher_cache import load_cached
 from src.distillation.loss import build_teacher_topk
 from src.student.model import StudentModel
-from src.teacher.local_teacher import LocalTeacherModel
 
 
 @torch.no_grad()
@@ -27,7 +27,7 @@ def diagnose(student, dataset, cache_dir, vocab, topk, distill_temp, device):
         pl = batch["prompt_length"].item()
         orig_idx = dataset.original_indices[i]
 
-        cached = LocalTeacherModel.load_cached(cache_dir, orig_idx)
+        cached = load_cached(cache_dir, orig_idx)
         ids_full, probs_full = build_teacher_topk(
             cached["top_k_ids"], cached["top_k_vals"], vocab, topk, torch.device("cpu"), distill_temp
         )

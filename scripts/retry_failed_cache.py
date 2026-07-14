@@ -16,9 +16,8 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
 from src.config import load_config
-from src.data.dataset import (
-    build_user_content, load_problems, _failed_cache_indices, rescore_failed_cache,
-)
+from src.data.dataset import build_user_content, load_problems
+from src.data.teacher_cache import failed_cache_indices, rescore_failed_cache
 from src.evaluation.evaluator import run_test_cases
 from src.teacher.local_teacher import LocalTeacherModel
 from src.utils.reasoning import extract_code
@@ -77,7 +76,7 @@ def main():
         print(f"  Rescore done in {time.time() - t0:.0f}s: "
               f"recovered {recovered}/{total_failed} entries.\n")
 
-    failed = _failed_cache_indices(cache_dir, len(problems))
+    failed = failed_cache_indices(cache_dir, len(problems))
     if not failed:
         print("No failed cache entries. Nothing to retry.")
         return

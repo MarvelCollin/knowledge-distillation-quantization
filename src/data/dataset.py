@@ -7,18 +7,15 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
-from src.utils.reasoning import SYSTEM_PROMPT, THINK_END_TAG, build_signature_user_content, extract_code
-from src.evaluation.evaluator import extract_signature, run_test_cases
+from src.data.teacher_cache import load_passing_responses, rescore_failed_cache
+from src.utils.reasoning import SYSTEM_PROMPT, build_signature_user_content
+from src.evaluation.evaluator import extract_signature
 
 PROMPT_TEMPLATE = (
     "Write a solution in Python to solve the following problem.\n"
     "Your answer must be a Python function only. Do not use any other language.\n\n"
     "Problem: {text}\n\n"
 )
-
-_CODE_FENCE_OPEN = "```python"
-_CODE_FENCE_CLOSE = "```"
-_BRIDGE_TOKEN = "\n"
 
 
 def build_user_content(problem: dict) -> str:
@@ -36,7 +33,6 @@ def _extract_test_cases(test_str: str, entry_point: str) -> list:
     )
     other_top_level = [n for n in tree.body if n is not check_func]
     cases = []
-    cases = []
     for stmt in check_func.body:
         single_check = ast.FunctionDef(
             name="check",
@@ -51,93 +47,6 @@ def _extract_test_cases(test_str: str, entry_point: str) -> list:
         src = ast.unparse(module)
         cases.append(src + f"\ncheck({entry_point})")
     return cases
-
-
-def clean_teacher_cache(cached: dict) -> dict:
-    tokens = cached.get("tokens") or []
-    if not tokens:
-        return cached
-    text = "".join(tokens)
-
-    fence_open = text.find(_CODE_FENCE_OPEN)
-    if fence_open < 0:
-        return cached
-    fence_close = text.find(_CODE_FENCE_CLOSE, fence_open + len(_CODE_FENCE_OPEN))
-    if fence_close < 0:
-        return cached
-    fence_close_end = fence_close + len(_CODE_FENCE_CLOSE)
-
-    close_pos = text.find(THINK_END_TAG)
-    use_think_path = 0 <= close_pos < fence_open
-    close_end = close_pos + len(THINK_END_TAG) if use_think_path else None
-
-    keep_end = code_start = code_end = None
-    char_pos = 0
-    for i, tok in enumerate(tokens):
-        if use_think_path and keep_end is None and char_pos >= close_end:
-            keep_end = i
-        if code_start is None and char_pos >= fence_open:
-            code_start = i
-        if code_end is None and char_pos >= fence_close_end:
-            code_end = i
-            break
-        char_pos += len(tok)
-    if code_end is None:
-        code_end = len(tokens)
-    if code_start is None:
-        return cached
-
-    logprobs = cached.get("logprobs") or []
-    top_ids = cached.get("top_k_ids")
-    top_vals = cached.get("top_k_vals")
-
-    if use_think_path and keep_end is not None and keep_end < code_start:
-        new_tokens = tokens[:keep_end] + [_BRIDGE_TOKEN] + tokens[code_start:code_end]
-        new_logprobs = logprobs[:keep_end] + [{}] + logprobs[code_start:code_end]
-        new_top_ids = (
-            list(top_ids[:keep_end]) + [[]] + list(top_ids[code_start:code_end])
-            if top_ids is not None else None
-        )
-        new_top_vals = (
-            list(top_vals[:keep_end]) + [[]] + list(top_vals[code_start:code_end])
-            if top_vals is not None else None
-        )
-    else:
-        new_tokens = tokens[code_start:code_end]
-        new_logprobs = logprobs[code_start:code_end]
-        new_top_ids = list(top_ids[code_start:code_end]) if top_ids is not None else None
-        new_top_vals = list(top_vals[code_start:code_end]) if top_vals is not None else None
-
-    cleaned = dict(cached)
-    cleaned["tokens"] = new_tokens
-    cleaned["logprobs"] = new_logprobs
-    cleaned["text"] = "".join(new_tokens)
-    if new_top_ids is not None:
-        cleaned["top_k_ids"] = new_top_ids
-    if new_top_vals is not None:
-        cleaned["top_k_vals"] = new_top_vals
-    return cleaned
-
-
-def _load_passing_indices(cache_dir: str, num_problems: int) -> dict:
-    cache_path = Path(cache_dir)
-    passing = {}
-    for i in range(num_problems):
-        f = cache_path / f"{i}.json"
-        if not f.exists():
-            continue
-        d = json.loads(f.read_text())
-        tp = d.get("test_passed")
-        tt = d.get("test_total")
-        if tt is None or tp is None or tt == 0 or tp < tt:
-            continue
-        d = clean_teacher_cache(d)
-        tokens = d.get("tokens") or []
-        text = d.get("text") or ""
-        if not tokens or not text:
-            continue
-        passing[i] = {"text": text, "token_count": len(tokens)}
-    return passing
 
 
 class CodingDataset(Dataset):
@@ -269,60 +178,6 @@ def load_problems(config: dict) -> list:
     return problems
 
 
-def _failed_cache_indices(cache_dir: str, num_problems: int) -> list:
-    pp = re.compile(rb'"test_passed":\s*(\d+)')
-    tt = re.compile(rb'"test_total":\s*(\d+)')
-    cache_path = Path(cache_dir)
-    failed = []
-    for i in range(num_problems):
-        f = cache_path / f"{i}.json"
-        if not f.exists():
-            continue
-        with open(f, "rb") as fh:
-            fh.seek(max(0, f.stat().st_size - 400))
-            tail = fh.read()
-        a, b = pp.search(tail), tt.search(tail)
-        if not (a and b and int(b.group(1)) > 0 and int(a.group(1)) == int(b.group(1))):
-            failed.append(i)
-    return failed
-
-
-def rescore_failed_cache(cache_dir: str, problems: list, apply: bool = True,
-                         sample: int = 0, seed: int = 0, max_workers: int = 0,
-                         timeout: float = 5.0) -> tuple:
-    import os
-    from concurrent.futures import ThreadPoolExecutor
-
-    if max_workers <= 0:
-        max_workers = min(os.cpu_count() or 16, 48)
-    cache_path = Path(cache_dir)
-    failed = _failed_cache_indices(cache_dir, len(problems))
-    total_failed = len(failed)
-    if sample > 0:
-        import random
-        random.seed(seed)
-        failed = random.sample(failed, min(sample, len(failed)))
-
-    def _recheck(i: int) -> bool:
-        f = cache_path / f"{i}.json"
-        d = json.loads(f.read_text())
-        code = extract_code(d.get("text", ""))
-        r = run_test_cases(code, problems[i]["test_cases"], timeout=timeout)
-        if r["total"] > 0 and r["passed"] == r["total"]:
-            if apply:
-                d["test_passed"] = r["total"]
-                d["test_total"] = r["total"]
-                f.write_text(json.dumps(d))
-            return True
-        return False
-
-    recovered = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for ok in ex.map(_recheck, failed):
-            recovered += int(ok)
-    return recovered, len(failed), total_failed
-
-
 def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False) -> tuple:
     max_length = config["student"]["max_length"]
     train_ratio = config["data"]["train_ratio"]
@@ -335,7 +190,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
         recovered, tested, total_failed = rescore_failed_cache(cache_dir, problems)
         print(f"  Rescored teacher cache (pure KD — re-tests labels only, trajectories untouched): "
               f"recovered {recovered}/{total_failed} previously-failed responses now passing.")
-    teacher_responses = _load_passing_indices(cache_dir, len(problems))
+    teacher_responses = load_passing_responses(cache_dir, len(problems))
 
     kept_indices = []
     lengths_map = {}

@@ -22,6 +22,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from transformers.optimization import Adafactor
 
 from src.data.dataset import build_user_content, create_datasets, load_problems
+from src.data.teacher_cache import load_cached
 from src.distillation.loss import (
     build_teacher_topk,
     compute_loss_chunked_backward,
@@ -337,7 +338,7 @@ def main():
     if teacher_topk is None:
         teacher_topk = {}
         for cache_idx in train_dataset.original_indices:
-            cached = LocalTeacherModel.load_cached(cache_dir, cache_idx)
+            cached = load_cached(cache_dir, cache_idx)
             if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
                 continue
             teacher_topk[cache_idx] = build_teacher_topk(

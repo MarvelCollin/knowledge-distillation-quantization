@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from src.config import load_config
 from src.data.dataset import load_problems
+from src.data.teacher_cache import fully_passed
 from src.evaluation.evaluator import run_test_cases
 from src.utils.reasoning import extract_code
 
@@ -40,8 +41,7 @@ def main() -> None:
         if not f.exists():
             continue
         d = json.loads(f.read_text())
-        tp, tt = d.get("test_passed"), d.get("test_total")
-        if not (tt is not None and tt > 0 and tp == tt):
+        if not fully_passed(d.get("test_passed"), d.get("test_total")):
             failing.append((idx, d.get("text", ""), prob["test_cases"]))
 
     print(f"Re-scoring {len(failing)} cached failing trajectories...")

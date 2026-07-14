@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
+from src.data.teacher_cache import PASSED_PATTERN, TOTAL_PATTERN, fully_passed, tail_counts, tail_fully_passed
 from src.evaluation.evaluator import failing_cases, run_test_cases
 from src.utils.gpu import gpu_used_gb
 from src.utils.reasoning import SYSTEM_PROMPT, extract_code
@@ -188,27 +189,6 @@ class LocalTeacherModel:
         outputs = self.llm.generate(formatted, sp, use_tqdm=show_progress_bars())
         return [[self._extract_one(g) for g in o.outputs] for o in outputs]
 
-    @staticmethod
-    def _fully_passed(test_passed, test_total) -> bool:
-        return test_total is not None and test_total > 0 and test_passed == test_total
-
-    @staticmethod
-    def _cached_fully_passed(cache_path, idx: int) -> bool:
-        f = cache_path / f"{idx}.json"
-        if not f.exists():
-            return False
-        try:
-            with open(f, "rb") as fh:
-                size = fh.seek(0, 2)
-                fh.seek(max(0, size - 400))
-                tail = fh.read()
-            mp = re.search(rb'"test_passed":\s*(\d+)', tail)
-            mt = re.search(rb'"test_total":\s*(\d+)', tail)
-            return (mp is not None and mt is not None
-                    and int(mt.group(1)) > 0 and int(mp.group(1)) == int(mt.group(1)))
-        except Exception:
-            return False
-
     def _score_result(self, result: dict, test_cases: list) -> dict:
         try:
             return run_test_cases(extract_code(result.get("text", "")), test_cases)
@@ -250,9 +230,6 @@ class LocalTeacherModel:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
 
-        pat_passed = re.compile(rb'"test_passed":\s*(\d+)')
-        pat_total = re.compile(rb'"test_total":\s*(\d+)')
-
         def _is_valid(idx: int, prompt: str) -> bool:
             f = cache_path / f"{idx}.json"
             if not f.exists():
@@ -272,16 +249,16 @@ class LocalTeacherModel:
                 if m is None:
                     return False
                 cached_max_tokens = int(m.group(0))
-                mp = pat_passed.search(tail)
-                mt = pat_total.search(tail)
-                fully_passed = (
+                mp = PASSED_PATTERN.search(tail)
+                mt = TOTAL_PATTERN.search(tail)
+                passed_all = (
                     mp is not None and mt is not None
                     and int(mt.group(1)) > 0
                     and int(mp.group(1)) == int(mt.group(1))
                 )
-                if rejection_samples > 0 and not fully_passed:
+                if rejection_samples > 0 and not passed_all:
                     return False
-                if cached_max_tokens < self.max_tokens and not fully_passed:
+                if cached_max_tokens < self.max_tokens and not passed_all:
                     return False
                 return True
             except Exception:
@@ -332,7 +309,7 @@ class LocalTeacherModel:
 
                 if rejection_samples > 0 and test_cases_per_prompt is not None:
                     remaining = [s for s in scored
-                                 if s[4] is not None and not self._fully_passed(s[3], s[4])]
+                                 if s[4] is not None and not fully_passed(s[3], s[4])]
                     failed_count = len(remaining)
                     if remaining:
                         wave = max(1, rejection_wave)
@@ -361,7 +338,7 @@ class LocalTeacherModel:
                             for ri, s in enumerate(remaining):
                                 hit = False
                                 for ci, candidate, score in sorted(by_prompt.get(ri, []), key=lambda x: x[0]):
-                                    if self._fully_passed(score["passed"], score["total"]):
+                                    if fully_passed(score["passed"], score["total"]):
                                         s[2], s[3], s[4], s[5] = candidate, score["passed"], score["total"], score
                                         recovered += 1
                                         hit = True
@@ -382,8 +359,8 @@ class LocalTeacherModel:
                 chunk_fail_causes = {}
                 for idx, prompt, result, test_passed, test_total, score in scored:
                     diff = _get_diff(idx)
-                    new_pass = self._fully_passed(test_passed, test_total)
-                    if test_total is not None and not new_pass and self._cached_fully_passed(cache_path, idx):
+                    new_pass = fully_passed(test_passed, test_total)
+                    if test_total is not None and not new_pass and tail_fully_passed(cache_path / f"{idx}.json"):
                         pass_count += 1
                         chunk_pass += 1
                         diff_pass[diff] += 1
@@ -548,17 +525,12 @@ class LocalTeacherModel:
         if plist:
             probs = json.loads(plist[0].read_text())
             difficulties = {i: (p.get("difficulty") or "?") for i, p in enumerate(probs)}
-        pass_pat = re.compile(rb'"test_passed":\s*(\d+)')
-        total_pat = re.compile(rb'"test_total":\s*(\d+)')
         diff_pass, diff_done = Counter(), Counter()
         for f in dst.glob("*.json"):
-            with open(f, "rb") as fh:
-                fh.seek(max(0, f.stat().st_size - 300))
-                tail_b = fh.read()
-            a, b = pass_pat.search(tail_b), total_pat.search(tail_b)
+            tp, tt = tail_counts(f, 300)
             dname = difficulties.get(int(f.stem), "?")
             diff_done[dname] += 1
-            if a and b and int(b.group(1)) > 0 and int(a.group(1)) == int(b.group(1)):
+            if fully_passed(tp, tt):
                 diff_pass[dname] += 1
 
         score_params = SamplingParams(
@@ -637,13 +609,3 @@ class LocalTeacherModel:
         torch.cuda.empty_cache()
         gpu_after = gpu_used_gb()
         print(f"  vLLM shutdown complete. GPU used (nvidia-smi): {gpu_after:.1f} GB")
-
-    @staticmethod
-    def load_cached(cache_dir: str, idx: int) -> dict | None:
-        from src.data.dataset import clean_teacher_cache
-        file_path = Path(cache_dir) / f"{idx}.json"
-        if not file_path.exists():
-            return None
-        with open(file_path) as f:
-            data = json.load(f)
-        return clean_teacher_cache(data)

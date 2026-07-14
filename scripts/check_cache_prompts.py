@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from src.config import load_config
 from src.data.dataset import build_user_content, load_problems
+from src.data.teacher_cache import fully_passed
 
 REPORT_PATH = Path("outputs/eval/diagnostics/cache_prompts.txt")
 
@@ -34,8 +35,7 @@ def main() -> None:
             continue
         cached += 1
         d = json.loads(f.read_text())
-        tp, tt = d.get("test_passed"), d.get("test_total")
-        passing = tt is not None and tt > 0 and tp == tt
+        passing = fully_passed(d.get("test_passed"), d.get("test_total"))
         if d.get("prompt") == build_user_content(prob):
             matched += 1
             match_passing += int(passing)

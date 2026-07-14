@@ -13,7 +13,8 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 
 from src.config import load_config
-from src.data.dataset import build_user_content, load_problems, _failed_cache_indices
+from src.data.dataset import build_user_content, load_problems
+from src.data.teacher_cache import failed_cache_indices
 from src.evaluation.evaluator import run_test_cases
 from src.teacher.local_teacher import LocalTeacherModel
 from src.utils.reasoning import extract_code
@@ -53,7 +54,7 @@ def main():
     cache_dir = config["data"]["teacher_cache_dir"]
     problems = load_problems(config)
 
-    failed = _failed_cache_indices(cache_dir, len(problems))
+    failed = failed_cache_indices(cache_dir, len(problems))
     if not failed:
         print("SKIP: no failed cache entries to test with")
         return
