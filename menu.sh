@@ -140,15 +140,22 @@ set_fixed_compare_params() {
     CMP_NP=228
     CMP_DIFFICULTY="all"
     COMPARE_AFTER=1
-    echo -e "  ${BOLD}Fixed compare config${NC} (auto, no prompts):"
+    echo -n "  Compare against the teacher too? (yes/no) [default: yes]: "
+    read -r cmp_teacher
+    local models_line="original + teacher + distilled  (3-way)"
+    if [ "$cmp_teacher" = "no" ] || [ "$cmp_teacher" = "n" ]; then
+        CMP_SKIP_FLAG="--skip-teacher"
+        models_line="original + distilled  (teacher skipped)"
+    fi
+    echo -e "  ${BOLD}Fixed compare config${NC}:"
     echo "    dataset      : LeetCode test split"
-    echo "    models       : original + teacher + distilled  (3-way)"
+    echo "    models       : ${models_line}"
     echo "    num_problems : 228  (full test split: 48 easy / 101 medium / 79 hard)"
     echo "    difficulty   : all  (per-difficulty breakdown reported)"
     echo "    samples/prob : 5   temperature 0.6   top_p 0.95"
     echo "    max_tokens   : ${eval_mnt}   seed 1234"
     echo "    chunk_size   : 24 student / 8 teacher"
-    echo "    reuse        : teacher + original cached & reused; only distilled re-runs"
+    echo "    reuse        : cached rows reused; distilled always re-runs"
 }
 
 compare_cache_status() {
@@ -156,15 +163,18 @@ compare_cache_status() {
     local student_model
     student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
     echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}:"
-    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" <<'PY'
+    python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" "$CMP_SKIP_FLAG" <<'PY'
 import json, os, sys
 np = int(sys.argv[1]); diff = sys.argv[2]
 base = sys.argv[3].split("/")[-1]
+skip_teacher = len(sys.argv) > 4 and sys.argv[4] == "--skip-teacher"
 
 def safe(label):
     return label.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "")
 
-checks = [f"Student original ({base})", "Teacher (R1-Distill-Qwen-7B)"]
+checks = [f"Student original ({base})"]
+if not skip_teacher:
+    checks.append("Teacher (R1-Distill-Qwen-7B)")
 d = "outputs/eval/intermediate"
 for label in checks:
     p = os.path.join(d, safe(label) + ".json")
