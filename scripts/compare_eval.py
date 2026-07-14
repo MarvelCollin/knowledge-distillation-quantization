@@ -104,6 +104,8 @@ def _model_fingerprint(model_path: str) -> str:
 
 _FAILURE_CATEGORIES = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
 
+_DECODE_DEFAULTS = {"think_ratio": 0.75, "repetition_penalty": 1.05}
+
 
 def _pass_at_k(n: int, c: int, k: int) -> float:
     if n - c < k:
@@ -233,7 +235,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    dataset_name: str = "", num_samples: int = 1,
                    temperature: float = 0.7, top_p: float = 0.95,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
-                   think_ratio: float = 0.75) -> dict:
+                   think_ratio: float = 0.75, repetition_penalty: float = 1.05) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -243,10 +245,12 @@ def evaluate_model(label: str, model_path: str, problems: list,
         "temperature": temperature,
         "top_p": top_p,
         "seed": seed,
+        "think_ratio": think_ratio,
+        "repetition_penalty": repetition_penalty,
         "model_fingerprint": _model_fingerprint(model_path),
     }
     cached = _load_intermediate(label, dataset_name)
-    if cached and all(cached.get(key) == val for key, val in cache_key.items()):
+    if cached and all(cached.get(key, _DECODE_DEFAULTS.get(key)) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
         return cached
 
@@ -326,12 +330,12 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 if is_teacher:
                     chunk_grid = free_generate(
                         llm, chunk, num_samples, temperature, top_p, max_new_tokens,
-                        seed=seed,
+                        seed=seed, repetition_penalty=repetition_penalty,
                     )
                 else:
                     chunk_grid = budget_forced_generate(
                         llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
-                        think_ratio=think_ratio, seed=seed,
+                        think_ratio=think_ratio, seed=seed, repetition_penalty=repetition_penalty,
                     )
                 for off, row in enumerate(chunk_grid):
                     gen_grid[chunk_start + off] = row
@@ -564,6 +568,8 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--think-ratio", type=float, default=0.75,
                         help="Fraction of the token budget for the think phase of budget-forced student decoding.")
+    parser.add_argument("--repetition-penalty", type=float, default=1.05,
+                        help="Decoding repetition penalty; raise (e.g. 1.15) to curb degenerate loops that cause truncation.")
     parser.add_argument("--num-samples", type=int, default=1,
                         help="Samples per problem for pass@k (default: 1 = greedy)")
     parser.add_argument("--temperature", type=float, default=0.6)
@@ -607,6 +613,7 @@ def main() -> None:
         dataset_name=dataset_name,
         num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
         difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
+        repetition_penalty=args.repetition_penalty,
     ))
 
     distilled_path = args.distilled
@@ -625,6 +632,7 @@ def main() -> None:
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
+            repetition_penalty=args.repetition_penalty,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")

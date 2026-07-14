@@ -129,7 +129,8 @@ def build_eval_prompts(problems, tokenizer):
 
 
 def free_generate(llm, prompts, num_samples,
-                  temperature, top_p, max_new_tokens, seed=1234):
+                  temperature, top_p, max_new_tokens, seed=1234,
+                  repetition_penalty=1.05):
     from vllm import SamplingParams
 
     do_sample = num_samples > 1
@@ -144,7 +145,7 @@ def free_generate(llm, prompts, num_samples,
             all_prompts.append(prompt)
             all_params.append(SamplingParams(
                 temperature=temp, top_p=tp, max_tokens=max_new_tokens, n=1,
-                repetition_penalty=1.05, seed=seed + j,
+                repetition_penalty=repetition_penalty, seed=seed + j,
             ))
             sample_index.append((i, j))
 
@@ -160,7 +161,8 @@ def free_generate(llm, prompts, num_samples,
 
 def budget_forced_generate(llm, prompts, signatures, num_samples,
                            temperature, top_p, max_new_tokens,
-                           think_ratio=0.75, seed=1234):
+                           think_ratio=0.75, seed=1234,
+                           repetition_penalty=1.05):
     from vllm import SamplingParams
 
     do_sample = num_samples > 1
@@ -177,7 +179,7 @@ def budget_forced_generate(llm, prompts, signatures, num_samples,
             think_prompts.append(prompt)
             think_params.append(SamplingParams(
                 temperature=temp, top_p=tp, max_tokens=think_budget, n=1,
-                stop=[THINK_END_TAG], include_stop_str_in_output=True, repetition_penalty=1.05, seed=seed + j,
+                stop=[THINK_END_TAG], include_stop_str_in_output=True, repetition_penalty=repetition_penalty, seed=seed + j,
             ))
             sample_index.append((i, j))
     phase1 = llm.generate(think_prompts, think_params, use_tqdm=True)
@@ -193,7 +195,7 @@ def budget_forced_generate(llm, prompts, signatures, num_samples,
         cont_prompts.append(prompts[i] + closed + primer)
         code_params.append(SamplingParams(
             temperature=temp, top_p=tp, max_tokens=code_budget, n=1,
-            stop=["```"], include_stop_str_in_output=False, repetition_penalty=1.05, seed=seed + j,
+            stop=["```"], include_stop_str_in_output=False, repetition_penalty=repetition_penalty, seed=seed + j,
         ))
         meta.append((i, j, closed, primer))
 
