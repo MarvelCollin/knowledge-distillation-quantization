@@ -10,6 +10,7 @@ import math
 import time
 import torch
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -551,6 +552,105 @@ def plot_comparison(summaries: list, out_path: Path) -> None:
     print(f"\nGraph saved → {out_path}")
 
 
+def _diag_role(name: str) -> str:
+    low = name.lower()
+    if "original" in low:
+        return "original"
+    if "distilled" in low:
+        return "distilled"
+    if name.startswith("Teacher"):
+        return "teacher"
+    return name
+
+
+def _problem_diag(p: dict) -> dict:
+    samples = p.get("samples") or []
+    trunc = sum(1 for s in samples if s.get("truncated"))
+    causes = Counter()
+    for s in samples:
+        if s.get("solved"):
+            continue
+        cats = {c for c in s.get("categories", []) if c and c != "pass"}
+        if s.get("truncated"):
+            cats.add("truncated")
+        for c in cats:
+            causes[c] += 1
+    return {
+        "pass": f"{p.get('num_passing', 0)}/{p.get('num_samples', len(samples))}",
+        "solved": bool(p.get("solved")),
+        "cause": causes.most_common(1)[0][0] if causes else None,
+        "trunc": trunc,
+        "code_len": len(p.get("code") or ""),
+    }
+
+
+def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
+    diag_dir = out_dir / "diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    role_sum = {_diag_role(s["name"]): s for s in summaries}
+    by_role = {r: {p["idx"]: p for p in s.get("per_problem", [])} for r, s in role_sum.items()}
+    roles = [r for r in ("original", "distilled", "teacher") if r in by_role]
+    all_idx = sorted({i for r in roles for i in by_role[r]})
+
+    rows = []
+    for i in all_idx:
+        row = {"idx": i, "difficulty": ""}
+        for r in roles:
+            p = by_role[r].get(i)
+            if p is None:
+                continue
+            row["difficulty"] = row["difficulty"] or p.get("difficulty", "")
+            row[r] = _problem_diag(p)
+        os_ = bool(by_role.get("original", {}).get(i, {}).get("solved"))
+        ds_ = bool(by_role.get("distilled", {}).get(i, {}).get("solved"))
+        ts_ = bool(by_role.get("teacher", {}).get(i, {}).get("solved"))
+        row["gained_vs_orig"] = ds_ and not os_
+        row["regressed_vs_orig"] = os_ and not ds_
+        row["teacher_reachable_miss"] = ts_ and not ds_
+        rows.append(row)
+
+    jsonl_path = diag_dir / "compare_diag.jsonl"
+    with jsonl_path.open("w") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+    lines = ["=" * 64, f"Compare diagnostics  (roles: {', '.join(roles)})", "=" * 64]
+    lines.append(f"  {'role':<10} {'solved':>9} {'pass@1':>7} {'pass@5':>7} {'testcase':>9} {'trunc p/s':>11}")
+    for r in roles:
+        s = role_sum[r]
+        tsamp = sum(row[r]["trunc"] for row in rows if r in row)
+        tprob = sum(1 for row in rows if r in row and row[r]["trunc"])
+        solved_str = f"{s['problems_solved']}/{s['num_problems']}"
+        trunc_str = f"{tprob}/{tsamp}"
+        lines.append(f"  {r:<10} {solved_str:>9} "
+                     f"{s['pass_at_1'] * 100:6.1f}% {s['pass_at_k'] * 100:6.1f}% {s['test_pass_rate'] * 100:8.1f}% "
+                     f"{trunc_str:>11}")
+    lines.append("  " + "-" * 60)
+    solved_any = sum(1 for row in rows if any(row.get(r, {}).get("solved") for r in roles))
+    lines.append(f"  solved by none of the roles  : {len(rows) - solved_any}")
+    if "distilled" in by_role and "original" in by_role:
+        gained = [row["idx"] for row in rows if row["gained_vs_orig"]]
+        regressed = [row["idx"] for row in rows if row["regressed_vs_orig"]]
+        lines.append(f"  distilled gained vs original : {len(gained)}")
+        lines.append(f"  distilled regressed vs orig  : {len(regressed)}  {regressed}")
+    if "teacher" in by_role and "distilled" in by_role:
+        reach = [row for row in rows if row["teacher_reachable_miss"]]
+        reach_nontrunc = sum(1 for row in reach if row["distilled"]["trunc"] == 0)
+        lines.append(f"  teacher-reachable misses     : {len(reach)}  (non-truncation {reach_nontrunc})")
+    if "distilled" in by_role:
+        dcauses = Counter(row["distilled"]["cause"] for row in rows
+                          if "distilled" in row and not row["distilled"]["solved"] and row["distilled"]["cause"])
+        lines.append("  distilled failure causes     : "
+                     + ", ".join(f"{c}={n}" for c, n in dcauses.most_common()))
+    lines.append("  " + "-" * 60)
+    lines.append(f"  per-problem rows → {jsonl_path}")
+    lines.append("=" * 64)
+    report = "\n".join(lines)
+    print("\n" + report)
+    (diag_dir / "compare_diag.txt").write_text(report + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Three-way model comparison on the LeetCode test split")
     parser.add_argument("--config", default="config/config.yaml")
@@ -649,6 +749,8 @@ def main() -> None:
     results_json = out_dir / "comparison.json"
     results_json.write_text(json.dumps(summaries, indent=2))
     print(f"Full results → {results_json}")
+
+    _write_compare_diagnostics(summaries, out_dir)
 
     if len(summaries) >= 2:
         out_png = Path(args.out) if args.out else out_dir / "comparison.png"
