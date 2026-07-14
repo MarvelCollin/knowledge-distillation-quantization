@@ -46,15 +46,13 @@ def main():
     prompts = [PROMPT_TEMPLATE.format(text=p["text"]) for p in problems]
     print(f"Probing teacher soft signal on {len(prompts)} problems at temperature={args.temperature}...")
 
-    teacher = LocalTeacherModel(
-        model_path=config["teacher"]["local_model_path"],
+    teacher = LocalTeacherModel.from_config(
+        config, None,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
-        top_p=config["teacher"]["top_p"],
-        top_logprobs=config["teacher"]["top_logprobs"],
-        student_tokenizer=None,
-        gpu_memory_utilization=config["teacher"]["gpu_memory_utilization"],
-        max_model_len=config["teacher"]["max_model_len"],
+        enable_chunked_prefill=False,
+        max_num_batched_tokens=None,
+        max_num_seqs=None,
     )
     results = teacher.get_responses_batch(prompts)
     teacher.shutdown()

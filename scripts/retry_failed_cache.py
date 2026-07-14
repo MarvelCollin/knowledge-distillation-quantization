@@ -66,19 +66,11 @@ def main():
     student_tokenizer = AutoTokenizer.from_pretrained(
         config["student"]["model_name"], trust_remote_code=True
     )
-    teacher = LocalTeacherModel(
-        model_path=config["teacher"]["local_model_path"],
-        max_tokens=config["teacher"]["max_tokens"],
+    teacher = LocalTeacherModel.from_config(
+        config, student_tokenizer,
         temperature=args.temperature,
         top_p=args.top_p,
-        top_logprobs=config["teacher"]["top_logprobs"],
-        student_tokenizer=student_tokenizer,
-        gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
         max_model_len=retry_model_len,
-        kv_cache_dtype=config["teacher"].get("kv_cache_dtype", "auto"),
-        enable_chunked_prefill=config["teacher"].get("enable_chunked_prefill", False),
-        max_num_batched_tokens=config["teacher"].get("max_num_batched_tokens", None),
-        max_num_seqs=config["teacher"].get("max_num_seqs", None),
     )
 
     from vllm import SamplingParams

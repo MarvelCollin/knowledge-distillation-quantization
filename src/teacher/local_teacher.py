@@ -97,6 +97,26 @@ class LocalTeacherModel:
         if student_tokenizer is not None:
             print(f"  Student tokenizer wired for token-id top-k cache.")
 
+    @classmethod
+    def from_config(cls, config: dict, student_tokenizer=None, **overrides):
+        teacher = config["teacher"]
+        kwargs = dict(
+            model_path=teacher["local_model_path"],
+            max_tokens=teacher["max_tokens"],
+            temperature=teacher["temperature"],
+            top_p=teacher.get("top_p", 0.95),
+            top_logprobs=teacher["top_logprobs"],
+            student_tokenizer=student_tokenizer,
+            gpu_memory_utilization=teacher.get("gpu_memory_utilization", 0.85),
+            max_model_len=teacher.get("max_model_len", 10240),
+            kv_cache_dtype=teacher.get("kv_cache_dtype", "auto"),
+            enable_chunked_prefill=teacher.get("enable_chunked_prefill", False),
+            max_num_batched_tokens=teacher.get("max_num_batched_tokens", None),
+            max_num_seqs=teacher.get("max_num_seqs", None),
+        )
+        kwargs.update(overrides)
+        return cls(**kwargs)
+
     def _format_prompt(self, prompt: str) -> str:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

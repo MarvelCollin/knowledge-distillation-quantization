@@ -39,18 +39,16 @@ def main() -> None:
         config["student"]["model_name"], trust_remote_code=True
     )
 
-    teacher = LocalTeacherModel(
-        model_path=config["teacher"]["local_model_path"],
-        max_tokens=config["teacher"]["max_tokens"],
+    teacher = LocalTeacherModel.from_config(
+        config, student_tokenizer,
         temperature=1.0,
         top_p=1.0,
-        top_logprobs=config["teacher"]["top_logprobs"],
-        student_tokenizer=student_tokenizer,
         gpu_memory_utilization=args.gpu_mem,
         max_model_len=args.max_model_len,
         enforce_eager=True,
         enable_chunked_prefill=True,
         max_num_batched_tokens=args.prefill_chunk,
+        max_num_seqs=None,
         enable_prefix_caching=False,
     )
     teacher.rescore_and_cache(args.src, dst, chunk_size=args.chunk_size)

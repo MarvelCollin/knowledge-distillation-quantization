@@ -140,20 +140,7 @@ def main():
         raw_prompts = [build_user_content(p) for p in raw_problems]
         raw_tests = [p["test_cases"] for p in raw_problems]
         raw_difficulties = [p.get("difficulty", "") for p in raw_problems]
-        local_teacher = LocalTeacherModel(
-            model_path=config["teacher"]["local_model_path"],
-            max_tokens=config["teacher"]["max_tokens"],
-            temperature=config["teacher"]["temperature"],
-            top_p=config["teacher"].get("top_p", 0.95),
-            top_logprobs=config["teacher"]["top_logprobs"],
-            student_tokenizer=student_tokenizer,
-            gpu_memory_utilization=config["teacher"].get("gpu_memory_utilization", 0.85),
-            max_model_len=config["teacher"].get("max_model_len", 10240),
-            kv_cache_dtype=config["teacher"].get("kv_cache_dtype", "auto"),
-            enable_chunked_prefill=config["teacher"].get("enable_chunked_prefill", False),
-            max_num_batched_tokens=config["teacher"].get("max_num_batched_tokens", None),
-            max_num_seqs=config["teacher"].get("max_num_seqs", None),
-        )
+        local_teacher = LocalTeacherModel.from_config(config, student_tokenizer)
         chunk_size = config["teacher"].get("cache_chunk_size", 64)
         local_teacher.precompute_and_cache(
             raw_prompts, cache_dir,
