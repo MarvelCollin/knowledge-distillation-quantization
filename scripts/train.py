@@ -307,6 +307,8 @@ def main():
         epoch_samples_seen = 0
         pending_samples = 0
         t_data = t_compute = t_val = 0.0
+        ep_total = ep_distill = ep_task = ep_lambda = 0.0
+        ep_batches = ep_teacher_batches = 0
         t_mark = time.time()
 
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config['training']['num_epochs']}",
@@ -353,7 +355,8 @@ def main():
             else:
                 effective_lambda = skew_lambda
 
-            sample_alpha = alpha if bool(valid_teacher.any()) else 0.0
+            has_teacher = bool(valid_teacher.any())
+            sample_alpha = alpha if has_teacher else 0.0
 
             loss_chunk = 512 if seq_len > 8192 else 1024
             total_val, distill_val, task_val = compute_loss_chunked_backward(
@@ -362,6 +365,13 @@ def main():
                 loss_scale=len(sample_idxs) / effective_batch,
                 chunk_size=loss_chunk,
             )
+
+            ep_total += total_val
+            ep_distill += distill_val
+            ep_task += task_val
+            ep_lambda += float(effective_lambda.mean()) if torch.is_tensor(effective_lambda) else float(effective_lambda)
+            ep_batches += 1
+            ep_teacher_batches += 1 if has_teacher else 0
 
             del hidden, teacher_ids, teacher_probs, qead_weights, valid_teacher
             del effective_lambda, weight_sums, per_token_kld
@@ -438,10 +448,21 @@ def main():
               f"time: {epoch_m}m {epoch_s:02d}s  "
               f"(compute {t_compute / 60:.1f}m | val+select {t_val / 60:.1f}m | data wait {t_data / 60:.1f}m)  "
               f"best_val_loss: {best_val_loss:.4f}")
+        denom = max(ep_batches, 1)
+        ep_total_m = ep_total / denom
+        ep_distill_m = ep_distill / denom
+        ep_task_m = ep_task / denom
+        ep_lambda_m = ep_lambda / denom
+        teacher_frac = ep_teacher_batches / denom
+        print(f"  KD signal: total={ep_total_m:.4f}  distill={ep_distill_m:.4f}  task={ep_task_m:.4f}  "
+              f"skew_lambda={ep_lambda_m:.3f}  teacher_batches={teacher_frac:.0%}")
         print()
         runlog.event("epoch_done", epoch=epoch + 1, secs=int(epoch_elapsed),
                      compute_min=round(t_compute / 60, 1), val_min=round(t_val / 60, 1),
-                     data_wait_min=round(t_data / 60, 1), best_val_loss=round(best_val_loss, 4))
+                     data_wait_min=round(t_data / 60, 1), best_val_loss=round(best_val_loss, 4),
+                     train_total=round(ep_total_m, 4), train_distill=round(ep_distill_m, 4),
+                     train_task=round(ep_task_m, 4), skew_lambda_mean=round(ep_lambda_m, 3),
+                     teacher_signal_frac=round(teacher_frac, 3))
 
     student.save(str(output_dir / "final_last"))
     print(f"Last-epoch (fully-trained) checkpoint saved at outputs/final_last for evaluation.")
