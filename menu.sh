@@ -65,6 +65,8 @@ show_menu() {
     echo "  3) Reset teacher cache (delete all OR failed-only)"
     echo "  4) Rescore failed cache        (recover harness-fixed entries, CPU-only)"
     echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
+    echo "  6) Build FULL-DIST cache       (R1 rescores its own traces, full top-20 logits, GPU)"
+    echo "  7) Free disk                   (delete redundant checkpoint backups)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -321,6 +323,13 @@ diff_pass = Counter()
 diff_fail = Counter()
 diff_fail_causes = {}
 
+causes_by_idx = {}
+try:
+    with open('outputs/eval/diagnostics/failure_causes.json') as fh:
+        causes_by_idx = json.load(fh).get('per_problem', {})
+except Exception:
+    pass
+
 for f in files:
     idx = int(os.path.basename(f).replace('.json', ''))
     diff = difficulties.get(idx, "?")
@@ -336,7 +345,11 @@ for f in files:
             else:
                 diff_fail[diff] += 1
                 fc = re.search(rb'"fail_cause":\s*"([^"]+)"', tail)
-                cause = fc.group(1).decode() if fc else "unknown"
+                if fc:
+                    cause = fc.group(1).decode()
+                else:
+                    info = causes_by_idx.get(str(idx))
+                    cause = info.get("dominant", "undiagnosed") if info else "undiagnosed (run option 5)"
                 diff_fail_causes.setdefault(diff, Counter())[cause] += 1
         else:
             diff_fail[diff] += 1
@@ -407,13 +420,22 @@ while true; do
             echo ""
             echo -e "  ${BOLD}Teacher cache mode${NC} (the only question)"
             echo -e "     1  build/refresh missing entries first with the R1 teacher  (slow — regenerates every missing/failed problem)"
-            echo -e "     ${GREEN}2${NC}  offline: train NOW on the current passing cache only (exact control run repro, n_train 1615)"
+            echo -e "     ${GREEN}2${NC}  offline: train NOW on the current passing cache only (exact control run repro)"
+            echo -e "     3  offline on the FULL-DIST cache (R1-rescored R1 traces — build it with option 6 first)"
             echo ""
             echo -n "  cache mode [default: 2]: "
             read -r cache_mode
             TRAIN_FLAGS="--max-samples $NS"
             if [ "$cache_mode" = "1" ]; then
                 echo -e "  ${GREEN}→ Cache build/refresh with R1 teacher will run before training.${NC}"
+            elif [ "$cache_mode" = "3" ]; then
+                if [ ! -d cache/teacher_logprobs_r1_full ]; then
+                    echo -e "  ${RED}Full-distribution cache not found — run option 6 first.${NC}"
+                    read -rp "Press Enter to return to menu..."
+                    continue
+                fi
+                TRAIN_FLAGS="$TRAIN_FLAGS --offline --cache-dir cache/teacher_logprobs_r1_full"
+                echo -e "  ${YELLOW}→ OFFLINE on full-distribution cache: R1's own full top-20 logits on its traces.${NC}"
             else
                 TRAIN_FLAGS="$TRAIN_FLAGS --offline"
                 echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
@@ -583,6 +605,48 @@ PYEOF
             run_cmd_noprompt "sudo docker compose run --rm compare_eval python scripts/check_cache_prompts.py"
             echo ""
             run_cmd "sudo docker compose run --rm compare_eval python scripts/analyze_failures.py"
+            ;;
+        6)
+            header
+            echo -e "  ${BOLD}Build FULL-DISTRIBUTION cache${NC} (pure R1 knowledge distillation)"
+            echo ""
+            echo -e "  The R1 teacher rescores its OWN traces via one teacher-forced pass at the"
+            echo -e "  student's token positions (shared vocab table), recovering the FULL top-20"
+            echo -e "  distribution everywhere (37.9% of current positions are one-hot from top-p truncation)."
+            echo -e "  Source: cache/teacher_logprobs_coder15b  ->  cache/teacher_logprobs_r1_full"
+            echo ""
+            free_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+            if [ "$free_gb" -lt 12 ]; then
+                echo -e "  ${RED}Only ${free_gb}GB free — need ~12GB for the new cache. Run option 7 first.${NC}"
+                echo ""
+                read -rp "Press Enter to return to menu..."
+                continue
+            fi
+            keep_sudo_alive
+            run_cmd "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/teacher_logprobs_coder15b --dst cache/teacher_logprobs_r1_full --max-model-len 32768 --gpu-mem 0.90"
+            stop_sudo_alive
+            ;;
+        7)
+            header
+            echo -e "  ${BOLD}Free disk${NC} — redundant checkpoint backups:"
+            echo ""
+            for d in outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy; do
+                [ -d "$d" ] && echo "    $(du -sh "$d" 2>/dev/null)"
+            done
+            echo ""
+            echo -e "  ${CYAN}KEPT: outputs/final_r1_control (the 39/228 checkpoint, byte-identical to outputs/final)"
+            echo -e "        outputs/final_last_29pct_bak (R1-era model, pending re-eval)${NC}"
+            echo ""
+            echo -n "  Delete the listed dirs? (yes/n): "
+            read -r ans
+            if [ "$ans" = "yes" ]; then
+                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy
+                echo -e "  ${GREEN}✓ Deleted. Free now: $(df -h / | tail -1 | awk '{print $4}')${NC}"
+            else
+                echo "  Cancelled."
+            fi
+            echo ""
+            read -rp "Press Enter to return to menu..."
             ;;
         q|Q)
             echo -e "${NC}Bye."

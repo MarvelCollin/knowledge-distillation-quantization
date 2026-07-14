@@ -279,7 +279,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    max_new_tokens: int, device, is_teacher: bool = False,
                    dataset_name: str = "", num_samples: int = 1,
                    temperature: float = 0.7, top_p: float = 0.95,
-                   k: int = 1, difficulty: str = "all", seed: int = 1234) -> dict:
+                   k: int = 1, difficulty: str = "all", seed: int = 1234,
+                   think_ratio: float = 0.75) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -374,7 +375,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 else:
                     chunk_grid = budget_forced_generate(
                         llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
-                        seed=seed,
+                        think_ratio=think_ratio, seed=seed,
                     )
                 for off, row in enumerate(chunk_grid):
                     gen_grid[chunk_start + off] = row
@@ -609,6 +610,8 @@ def main() -> None:
     parser.add_argument("--skip-teacher", action="store_true",
                         help="Skip teacher evaluation to save time (~1 min/problem)")
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--think-ratio", type=float, default=0.75,
+                        help="Fraction of the token budget for the think phase of budget-forced student decoding.")
     parser.add_argument("--num-samples", type=int, default=1,
                         help="Samples per problem for pass@k (default: 1 = greedy)")
     parser.add_argument("--temperature", type=float, default=0.6)
@@ -651,7 +654,7 @@ def main() -> None:
         problems, max_new_tokens, device, is_teacher=False,
         dataset_name=dataset_name,
         num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-        difficulty=args.difficulty, seed=args.seed,
+        difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
     ))
 
     distilled_path = args.distilled
@@ -669,14 +672,16 @@ def main() -> None:
             problems, max_new_tokens, device, is_teacher=False,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-            difficulty=args.difficulty, seed=args.seed,
+            difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
 
     if not args.skip_teacher:
+        teacher_label = ("Teacher (R1-Distill-Qwen-7B)" if "r1" in teacher_path.lower()
+                         else "Teacher (OpenCodeReasoning-Nemotron-7B)")
         summaries.append(evaluate_model(
-            "Teacher (OpenCodeReasoning-Nemotron-7B)", teacher_path,
+            teacher_label, teacher_path,
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
