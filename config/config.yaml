@@ -23,8 +23,8 @@ teacher:
   max_num_batched_tokens: 4096
   max_num_seqs: 16
   cache_chunk_size: 16
-  rejection_samples: 0
-  rejection_wave: 0
+  rejection_samples: 4
+  rejection_wave: 2
   rejection_temperature: 1.0
   rejection_top_p: 0.95
 training:
