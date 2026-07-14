@@ -442,8 +442,6 @@ def run_test_cases(code: str, test_cases: list, timeout: float = 5.0) -> dict:
 
 
 def failing_cases(result: dict, limit: int = 3) -> list:
-    """Pull the first `limit` failing (category, error, assertion) triples from a
-    run_test_cases result, de-duplicated by error message so the report stays short."""
     out = []
     seen = set()
     details = result.get("details", [])
@@ -465,13 +463,6 @@ def failing_cases(result: dict, limit: int = 3) -> list:
 
 
 def write_failure_report(path, title: str, entries: list) -> None:
-    """Write a human-readable Markdown report of per-problem outcomes for debugging.
-
-    entries: list of dicts, each with:
-      header (str), solved (bool), note (str, optional), code (str, optional),
-      fails (list[(category, error)], optional)
-    Solved problems get a one-line ✓; failed problems show the generated code and
-    the first few distinct failing test cases so the root cause is visible."""
     n_solved = sum(1 for e in entries if e.get("solved"))
     lines = [
         f"# {title}",

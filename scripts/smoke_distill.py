@@ -1,14 +1,3 @@
-"""Smoke test for distillation loss with entropy focus.
-
-Validates:
-1. entropy_focus_weights correctly up-weights high-entropy teacher tokens
-2. Loss values are numerically stable across entropy levels
-3. Gradients flow correctly and focus on high-entropy positions
-4. Temperature scaling effect on peaked teacher distributions
-5. Edge cases: all-zero, single-token, uniform teachers
-6. build_teacher_topk produces valid distributions at different temperatures
-7. End-to-end: chunked backward with entropy focus
-"""
 import sys
 import math
 from pathlib import Path

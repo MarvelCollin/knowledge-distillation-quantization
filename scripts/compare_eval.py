@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Three-way evaluation: original student | teacher | distilled student.
-Uses the LeetCodeDataset *test* split — never seen during training.
-
-Usage (inside Docker):
-    python scripts/compare_eval.py
-    python scripts/compare_eval.py --distilled outputs/final
-    python scripts/compare_eval.py --num-problems 30 --skip-teacher
-"""
 import sys
 from pathlib import Path
 
@@ -146,14 +137,11 @@ def _difficulty_breakdown(results: list, k: int = 5) -> list:
 
 
 def _dump_failure_report(label: str, results: list) -> None:
-    """Write a readable Markdown breakdown of every problem (code + failing cases for
-    the misses) to outputs/eval/details/<label>.md for root-cause debugging."""
     entries = []
     for r in results:
         diff = (r.get("difficulty") or "?")
         np_, ns = r.get("num_passing", int(r["solved"])), r.get("num_samples", 1)
         header = f"Problem {r['idx']}  [{diff}]  —  {np_}/{ns} samples passed"
-        # pick a representative failing sample (first unsolved), else first sample
         samples = r.get("samples") or [r]
         rep = next((s for s in samples if not s.get("solved")), samples[0])
         note = None

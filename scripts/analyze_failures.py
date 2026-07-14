@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Bucket the failing teacher trajectories by cause; saves to outputs/eval/diagnostics/failure_causes.{txt,json}."""
 import json
 import sys
 import time

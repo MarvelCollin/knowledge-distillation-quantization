@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Report how many cached teacher prompts match the current builder; saves to outputs/eval/diagnostics/cache_prompts.txt."""
 import json
 import sys
 import time
