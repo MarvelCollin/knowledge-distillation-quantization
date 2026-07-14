@@ -24,13 +24,11 @@ from transformers.optimization import Adafactor
 from src.data.batching import FixedBatchSampler, make_pad_collate, pack_by_budget, seed_worker
 from src.data.dataset import create_datasets
 from src.data.problems import build_user_content, load_problems
-from src.data.teacher_cache import load_cached
-from src.distillation.loss import (
-    build_teacher_topk,
-    compute_loss_chunked_backward,
-)
+from src.distillation.loss import compute_loss_chunked_backward
+from src.distillation.teacher_topk import preload_teacher_topk, scatter_teacher_topk
 from src.distillation.qead import fused_qead_kld_pass, teacher_confidence_weights, entropy_focus_weights
 from src.student.model import StudentModel
+from src.teacher.cache_builder import precompute_and_cache
 from src.teacher.local_teacher import LocalTeacherModel
 from src.utils.runlog import RunLog, eta_str, show_progress_bars
 from src.config import load_config
@@ -137,8 +135,8 @@ def main():
         raw_difficulties = [p.get("difficulty", "") for p in raw_problems]
         local_teacher = LocalTeacherModel.from_config(config, student_tokenizer)
         chunk_size = config["teacher"].get("cache_chunk_size", 64)
-        local_teacher.precompute_and_cache(
-            raw_prompts, cache_dir,
+        precompute_and_cache(
+            local_teacher, raw_prompts, cache_dir,
             test_cases_per_prompt=raw_tests,
             difficulty_per_prompt=raw_difficulties,
             chunk_size=chunk_size,
@@ -267,25 +265,8 @@ def main():
     max_grad_norm = config["training"]["max_grad_norm"]
     eval_steps = config["training"]["eval_steps"]
 
-    newest_json = max((f.stat().st_mtime for f in Path(cache_dir).glob("*.json")), default=0.0)
-    snap_path = Path(cache_dir) / f"topk_snapshot_v{vocab_size}_k{topk}_t{distill_temp}.pt"
-    teacher_topk = None
-    if snap_path.exists() and snap_path.stat().st_mtime >= newest_json:
-        snap = torch.load(snap_path)
-        if snap.get("indices") == list(train_dataset.original_indices):
-            teacher_topk = snap["topk"]
-            print(f"Loaded teacher top-k snapshot ({snap_path.name}).")
-    if teacher_topk is None:
-        teacher_topk = {}
-        for cache_idx in train_dataset.original_indices:
-            cached = load_cached(cache_dir, cache_idx)
-            if not cached or not cached.get("top_k_ids") or not cached.get("top_k_vals"):
-                continue
-            teacher_topk[cache_idx] = build_teacher_topk(
-                cached["top_k_ids"], cached["top_k_vals"],
-                vocab_size, topk, torch.device("cpu"), distill_temp,
-            )
-        torch.save({"indices": list(train_dataset.original_indices), "topk": teacher_topk}, snap_path)
+    teacher_topk = preload_teacher_topk(
+        cache_dir, train_dataset.original_indices, vocab_size, topk, distill_temp)
     topk_mb = sum(i.nbytes + p.nbytes for i, p in teacher_topk.values()) / 1024**2
     print(f"Preloaded teacher top-k for {len(teacher_topk)}/{n_train_samples} train samples ({topk_mb:.0f} MB CPU).")
 
@@ -340,23 +321,9 @@ def main():
             t_mark = time.time()
 
             seq_len = input_ids.size(1)
-            teacher_ids = torch.zeros(len(sample_idxs), seq_len, topk, dtype=torch.long, device=device)
-            teacher_probs = torch.zeros(len(sample_idxs), seq_len, topk, device=device)
-
-            for i in range(len(sample_idxs)):
-                local_idx = sample_idxs[i].item()
-                cache_idx = train_dataset.original_indices[local_idx]
-                entry = teacher_topk.get(cache_idx)
-                if entry is None:
-                    continue
-                ids_full, probs_full = entry
-                pl = prompt_lengths[i].item()
-                dist_start = pl - 1
-                aligned_len = min(ids_full.size(0), seq_len - dist_start)
-                if aligned_len <= 0:
-                    continue
-                teacher_ids[i, dist_start : dist_start + aligned_len] = ids_full[:aligned_len].to(device)
-                teacher_probs[i, dist_start : dist_start + aligned_len] = probs_full[:aligned_len].to(device)
+            teacher_ids, teacher_probs = scatter_teacher_topk(
+                teacher_topk, sample_idxs, prompt_lengths,
+                train_dataset.original_indices, seq_len, topk, device)
 
             hidden = student.forward_hidden(input_ids, attention_mask)
             lm_head_weight = student.lm_head_weight

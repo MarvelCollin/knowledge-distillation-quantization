@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 
 from src.config import load_config
 from src.teacher.local_teacher import LocalTeacherModel
+from src.teacher.rescorer import rescore_and_cache
 
 
 def main() -> None:
@@ -51,7 +52,7 @@ def main() -> None:
         max_num_seqs=None,
         enable_prefix_caching=False,
     )
-    teacher.rescore_and_cache(args.src, dst, chunk_size=args.chunk_size)
+    rescore_and_cache(teacher, args.src, dst, chunk_size=args.chunk_size)
     teacher.shutdown()
 
 
