@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 
 from src.config import load_config
-from src.data.dataset import load_problems
+from src.data.problems import load_problems
 from src.data.teacher_cache import fully_passed
 from src.evaluation.evaluator import run_test_cases
 from src.utils.reasoning import extract_code

@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import gc
 import json
 import math
-import re
 import time
 import torch
 import argparse
@@ -24,7 +23,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
-from datasets import load_dataset
 from tqdm import tqdm
 
 import matplotlib
@@ -34,7 +32,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 from src.config import load_config
-from src.data.dataset import _extract_test_cases
+from src.data.problems import load_test_problems
 from src.evaluation.evaluator import (
     run_test_cases,
     failing_cases,
@@ -59,40 +57,6 @@ FALLBACK_COLOR = "#888888"
 
 def _color(name: str) -> str:
     return next((c for k, c in COLORS.items() if name.startswith(k)), FALLBACK_COLOR)
-
-
-def load_test_problems(n: int, dataset_name: str, difficulty: str = "all") -> list:
-    # Accept one or several levels: "easy", "easy,medium", "easy+medium", "all".
-    allowed = {d.strip().lower() for d in difficulty.replace("+", ",").split(",") if d.strip()}
-    filter_on = bool(allowed) and "all" not in allowed
-    diff_label = f"{'+'.join(sorted(allowed))} " if filter_on else ""
-    print(f"Loading {n} {diff_label}problems from {dataset_name} test split (separate from training data)...")
-    raw = load_dataset(dataset_name, split="test")
-    problems = []
-    for item in raw:
-        if filter_on and (item.get("difficulty") or "").lower() not in allowed:
-            continue
-        entry_point = (item.get("entry_point") or "").strip()
-        # Strip class prefix like "Solution().method" → just the method name
-        ep_clean = re.search(r'(\w+)$', entry_point)
-        entry_point = ep_clean.group(1) if ep_clean else entry_point
-        test_str = item.get("test") or ""
-        cases = _extract_test_cases(test_str, entry_point) if test_str.strip() and entry_point else []
-        code = (item.get("response") or "").strip()
-        text = (item.get("problem_description") or "").strip()
-        if not cases or not text:
-            continue
-        problems.append({
-            "text": text,
-            "code": code,
-            "test_cases": cases,
-            "difficulty": (item.get("difficulty") or ""),
-            "entry_point": entry_point,
-        })
-        if len(problems) >= n:
-            break
-    print(f"  Loaded {len(problems)} problems.")
-    return problems
 
 
 def _cache_path(label: str) -> Path:

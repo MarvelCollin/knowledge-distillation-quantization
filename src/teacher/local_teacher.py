@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
+from src.data.problems import DIFFICULTY_ORDER
 from src.data.teacher_cache import PASSED_PATTERN, TOTAL_PATTERN, fully_passed, tail_counts, tail_fully_passed
 from src.evaluation.evaluator import failing_cases, run_test_cases
 from src.utils.gpu import gpu_used_gb
@@ -412,7 +413,7 @@ class LocalTeacherModel:
                     f"|  GPU {gpu_used_gb():.1f}GB"
                 )
                 all_diffs = sorted(set(list(chunk_diff_pass) + list(chunk_diff_fail)),
-                                   key=lambda d: {"Easy": 0, "Medium": 1, "Hard": 2}.get(d, 3))
+                                   key=lambda d: DIFFICULTY_ORDER.get(d, 3))
                 for d in all_diffs:
                     cp = chunk_diff_pass.get(d, 0)
                     cf = chunk_diff_fail.get(d, 0)

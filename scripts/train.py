@@ -21,7 +21,8 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from transformers.optimization import Adafactor
 
-from src.data.dataset import build_user_content, create_datasets, load_problems
+from src.data.dataset import create_datasets
+from src.data.problems import build_user_content, load_problems
 from src.data.teacher_cache import load_cached
 from src.distillation.loss import (
     build_teacher_topk,

@@ -10,7 +10,7 @@ import statistics as st
 from dotenv import load_dotenv
 
 from src.config import load_config
-from src.data.dataset import PROMPT_TEMPLATE, load_problems
+from src.data.problems import PROMPT_TEMPLATE, load_problems
 from src.teacher.local_teacher import LocalTeacherModel
 
 

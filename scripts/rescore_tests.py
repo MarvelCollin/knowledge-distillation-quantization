@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config
-from src.data.dataset import load_problems
+from src.data.problems import load_problems
 from src.data.teacher_cache import rescore_failed_cache
 
 

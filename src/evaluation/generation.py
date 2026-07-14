@@ -1,4 +1,4 @@
-from src.data.dataset import PROMPT_TEMPLATE
+from src.data.problems import PROMPT_TEMPLATE
 from src.evaluation.evaluator import extract_signature
 from src.utils.reasoning import (
     SYSTEM_PROMPT,

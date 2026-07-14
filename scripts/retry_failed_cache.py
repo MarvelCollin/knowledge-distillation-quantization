@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
 from src.config import load_config
-from src.data.dataset import build_user_content, load_problems
+from src.data.problems import DIFFICULTY_ORDER, build_user_content, load_problems
 from src.data.teacher_cache import failed_cache_indices, rescore_failed_cache
 from src.evaluation.evaluator import run_test_cases
 from src.teacher.local_teacher import LocalTeacherModel
@@ -202,9 +202,8 @@ def main():
                 f"|  total {recovered}/{recovered + still_failed}  "
                 f"|  ETA {eta_str(eta_sec)}"
             )
-            order = {"Easy": 0, "Medium": 1, "Hard": 2}
             for d in sorted(set(list(chunk_diff_r) + list(chunk_diff_s)),
-                           key=lambda d: order.get(d, 3)):
+                           key=lambda d: DIFFICULTY_ORDER.get(d, 3)):
                 cr = chunk_diff_r.get(d, 0)
                 cs = chunk_diff_s.get(d, 0)
                 tr = diff_recovered.get(d, 0)
@@ -252,8 +251,7 @@ def main():
           f"recovered {recovered}/{len(failed)} previously-failed entries.")
     print(f"Still failed: {still_failed}")
     print()
-    order = {"Easy": 0, "Medium": 1, "Hard": 2}
-    all_diffs = sorted(set(list(diff_recovered) + list(diff_still)), key=lambda d: order.get(d, 3))
+    all_diffs = sorted(set(list(diff_recovered) + list(diff_still)), key=lambda d: DIFFICULTY_ORDER.get(d, 3))
     print(f"  {'Difficulty':<10} {'Recovered':>10} {'Still fail':>10}")
     print(f"  {'─'*34}")
     for d in all_diffs:

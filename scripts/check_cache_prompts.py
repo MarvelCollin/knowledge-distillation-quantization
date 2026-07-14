@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 
 from src.config import load_config
-from src.data.dataset import build_user_content, load_problems
+from src.data.problems import build_user_content, load_problems
 from src.data.teacher_cache import fully_passed
 
 REPORT_PATH = Path("outputs/eval/diagnostics/cache_prompts.txt")

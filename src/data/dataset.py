@@ -1,52 +1,9 @@
-import ast
-import json
-import re
-from pathlib import Path
-
 import torch
-from datasets import load_dataset
 from torch.utils.data import Dataset
 
+from src.data.problems import build_user_content, load_problems
 from src.data.teacher_cache import load_passing_responses, rescore_failed_cache
-from src.utils.reasoning import SYSTEM_PROMPT, build_signature_user_content
-from src.evaluation.evaluator import extract_signature
-
-PROMPT_TEMPLATE = (
-    "Write a solution in Python to solve the following problem.\n"
-    "Your answer must be a Python function only. Do not use any other language.\n\n"
-    "Problem: {text}\n\n"
-)
-
-
-def build_user_content(problem: dict) -> str:
-    base = PROMPT_TEMPLATE.format(text=problem["text"])
-    return build_signature_user_content(base, problem.get("signature", ""))
-
-
-def _extract_test_cases(test_str: str, entry_point: str) -> list:
-    if not test_str.strip() or not entry_point:
-        return []
-    tree = ast.parse(test_str)
-    check_func = next(
-        n for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name == "check"
-    )
-    other_top_level = [n for n in tree.body if n is not check_func]
-    cases = []
-    for stmt in check_func.body:
-        single_check = ast.FunctionDef(
-            name="check",
-            args=check_func.args,
-            body=[stmt],
-            decorator_list=[],
-            returns=None,
-            type_comment=None,
-        )
-        module = ast.Module(body=other_top_level + [single_check], type_ignores=[])
-        ast.fix_missing_locations(module)
-        src = ast.unparse(module)
-        cases.append(src + f"\ncheck({entry_point})")
-    return cases
+from src.utils.reasoning import SYSTEM_PROMPT
 
 
 class CodingDataset(Dataset):
@@ -130,52 +87,6 @@ class CodingDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         return self._items[idx]
-
-
-def load_problems(config: dict) -> list:
-    dataset_name = config["data"]["dataset_name"]
-    max_samples = config["data"]["max_samples"]
-
-    cache_file = Path("cache") / f"problems_{dataset_name.replace('/', '_')}_{max_samples}.json"
-    src_files = [
-        Path(__file__),
-        Path(__file__).parents[1] / "utils" / "reasoning.py",
-        Path(__file__).parents[1] / "evaluation" / "evaluator.py",
-    ]
-    src_mtime = max(f.stat().st_mtime for f in src_files)
-    if cache_file.exists() and cache_file.stat().st_mtime >= src_mtime:
-        problems = json.loads(cache_file.read_text())
-        print(f"Loaded {len(problems)} problems from processed cache ({cache_file.name}).")
-        return problems
-
-    print(f"Loading {dataset_name}...")
-    raw = load_dataset(dataset_name, split="train")
-    raw = raw.select(range(min(max_samples, len(raw))))
-
-    problems = []
-    for item in raw:
-        entry_point = (item.get("entry_point") or "").strip()
-        ep_clean = re.search(r'(\w+)$', entry_point)
-        entry_point = ep_clean.group(1) if ep_clean else entry_point
-        test_cases = _extract_test_cases(item.get("test") or "", entry_point)
-        code = (item.get("response") or "").strip()
-        text = (item.get("problem_description") or "").strip()
-        if not test_cases or not code or not text:
-            continue
-        signature = extract_signature(test_cases[0], entry_point) if test_cases else ""
-        problems.append({
-            "text": text,
-            "code": code,
-            "test_cases": test_cases,
-            "entry_point": entry_point,
-            "signature": signature,
-            "difficulty": (item.get("difficulty") or "").strip(),
-        })
-
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(problems))
-    print(f"  Loaded {len(problems)} problems with test cases (processed cache written).")
-    return problems
 
 
 def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False) -> tuple:
