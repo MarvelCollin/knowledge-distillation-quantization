@@ -382,15 +382,14 @@ while true; do
             echo ""
             echo -e "  ${BOLD}Teacher cache mode${NC} (the only question)"
             echo -e "     1  build/refresh missing entries first with the R1 teacher  (slow — regenerates every missing/failed problem)"
-            echo -e "     ${GREEN}2${NC}  offline: train NOW on the current passing cache only (exact control run repro)"
-            echo -e "     3  offline on the FULL-DIST cache (R1-rescored R1 traces — build it with option 6 first)"
+            echo -e "     ${GREEN}2${NC}  offline: train on the full-distribution R1 cache (best top-20 logprobs)"
             echo ""
             echo -n "  cache mode [default: 2]: "
             read -r cache_mode
             TRAIN_FLAGS="--max-samples $NS"
             if [ "$cache_mode" = "1" ]; then
                 echo -e "  ${GREEN}→ Cache build/refresh with R1 teacher will run before training.${NC}"
-            elif [ "$cache_mode" = "3" ]; then
+            else
                 if [ ! -d cache/teacher_logprobs_r1_full ]; then
                     echo -e "  ${RED}Full-distribution cache not found — run option 6 first.${NC}"
                     read -rp "Press Enter to return to menu..."
@@ -398,9 +397,6 @@ while true; do
                 fi
                 TRAIN_FLAGS="$TRAIN_FLAGS --offline --cache-dir cache/teacher_logprobs_r1_full"
                 echo -e "  ${YELLOW}→ OFFLINE on full-distribution cache: R1's own full top-20 logits on its traces.${NC}"
-            else
-                TRAIN_FLAGS="$TRAIN_FLAGS --offline"
-                echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
             fi
             echo ""
             ensure_gpu_free || continue
