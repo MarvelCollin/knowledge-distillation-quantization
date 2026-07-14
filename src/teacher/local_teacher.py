@@ -31,6 +31,7 @@ class LocalTeacherModel:
         max_num_batched_tokens: int = None,
         kv_cache_dtype: str = "auto",
         max_num_seqs: int = None,
+        enable_prefix_caching: bool = True,
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -72,12 +73,13 @@ class LocalTeacherModel:
             trust_remote_code=True,
             enforce_eager=enforce_eager,
             kv_cache_dtype=kv_cache_dtype,
-            enable_prefix_caching=kv_cache_dtype == "auto",
+            enable_prefix_caching=enable_prefix_caching and kv_cache_dtype == "auto",
         )
         if max_num_seqs is not None:
             llm_kwargs["max_num_seqs"] = max_num_seqs
         if enable_chunked_prefill:
             llm_kwargs["enable_chunked_prefill"] = True
+            llm_kwargs["disable_async_output_proc"] = True
             if max_num_batched_tokens is not None:
                 llm_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         self.llm = LLM(**llm_kwargs)
@@ -577,14 +579,32 @@ class LocalTeacherModel:
                 token_prompts.append({"prompt_token_ids": full_ids})
                 metas.append((idx, d, len(p_ids)))
 
-            outputs = self.llm.generate(token_prompts, score_params, use_tqdm=False)
+            outputs = None
+            last_err = None
+            for attempt in (1, 2):
+                try:
+                    outputs = self.llm.generate(token_prompts, score_params, use_tqdm=False)
+                    break
+                except Exception as err:
+                    last_err = err
+                    print(f"  ⚠ rescore attempt {attempt} failed on idx {[m[0] for m in metas]}: {type(err).__name__}: {err}")
+            if outputs is None:
+                for idx, d, _ in metas:
+                    with open(dst / f"{idx}.json", "w") as fh:
+                        json.dump(d, fh)
+                    print(f"  ⚠ idx {idx}: original logprobs kept, rescore skipped for this entry")
+                raise RuntimeError(f"engine unhealthy after retry, restart resumes past idx {metas[-1][0]}") from last_err
 
             for (idx, d, prompt_len), out in zip(metas, outputs):
-                result = self._rescore_one(out.prompt_token_ids, out.prompt_logprobs or [], prompt_len)
-                payload = {"prompt": d["prompt"], "max_tokens": d.get("max_tokens", self.max_tokens), **result}
-                if d.get("test_total") is not None:
-                    payload["test_passed"] = d.get("test_passed")
-                    payload["test_total"] = d.get("test_total")
+                try:
+                    result = self._rescore_one(out.prompt_token_ids, out.prompt_logprobs or [], prompt_len)
+                    payload = {"prompt": d["prompt"], "max_tokens": d.get("max_tokens", self.max_tokens), **result}
+                    if d.get("test_total") is not None:
+                        payload["test_passed"] = d.get("test_passed")
+                        payload["test_total"] = d.get("test_total")
+                except Exception as err:
+                    print(f"  ⚠ idx {idx}: extraction failed ({type(err).__name__}: {err}), original logprobs kept")
+                    payload = d
                 with open(dst / f"{idx}.json", "w") as fh:
                     json.dump(payload, fh)
                 dname = difficulties.get(idx, "?")

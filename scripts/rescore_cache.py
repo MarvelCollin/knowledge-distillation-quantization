@@ -51,6 +51,7 @@ def main() -> None:
         enforce_eager=True,
         enable_chunked_prefill=True,
         max_num_batched_tokens=args.prefill_chunk,
+        enable_prefix_caching=False,
     )
     teacher.rescore_and_cache(args.src, dst, chunk_size=args.chunk_size)
     teacher.shutdown()

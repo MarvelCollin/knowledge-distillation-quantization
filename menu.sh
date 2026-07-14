@@ -114,6 +114,23 @@ stop_sudo_alive() {
     SUDO_KEEPALIVE_PID=""
 }
 
+ensure_gpu_free() {
+    local running
+    running=$(sudo docker ps --filter name=knowledge-distillation-quantization --format '{{.Names}}  ({{.Status}})')
+    [ -z "$running" ] && return 0
+    echo -e "  ${YELLOW}GPU is held by a running pipeline container:${NC}"
+    echo "    $running"
+    echo -n "  Stop it and continue? (yes/n): "
+    read -r gpu_ans
+    if [ "$gpu_ans" = "yes" ]; then
+        sudo docker ps -q --filter name=knowledge-distillation-quantization | xargs -r sudo docker stop >/dev/null
+        echo -e "  ${GREEN}✓ GPU cleared.${NC}"
+        return 0
+    fi
+    echo -e "  Keeping the running job — returning to menu."
+    return 1
+}
+
 # Fixed compare-eval parameters — no prompts, always full 3-way paper-grade run.
 # Sets: CMP_SKIP_FLAG, CMP_NP, CMP_DIFFICULTY, COMPARE_AFTER
 set_fixed_compare_params() {
@@ -177,6 +194,8 @@ run_compare_eval() {
     header
     echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
     echo ""
+    ensure_gpu_free || return
+
     set_fixed_compare_params
     echo ""
     run_compare_with_params
@@ -374,6 +393,7 @@ while true; do
                 echo -e "  ${YELLOW}→ OFFLINE: no teacher generation; training uses existing passing cache as-is.${NC}"
             fi
             echo ""
+            ensure_gpu_free || continue
             keep_sudo_alive
             run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py $TRAIN_FLAGS"
             stop_sudo_alive
@@ -506,11 +526,13 @@ PYEOF
                     stop_sudo_alive
                     ;;
                 2)
+                    ensure_gpu_free || continue
                     keep_sudo_alive
                     run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 3 --no-rescore"
                     stop_sudo_alive
                     ;;
                 3)
+                    ensure_gpu_free || continue
                     keep_sudo_alive
                     run_cmd "sudo docker compose run --rm train python scripts/retry_failed_cache.py --attempts 5 --no-rescore"
                     stop_sudo_alive
@@ -555,6 +577,7 @@ PYEOF
                 read -rp "Press Enter to return to menu..."
                 continue
             fi
+            ensure_gpu_free || continue
             keep_sudo_alive
             run_cmd "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/teacher_logprobs_coder15b --dst cache/teacher_logprobs_r1_full --max-model-len 32768 --gpu-mem 0.80 --chunk-size 1"
             stop_sudo_alive
