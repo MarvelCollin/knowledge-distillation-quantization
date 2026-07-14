@@ -104,8 +104,6 @@ def _model_fingerprint(model_path: str) -> str:
 
 _FAILURE_CATEGORIES = ("syntax_error", "wrong_answer", "runtime_error", "missing_function", "timeout")
 
-_DECODE_DEFAULTS = {"think_ratio": 0.5, "repetition_penalty": 1.05}
-
 
 def _pass_at_k(n: int, c: int, k: int) -> float:
     if n - c < k:
@@ -250,7 +248,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
         "model_fingerprint": _model_fingerprint(model_path),
     }
     cached = _load_intermediate(label, dataset_name)
-    if cached and all(cached.get(key, _DECODE_DEFAULTS.get(key)) == val for key, val in cache_key.items()):
+    if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
         return cached
 
