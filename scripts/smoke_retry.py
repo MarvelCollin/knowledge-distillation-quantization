@@ -17,35 +17,7 @@ from src.data.problems import build_user_content, load_problems
 from src.data.teacher_cache import failed_cache_indices
 from src.evaluation.evaluator import run_test_cases
 from src.teacher.local_teacher import LocalTeacherModel
-from src.utils.reasoning import extract_code
-
-
-RETRY_SYSTEM_PROMPT = (
-    "You are a reasoning coding assistant. First think step by step inside <think>...</think>. "
-    "After </think>, output a single standalone Python function inside ```python ... ```. "
-    "Do NOT wrap it in a class. Do NOT use class Solution. Output only the function."
-)
-
-RETRY_PROMPT_TEMPLATE = (
-    "Write a solution in Python to solve the following problem.\n"
-    "Your answer must be a standalone Python function (not a class method).\n"
-    "Consider edge cases: empty inputs, single elements, negative values, large inputs.\n"
-    "Read the constraints carefully.\n\n"
-    "Problem: {text}\n\n"
-)
-
-
-def _build_retry_prompt(problem, tokenizer):
-    from src.utils.reasoning import build_signature_user_content
-    base = RETRY_PROMPT_TEMPLATE.format(text=problem["text"])
-    content = build_signature_user_content(base, problem.get("signature", ""))
-    messages = [
-        {"role": "system", "content": RETRY_SYSTEM_PROMPT},
-        {"role": "user", "content": content},
-    ]
-    return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+from src.utils.reasoning import build_retry_prompt, extract_code
 
 
 def main():
@@ -104,7 +76,7 @@ def main():
         repetition_penalty=1.05,
     )
 
-    prompts = [_build_retry_prompt(problems[i], teacher.tokenizer) for i in smoke_indices]
+    prompts = [build_retry_prompt(problems[i], teacher.tokenizer) for i in smoke_indices]
     prompt_lens = [len(teacher.tokenizer.encode(p)) for p in prompts]
     print(f"  prompt token lengths: {prompt_lens}")
 

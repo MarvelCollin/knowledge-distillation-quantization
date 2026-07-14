@@ -1,3 +1,6 @@
+import torch
+from transformers import StoppingCriteria, StoppingCriteriaList
+
 from src.data.problems import PROMPT_TEMPLATE
 from src.evaluation.evaluator import extract_signature
 from src.utils.reasoning import (
@@ -6,8 +9,78 @@ from src.utils.reasoning import (
     build_signature_user_content,
     extract_code,
     extract_fn_name,
-    generate_with_thinking_cap,
 )
+
+THINK_BUDGET_RATIO = 0.75
+
+
+def _build_code_primer(has_think_end: bool, signature: str) -> str:
+    head = "\n```python\n" if has_think_end else "\n</think>\n```python\n"
+    if signature:
+        return f"{head}{signature}\n"
+    return head
+
+
+class _StopOnSequence(StoppingCriteria):
+    def __init__(self, sequence_ids: list, prompt_len: int):
+        self.sequence_ids = sequence_ids
+        self.prompt_len = prompt_len
+        self.seq_len = len(sequence_ids)
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        if input_ids.shape[1] - self.prompt_len < self.seq_len:
+            return False
+        tail = input_ids[0, -self.seq_len:].tolist()
+        return tail == self.sequence_ids
+
+
+def generate_with_thinking_cap(model, tokenizer, prompt_text: str,
+                                max_new_tokens: int,
+                                code_primer_signature: str = "",
+                                **gen_kwargs) -> tuple[str, bool]:
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+    prompt_len = inputs["input_ids"].shape[1]
+    eos_id = tokenizer.eos_token_id
+
+    think_budget = max(1, int(max_new_tokens * THINK_BUDGET_RATIO))
+    code_budget = max(1, max_new_tokens - think_budget)
+
+    think_end_ids = tokenizer.encode(THINK_END_TAG, add_special_tokens=False)
+    stop = StoppingCriteriaList([_StopOnSequence(think_end_ids, prompt_len)])
+
+    with torch.no_grad():
+        phase1 = model.generate(
+            **inputs,
+            max_new_tokens=think_budget,
+            pad_token_id=eos_id,
+            stopping_criteria=stop,
+            **gen_kwargs,
+        )
+
+    phase1_gen = phase1[0][prompt_len:]
+    if phase1_gen.numel() > 0 and phase1_gen[-1].item() == eos_id:
+        return tokenizer.decode(phase1_gen, skip_special_tokens=True), False
+
+    phase1_text = tokenizer.decode(phase1_gen, skip_special_tokens=False)
+    primer = _build_code_primer(THINK_END_TAG in phase1_text, code_primer_signature)
+    suffix_ids = tokenizer.encode(primer, add_special_tokens=False, return_tensors="pt").to(model.device)
+    primed = torch.cat([phase1, suffix_ids], dim=1)
+    primed_len = primed.shape[1]
+    attn = torch.ones_like(primed)
+
+    with torch.no_grad():
+        phase2 = model.generate(
+            primed,
+            attention_mask=attn,
+            max_new_tokens=code_budget,
+            pad_token_id=eos_id,
+            **gen_kwargs,
+        )
+
+    gen_tokens = phase2[0][prompt_len:]
+    truncated = (phase2.shape[1] - primed_len) >= code_budget
+    raw = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+    return raw, truncated
 
 
 def build_student_prompt(tokenizer, prompt, test_cases):
@@ -57,8 +130,6 @@ def build_eval_prompts(problems, tokenizer):
 
 def free_generate(llm, prompts, num_samples,
                   temperature, top_p, max_new_tokens, seed=1234):
-    """Free generation matching teacher cache build: no budget forcing,
-    model decides when to stop thinking and write code naturally."""
     from vllm import SamplingParams
 
     do_sample = num_samples > 1
