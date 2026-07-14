@@ -528,13 +528,36 @@ class LocalTeacherModel:
 
         files = sorted(src.glob("*.json"), key=lambda p: int(p.stem) if p.stem.isdigit() else 1 << 30)
         pending = []
+        resumed = 0
         for f in files:
+            if (dst / f.name).exists():
+                resumed += 1
+                continue
             d = json.loads(f.read_text())
             if d.get("prompt") and d.get("text") and d.get("tokens"):
                 pending.append((int(f.stem), d))
 
-        print(f"Rescoring {len(pending)} cached trajectories: {src_cache_dir} -> {dst_cache_dir}")
+        print(f"Rescoring {len(pending)} cached trajectories: {src_cache_dir} -> {dst_cache_dir}"
+              + (f"  (resuming — {resumed} already done)" if resumed else ""))
         print(f"  prompt_logprobs={self.top_logprobs}  temperature=1.0  top_p=1.0  (true teacher distribution)")
+
+        difficulties = {}
+        plist = sorted(Path("cache").glob("problems_*.json"))
+        if plist:
+            probs = json.loads(plist[0].read_text())
+            difficulties = {i: (p.get("difficulty") or "?") for i, p in enumerate(probs)}
+        pass_pat = re.compile(rb'"test_passed":\s*(\d+)')
+        total_pat = re.compile(rb'"test_total":\s*(\d+)')
+        diff_pass, diff_done = Counter(), Counter()
+        for f in dst.glob("*.json"):
+            with open(f, "rb") as fh:
+                fh.seek(max(0, f.stat().st_size - 300))
+                tail_b = fh.read()
+            a, b = pass_pat.search(tail_b), total_pat.search(tail_b)
+            dname = difficulties.get(int(f.stem), "?")
+            diff_done[dname] += 1
+            if a and b and int(b.group(1)) > 0 and int(a.group(1)) == int(b.group(1)):
+                diff_pass[dname] += 1
 
         score_params = SamplingParams(
             temperature=1.0, top_p=1.0, max_tokens=1, prompt_logprobs=self.top_logprobs,
@@ -564,12 +587,20 @@ class LocalTeacherModel:
                     payload["test_total"] = d.get("test_total")
                 with open(dst / f"{idx}.json", "w") as fh:
                     json.dump(payload, fh)
+                dname = difficulties.get(idx, "?")
+                diff_done[dname] += 1
+                tp_, tt_ = payload.get("test_passed"), payload.get("test_total")
+                if tp_ is not None and tt_ and tp_ == tt_:
+                    diff_pass[dname] += 1
 
             done = min(chunk_start + chunk_size, len(pending))
             elapsed = time.time() - total_start
             eta = elapsed / done * (len(pending) - done)
             eta_m, eta_s = divmod(int(eta), 60)
-            print(f"  rescored {done}/{len(pending)}  ({elapsed / done:.2f}s/problem)  ETA {eta_m}m {eta_s:02d}s  GPU {gpu_used_gb():.1f}GB")
+            n_pass, n_done = sum(diff_pass.values()), sum(diff_done.values())
+            tally = "  ".join(f"{dn} {diff_pass[dn]}/{diff_done[dn]}" for dn in ("Easy", "Medium", "Hard"))
+            print(f"  rescored {done + resumed}/{len(pending) + resumed}  ({elapsed / done:.2f}s/problem)  ETA {eta_m}m {eta_s:02d}s  GPU {gpu_used_gb():.1f}GB")
+            print(f"    passing {n_pass}/{n_done} ({n_pass * 100 // max(n_done, 1)}%)  [{tally}]")
 
         print(f"\n  Rescore complete in {(time.time() - total_start) / 60:.1f} min -> {dst_cache_dir}")
 

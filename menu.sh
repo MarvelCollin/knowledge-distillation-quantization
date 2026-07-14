@@ -556,7 +556,7 @@ PYEOF
                 continue
             fi
             keep_sudo_alive
-            run_cmd "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/teacher_logprobs_coder15b --dst cache/teacher_logprobs_r1_full --max-model-len 32768 --gpu-mem 0.90"
+            run_cmd "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/teacher_logprobs_coder15b --dst cache/teacher_logprobs_r1_full --max-model-len 32768 --gpu-mem 0.80 --chunk-size 1"
             stop_sudo_alive
             ;;
         7)
