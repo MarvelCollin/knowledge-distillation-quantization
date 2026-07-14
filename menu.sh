@@ -66,7 +66,7 @@ show_menu() {
     echo "  4) Re-test failed cache        (re-run harness on failed entries, CPU-only)"
     echo "  5) Diagnose cache              (prompt-match + failure causes, CPU-only)"
     echo "  6) Build FULL-DIST cache       (R1 rescores its own traces, full top-20 logits, GPU)"
-    echo "  7) Free disk                   (delete redundant checkpoints and the retired ocr cache)"
+    echo "  7) Free disk                   (delete redundant checkpoint backups)"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -586,7 +586,7 @@ PYEOF
             header
             echo -e "  ${BOLD}Free disk${NC} — redundant checkpoint backups:"
             echo ""
-            for d in outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy cache/teacher_logprobs_ocr7b; do
+            for d in outputs/final outputs/final_last outputs/final_baseline_bak; do
                 [ -d "$d" ] && echo "    $(du -sh "$d" 2>/dev/null)"
             done
             echo ""
@@ -596,7 +596,7 @@ PYEOF
             echo -n "  Delete the listed dirs? (yes/n): "
             read -r ans
             if [ "$ans" = "yes" ]; then
-                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak outputs/final_ocr_entropy cache/teacher_logprobs_ocr7b
+                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak
                 echo -e "  ${GREEN}✓ Deleted. Free now: $(df -h / | tail -1 | awk '{print $4}')${NC}"
             else
                 echo "  Cancelled."
