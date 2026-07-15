@@ -92,7 +92,6 @@ class CodingDataset(Dataset):
 def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False) -> tuple:
     max_length = config["student"]["max_length"]
     train_ratio = config["data"]["train_ratio"]
-    max_trace_tokens = config["data"]["max_trace_tokens"]
 
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -117,7 +116,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
         student_resp_len = len(tokenizer(teacher_responses[i]["text"], add_special_tokens=False).input_ids)
         if student_resp_len != teacher_responses[i]["token_count"]:
             misaligned += 1
-        if prompt_len + student_resp_len + 1 <= max_length and student_resp_len <= max_trace_tokens:
+        if prompt_len + student_resp_len + 1 <= max_length:
             kept_indices.append(i)
             lengths_map[i] = prompt_len + student_resp_len + 1
 

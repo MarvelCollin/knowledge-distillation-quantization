@@ -3,7 +3,6 @@ data:
   max_samples: 2600
   teacher_cache_dir: cache/teacher_logprobs_r1_full
   train_ratio: 0.9
-  max_trace_tokens: 8192
 evaluation:
   max_new_tokens: 30720
   output_dir: outputs/eval
