@@ -627,7 +627,11 @@ PYEOF
             ensure_gpu_free || continue
             keep_sudo_alive
             [ -d outputs/final_offline_bak ] || sudo cp -r outputs/final outputs/final_offline_bak
-            sudo rm -rf cache/onpolicy_r1_gen cache/onpolicy_r1
+            if ls cache/onpolicy_r1/*.json cache/onpolicy_r1_gen/*.json >/dev/null 2>&1; then
+                echo -n "  Existing on-policy data found — (r)esume or (f)resh restart? [r]: "
+                read -r op_mode
+                [ "$op_mode" = "f" ] && sudo rm -rf cache/onpolicy_r1_gen cache/onpolicy_r1
+            fi
             if run_cmd_noprompt "sudo docker compose run --rm train python scripts/onpolicy_generate.py $OP_LIMIT_FLAG" \
                && run_cmd_noprompt "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/onpolicy_r1_gen --dst cache/onpolicy_r1 --max-model-len 32768 --gpu-mem 0.80 --chunk-size 1"; then
                 run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py --offline --onpolicy"
