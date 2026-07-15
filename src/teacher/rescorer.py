@@ -7,6 +7,17 @@ from src.data.teacher_cache import fully_passed, tail_counts
 from src.utils.gpu import gpu_used_gb
 
 
+def _json_complete(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            if fh.seek(0, 2) == 0:
+                return False
+            fh.seek(-1, 2)
+            return fh.read(1) in (b"}", b"\n")
+    except Exception:
+        return False
+
+
 def rescore_and_cache(teacher, src_cache_dir: str, dst_cache_dir: str, chunk_size: int = 8) -> None:
     from vllm import SamplingParams
 
@@ -18,7 +29,7 @@ def rescore_and_cache(teacher, src_cache_dir: str, dst_cache_dir: str, chunk_siz
     pending = []
     resumed = 0
     for f in files:
-        if (dst / f.name).exists():
+        if _json_complete(dst / f.name):
             resumed += 1
             continue
         d = json.loads(f.read_text())
