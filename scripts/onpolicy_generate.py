@@ -8,34 +8,36 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import gc
+import argparse
 
-import torch
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
 from src.config import load_config
 from src.data.dataset import train_split_indices
 from src.data.problems import build_user_content
-from src.teacher.local_teacher import LocalTeacherModel
-from src.teacher.rescorer import rescore_and_cache
-from src.utils.gpu import cleanup_vllm, wait_for_gpu_freed
 from src.utils.reasoning import SYSTEM_PROMPT
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Generate for only the first N train problems (smoke test).")
+    args = parser.parse_args()
+
     load_dotenv()
     config = load_config("config/config.yaml")
     op = config["onpolicy"]
     student_path = str(Path(config["training"]["output_dir"]) / "final")
-    onpolicy_dir = config["data"]["onpolicy_cache_dir"]
-    src_dir = Path(onpolicy_dir + "_gen")
+    src_dir = Path(config["data"]["onpolicy_cache_dir"] + "_gen")
     src_dir.mkdir(parents=True, exist_ok=True)
 
     student_tokenizer = AutoTokenizer.from_pretrained(
         config["student"]["model_name"], trust_remote_code=True)
     problems, train_indices = train_split_indices(
         config, student_tokenizer, config["data"]["teacher_cache_dir"])
+    if args.limit:
+        train_indices = train_indices[:args.limit]
 
     prompts = []
     for i in train_indices:
@@ -67,16 +69,10 @@ def main():
         }
         (src_dir / f"{i}.json").write_text(json.dumps(payload))
         written += 1
+
     print(f"Generated {written} on-policy student sequences -> {src_dir}")
-
-    cleanup_vllm(llm)
-    gc.collect()
-    torch.cuda.empty_cache()
-    wait_for_gpu_freed(20.0)
-
-    teacher = LocalTeacherModel.from_config(config, student_tokenizer)
-    rescore_and_cache(teacher, str(src_dir), onpolicy_dir, chunk_size=op["rescore_chunk_size"])
-    teacher.shutdown()
+    print(f"Next: python scripts/rescore_cache.py --src {src_dir} "
+          f"--dst {config['data']['onpolicy_cache_dir']} --max-model-len 32768 --gpu-mem 0.80 --chunk-size 1")
 
 
 if __name__ == "__main__":
