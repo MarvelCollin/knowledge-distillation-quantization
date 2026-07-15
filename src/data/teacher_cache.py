@@ -115,7 +115,7 @@ def load_cached(cache_dir: str, idx: int) -> dict | None:
     return clean_teacher_cache(data)
 
 
-def load_passing_responses(cache_dir: str, num_problems: int) -> dict:
+def load_passing_responses(cache_dir: str, num_problems: int, require_passing: bool = True) -> dict:
     cache_path = Path(cache_dir)
     passing = {}
     for i in range(num_problems):
@@ -123,7 +123,7 @@ def load_passing_responses(cache_dir: str, num_problems: int) -> dict:
         if not f.exists():
             continue
         d = json.loads(f.read_text())
-        if not fully_passed(d.get("test_passed"), d.get("test_total")):
+        if require_passing and not fully_passed(d.get("test_passed"), d.get("test_total")):
             continue
         d = clean_teacher_cache(d)
         tokens = d.get("tokens") or []

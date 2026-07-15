@@ -82,6 +82,10 @@ def main():
                         help="Override training.seed for multi-seed runs.")
     parser.add_argument("--cache-dir", default=None,
                         help="Override data.teacher_cache_dir.")
+    parser.add_argument("--onpolicy", action="store_true",
+                        help="On-policy GKD stage: train on student-generated sequences scored by the teacher.")
+    parser.add_argument("--init-from", default=None,
+                        help="Initialise the student from this checkpoint instead of the base model.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -122,7 +126,19 @@ def main():
     output_dir = Path(config["training"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    require_passing = True
+    if args.onpolicy:
+        require_passing = False
+        config["training"]["alpha"] = 1.0
+        if args.cache_dir is None:
+            config["data"]["teacher_cache_dir"] = config["data"]["onpolicy_cache_dir"]
+        if args.init_from is None:
+            args.init_from = str(output_dir / "final")
+
     cache_dir = config["data"]["teacher_cache_dir"]
+    if args.onpolicy and not any(Path(cache_dir).glob("[0-9]*.json")):
+        raise SystemExit(f"--onpolicy set but {cache_dir} has no generated sequences — "
+                         f"run scripts/onpolicy_generate.py first.")
 
     student_tokenizer = AutoTokenizer.from_pretrained(
         config["student"]["model_name"], trust_remote_code=True
@@ -153,10 +169,11 @@ def main():
     else:
         print("Offline mode: skipping teacher cache build. Using existing cache only.")
 
-    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir)
+    train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir,
+                                                 require_passing=require_passing)
 
     student = StudentModel(
-        model_name=config["student"]["model_name"],
+        model_name=args.init_from or config["student"]["model_name"],
         max_length=config["student"]["max_length"],
     )
     student.to(device)

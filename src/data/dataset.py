@@ -89,7 +89,8 @@ class CodingDataset(Dataset):
         return self._items[idx]
 
 
-def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False) -> tuple:
+def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False,
+                    require_passing: bool = True) -> tuple:
     max_length = config["student"]["max_length"]
     train_ratio = config["data"]["train_ratio"]
 
@@ -101,7 +102,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
         recovered, tested, total_failed = rescore_failed_cache(cache_dir, problems)
         print(f"  Rescored teacher cache (pure KD — re-tests labels only, trajectories untouched): "
               f"recovered {recovered}/{total_failed} previously-failed responses now passing.")
-    teacher_responses = load_passing_responses(cache_dir, len(problems))
+    teacher_responses = load_passing_responses(cache_dir, len(problems), require_passing)
 
     kept_indices = []
     lengths_map = {}
@@ -139,3 +140,8 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
                       teacher_responses, kept_indices[split:],
                       [lengths_map[i] for i in kept_indices[split:]]),
     )
+
+
+def train_split_indices(config: dict, tokenizer, cache_dir: str) -> tuple:
+    train_dataset, _ = create_datasets(config, tokenizer, cache_dir)
+    return load_problems(config), list(train_dataset.original_indices)
