@@ -60,6 +60,7 @@ show_menu() {
     echo -e "  ${BOLD}Training${NC}"
     echo "  1) Run training              (offline on R1 cache, then train, then compare)"
     echo "  2) Compare original | teacher | distilled + graph"
+    echo "  8) On-policy GKD round       (student generates, R1 scores, pure-KD fine-tune, compare)"
     echo ""
     echo -e "  ${BOLD}Cache${NC}"
     echo "  3) Reset teacher cache (delete all OR failed-only)"
@@ -609,6 +610,32 @@ PYEOF
             fi
             echo ""
             read -rp "Press Enter to return to menu..."
+            ;;
+        8)
+            header
+            echo -e "  ${BOLD}On-policy GKD round${NC} — student generates, R1 scores its tokens, pure-KD fine-tune"
+            echo ""
+            echo -e "  ${YELLOW}Overwrites outputs/final (first offline model saved to outputs/final_offline_bak).${NC}"
+            echo ""
+            echo -n "  Problems to generate [blank = all train, or N for a quick test]: "
+            read -r op_limit
+            OP_LIMIT_FLAG=""
+            [ -n "$op_limit" ] && OP_LIMIT_FLAG="--limit $op_limit"
+            echo ""
+            set_fixed_compare_params
+            echo ""
+            ensure_gpu_free || continue
+            keep_sudo_alive
+            [ -d outputs/final_offline_bak ] || sudo cp -r outputs/final outputs/final_offline_bak
+            sudo rm -rf cache/onpolicy_r1_gen cache/onpolicy_r1
+            if run_cmd_noprompt "sudo docker compose run --rm train python scripts/onpolicy_generate.py $OP_LIMIT_FLAG" \
+               && run_cmd_noprompt "sudo docker compose run --rm train python scripts/rescore_cache.py --src cache/onpolicy_r1_gen --dst cache/onpolicy_r1 --max-model-len 32768 --gpu-mem 0.80 --chunk-size 1"; then
+                run_training_then_optionally_compare "sudo docker compose run --rm train python scripts/train.py --offline --onpolicy"
+            else
+                echo -e "  ${RED}On-policy generation/scoring failed — skipping training.${NC}"
+                read -rp "Press Enter to return to menu..."
+            fi
+            stop_sudo_alive
             ;;
         q|Q)
             echo -e "${NC}Bye."
