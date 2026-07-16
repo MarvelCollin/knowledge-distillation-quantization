@@ -108,7 +108,7 @@ def generate_student_solution(student, prompt, test_cases, max_new_tokens,
     return raw, extract_code(raw)
 
 
-def build_eval_prompts(problems, tokenizer, budget_tokens=None):
+def build_eval_prompts(problems, tokenizer, budget_tokens=None, strict_naming=False):
     formatted = []
     signatures = []
     for prob in problems:
@@ -122,6 +122,11 @@ def build_eval_prompts(problems, tokenizer, budget_tokens=None):
             user_content += (f"\n\nYour entire output is capped at {budget_tokens} tokens. "
                              f"Keep your reasoning brief enough to finish the complete function "
                              f"well before the cap.")
+        if strict_naming:
+            user_content += ("\n\nIMPORTANT: throughout your code, refer to the function and its "
+                             "parameters by EXACTLY the names in the given signature. Never rename "
+                             "them or switch to snake_case, and define every helper or variable "
+                             "before you use it.")
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},

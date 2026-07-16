@@ -235,7 +235,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    temperature: float = 0.7, top_p: float = 0.95,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
                    think_ratio: float = 0.5, repetition_penalty: float = 1.05,
-                   budget_hint: bool = False) -> dict:
+                   budget_hint: bool = False, strict_naming: bool = False) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -251,6 +251,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
     }
     if budget_hint:
         cache_key["budget_hint"] = True
+    if strict_naming:
+        cache_key["strict_naming"] = True
     cached = _load_intermediate(label, dataset_name)
     if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
@@ -314,7 +316,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
             formatted_prompts, signatures = build_eval_prompts(
                 problems, tokenizer,
-                budget_tokens=max_new_tokens if budget_hint else None)
+                budget_tokens=max_new_tokens if budget_hint else None,
+                strict_naming=strict_naming)
 
             post_load = gpu_used_gb()
             print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
@@ -679,6 +682,9 @@ def main() -> None:
                         help="Sampling seed for reproducible pass@k (static models give identical results each run)")
     parser.add_argument("--budget-hint", action="store_true",
                         help="Tell models their token cap in the prompt so they finish before it.")
+    parser.add_argument("--strict-naming", action="store_true",
+                        help="Add an emphasized prompt instruction to keep signature names exact "
+                             "and define every symbol before use.")
     parser.add_argument("--verified", action="store_true",
                         help="Also report metrics on the verified subset (problems whose canonical "
                              "solutions pass all tests per outputs/eval/broken_tests.json).")
@@ -716,6 +722,7 @@ def main() -> None:
         num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
         difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
         repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+        strict_naming=args.strict_naming,
     ))
 
     distilled_path = args.distilled
@@ -735,6 +742,7 @@ def main() -> None:
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+            strict_naming=args.strict_naming,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
@@ -747,6 +755,7 @@ def main() -> None:
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+            strict_naming=args.strict_naming,
         ))
 
     out_dir = Path(config["evaluation"]["output_dir"])
