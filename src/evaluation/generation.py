@@ -108,7 +108,7 @@ def generate_student_solution(student, prompt, test_cases, max_new_tokens,
     return raw, extract_code(raw)
 
 
-def build_eval_prompts(problems, tokenizer):
+def build_eval_prompts(problems, tokenizer, budget_tokens=None):
     formatted = []
     signatures = []
     for prob in problems:
@@ -118,6 +118,10 @@ def build_eval_prompts(problems, tokenizer):
             extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
         )
         user_content = build_signature_user_content(prompt, signature)
+        if budget_tokens:
+            user_content += (f"\n\nYour entire output is capped at {budget_tokens} tokens. "
+                             f"Keep your reasoning brief enough to finish the complete function "
+                             f"well before the cap.")
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
