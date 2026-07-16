@@ -584,7 +584,7 @@ def _problem_diag(p: dict) -> dict:
     }
 
 
-def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
+def _write_compare_diagnostics(summaries: list, out_dir: Path, suffix: str = "") -> None:
     diag_dir = out_dir / "diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
 
@@ -610,7 +610,7 @@ def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
         row["teacher_reachable_miss"] = ts_ and not ds_
         rows.append(row)
 
-    jsonl_path = diag_dir / "compare_diag.jsonl"
+    jsonl_path = diag_dir / f"compare_diag{suffix}.jsonl"
     with jsonl_path.open("w") as fh:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
@@ -648,7 +648,7 @@ def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
     lines.append("=" * 64)
     report = "\n".join(lines)
     print("\n" + report)
-    (diag_dir / "compare_diag.txt").write_text(report + "\n")
+    (diag_dir / f"compare_diag{suffix}.txt").write_text(report + "\n")
 
 
 def main() -> None:
@@ -678,6 +678,9 @@ def main() -> None:
                         help="Graph output path (default: outputs/eval/comparison_<dataset>.png)")
     parser.add_argument("--seed", type=int, default=1234,
                         help="Sampling seed for reproducible pass@k (static models give identical results each run)")
+    parser.add_argument("--verified", action="store_true",
+                        help="Also report metrics on the verified subset (problems whose canonical "
+                             "solutions pass all tests per outputs/eval/broken_tests.json).")
     parser.add_argument("--fresh", action="store_true",
                         help="Ignore and clear cached per-model results, re-evaluating every model from scratch.")
     args = parser.parse_args()
@@ -751,6 +754,20 @@ def main() -> None:
     print(f"Full results → {results_json}")
 
     _write_compare_diagnostics(summaries, out_dir)
+
+    if args.verified:
+        broken_path = out_dir / "broken_tests.json"
+        if not broken_path.exists():
+            raise SystemExit(f"--verified needs {broken_path} — run scripts/verify_tests.py first.")
+        broken = {e["idx"] for e in json.loads(broken_path.read_text())}
+        verified_summaries = []
+        for s in summaries:
+            kept = [r for r in s["per_problem"] if r["idx"] not in broken]
+            verified_summaries.append(_finalise(f"{s['name']} [verified]", kept, s["dataset"], s["k"]))
+        verified_json = out_dir / "comparison_verified.json"
+        verified_json.write_text(json.dumps(verified_summaries, indent=2))
+        print(f"Verified subset ({len(broken)} broken-test problems excluded from all models) → {verified_json}")
+        _write_compare_diagnostics(verified_summaries, out_dir, suffix="_verified")
 
     if len(summaries) >= 2:
         out_png = Path(args.out) if args.out else out_dir / "comparison.png"
