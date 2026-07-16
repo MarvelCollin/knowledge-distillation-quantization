@@ -30,7 +30,7 @@ from src.evaluation.evaluator import (
     failing_cases,
     write_failure_report,
 )
-from src.evaluation.generation import build_eval_prompts, budget_forced_generate, free_generate
+from src.evaluation.generation import build_eval_prompts, budget_forced_generate
 from src.utils.gpu import cleanup_vllm, gpu_total_gb, gpu_used_gb, wait_for_gpu_freed
 from src.utils.reasoning import extract_code
 
@@ -234,7 +234,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    dataset_name: str = "", num_samples: int = 1,
                    temperature: float = 0.7, top_p: float = 0.95,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
-                   think_ratio: float = 0.5, repetition_penalty: float = 1.05) -> dict:
+                   think_ratio: float = 0.5, repetition_penalty: float = 1.05,
+                   budget_hint: bool = False) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -248,6 +249,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
         "repetition_penalty": repetition_penalty,
         "model_fingerprint": _model_fingerprint(model_path),
     }
+    if budget_hint:
+        cache_key["budget_hint"] = True
     cached = _load_intermediate(label, dataset_name)
     if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
@@ -309,13 +312,15 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 max_num_batched_tokens=2048,
             )
 
-            formatted_prompts, signatures = build_eval_prompts(problems, tokenizer)
+            formatted_prompts, signatures = build_eval_prompts(
+                problems, tokenizer,
+                budget_tokens=max_new_tokens if budget_hint else None)
 
             post_load = gpu_used_gb()
             print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
 
             eval_chunk_size = 8 if is_teacher else 24
-            gen_mode = "free" if is_teacher else "budget-forced"
+            gen_mode = "budget-forced"
             total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
             print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
                   f"({gen_mode} think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
@@ -326,16 +331,10 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 chunk_idx = chunk_start // eval_chunk_size + 1
                 chunk_t0 = time.time()
                 print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
-                if is_teacher:
-                    chunk_grid = free_generate(
-                        llm, chunk, num_samples, temperature, top_p, max_new_tokens,
-                        seed=seed, repetition_penalty=repetition_penalty,
-                    )
-                else:
-                    chunk_grid = budget_forced_generate(
-                        llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
-                        think_ratio=think_ratio, seed=seed, repetition_penalty=repetition_penalty,
-                    )
+                chunk_grid = budget_forced_generate(
+                    llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
+                    think_ratio=think_ratio, seed=seed, repetition_penalty=repetition_penalty,
+                )
                 for off, row in enumerate(chunk_grid):
                     gen_grid[chunk_start + off] = row
                 chunk_elapsed = time.time() - chunk_t0
@@ -678,6 +677,8 @@ def main() -> None:
                         help="Graph output path (default: outputs/eval/comparison_<dataset>.png)")
     parser.add_argument("--seed", type=int, default=1234,
                         help="Sampling seed for reproducible pass@k (static models give identical results each run)")
+    parser.add_argument("--budget-hint", action="store_true",
+                        help="Tell models their token cap in the prompt so they finish before it.")
     parser.add_argument("--verified", action="store_true",
                         help="Also report metrics on the verified subset (problems whose canonical "
                              "solutions pass all tests per outputs/eval/broken_tests.json).")
@@ -714,7 +715,7 @@ def main() -> None:
         dataset_name=dataset_name,
         num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
         difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
-        repetition_penalty=args.repetition_penalty,
+        repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
     ))
 
     distilled_path = args.distilled
@@ -733,7 +734,7 @@ def main() -> None:
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
-            repetition_penalty=args.repetition_penalty,
+            repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
@@ -744,7 +745,8 @@ def main() -> None:
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-            difficulty=args.difficulty, seed=args.seed,
+            difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
+            repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
         ))
 
     out_dir = Path(config["evaluation"]["output_dir"])
