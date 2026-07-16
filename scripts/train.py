@@ -484,6 +484,10 @@ def main():
     student.save(str(output_dir / "final_last"))
     print(f"Last-epoch (fully-trained) checkpoint saved at outputs/final_last for evaluation.")
 
+    if args.onpolicy:
+        student.save(str(output_dir / "final"))
+        print(f"On-policy: saved trained model to outputs/final (CE-val selection skipped for on-policy).")
+
     print(f"Training complete. Best val_loss={best_val_loss:.4f} saved at outputs/final.")
     runlog.event("train_done", best_val_loss=round(best_val_loss, 4), steps=global_step)
 
