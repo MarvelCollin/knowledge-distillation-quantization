@@ -13,6 +13,18 @@ from src.utils.reasoning import (
 
 THINK_BUDGET_RATIO = 0.5
 
+CP_PROMPT = (
+    "\n\nRead the problem statement fully and restate what is being asked. "
+    "List the constraints and identify the edge cases: empty input, a single element, duplicates, "
+    "negative values, and the maximum input sizes. Analyze which algorithms fit the constraints and "
+    "choose the SIMPLEST correct approach; confirm its time and space complexity fits the limits "
+    "before committing. Plan the solution step by step, then write clean, scalable Python using "
+    "EXACTLY the given function signature and parameter names. Define every helper and variable "
+    "before you use it. No comments, no fallback logic, no prints, no placeholders. Before closing "
+    "the code block, verify there are no syntax errors and the code matches your plan. Keep your "
+    "reasoning brief enough to finish the complete function well within the token cap."
+)
+
 
 def _build_code_primer(has_think_end: bool, signature: str) -> str:
     head = "\n```python\n" if has_think_end else "\n</think>\n```python\n"
@@ -108,7 +120,8 @@ def generate_student_solution(student, prompt, test_cases, max_new_tokens,
     return raw, extract_code(raw)
 
 
-def build_eval_prompts(problems, tokenizer, budget_tokens=None, strict_naming=False):
+def build_eval_prompts(problems, tokenizer, budget_tokens=None, strict_naming=False,
+                       cp_prompt=False):
     formatted = []
     signatures = []
     for prob in problems:
@@ -118,6 +131,8 @@ def build_eval_prompts(problems, tokenizer, budget_tokens=None, strict_naming=Fa
             extract_signature(prob["test_cases"][0], expected) if prob["test_cases"] else ""
         )
         user_content = build_signature_user_content(prompt, signature)
+        if cp_prompt:
+            user_content += CP_PROMPT
         if budget_tokens:
             user_content += (f"\n\nYour entire output is capped at {budget_tokens} tokens. "
                              f"Keep your reasoning brief enough to finish the complete function "

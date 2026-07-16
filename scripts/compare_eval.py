@@ -235,7 +235,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    temperature: float = 0.7, top_p: float = 0.95,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
                    think_ratio: float = 0.5, repetition_penalty: float = 1.05,
-                   budget_hint: bool = False, strict_naming: bool = False) -> dict:
+                   budget_hint: bool = False, strict_naming: bool = False,
+                   cp_prompt: bool = False) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -253,6 +254,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
         cache_key["budget_hint"] = True
     if strict_naming:
         cache_key["strict_naming"] = True
+    if cp_prompt:
+        cache_key["cp_prompt"] = True
     cached = _load_intermediate(label, dataset_name)
     if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
@@ -317,7 +320,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             formatted_prompts, signatures = build_eval_prompts(
                 problems, tokenizer,
                 budget_tokens=max_new_tokens if budget_hint else None,
-                strict_naming=strict_naming)
+                strict_naming=strict_naming, cp_prompt=cp_prompt)
 
             post_load = gpu_used_gb()
             print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
@@ -685,6 +688,10 @@ def main() -> None:
     parser.add_argument("--strict-naming", action="store_true",
                         help="Add an emphasized prompt instruction to keep signature names exact "
                              "and define every symbol before use.")
+    parser.add_argument("--cp-prompt", action="store_true",
+                        help="Add the competitive-programming deepcheck instructions to eval prompts.")
+    parser.add_argument("--skip-original", action="store_true",
+                        help="Skip the original student baseline row.")
     parser.add_argument("--verified", action="store_true",
                         help="Also report metrics on the verified subset (problems whose canonical "
                              "solutions pass all tests per outputs/eval/broken_tests.json).")
@@ -715,15 +722,16 @@ def main() -> None:
 
     student_base = student_model.split("/")[-1]
 
-    summaries.append(evaluate_model(
-        f"Student original ({student_base})", student_model,
-        problems, max_new_tokens, device, is_teacher=False,
-        dataset_name=dataset_name,
-        num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-        difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
-        repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
-        strict_naming=args.strict_naming,
-    ))
+    if not args.skip_original:
+        summaries.append(evaluate_model(
+            f"Student original ({student_base})", student_model,
+            problems, max_new_tokens, device, is_teacher=False,
+            dataset_name=dataset_name,
+            num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
+            difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
+            repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+            strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+        ))
 
     distilled_path = args.distilled
     if distilled_path is None:
@@ -742,7 +750,7 @@ def main() -> None:
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
-            strict_naming=args.strict_naming,
+            strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
@@ -755,7 +763,7 @@ def main() -> None:
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
-            strict_naming=args.strict_naming,
+            strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
         ))
 
     out_dir = Path(config["evaluation"]["output_dir"])
