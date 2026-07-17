@@ -187,10 +187,10 @@ def free_generate(llm, prompts, num_samples,
 def budget_forced_generate(llm, prompts, signatures, num_samples,
                            temperature, top_p, max_new_tokens,
                            think_ratio=0.5, seed=1234,
-                           repetition_penalty=1.05):
+                           repetition_penalty=1.05, force_sample=False):
     from vllm import SamplingParams
 
-    do_sample = num_samples > 1
+    do_sample = force_sample or num_samples > 1
     temp = temperature if do_sample else 0.0
     tp = top_p if do_sample else 1.0
     think_budget = max(1, int(max_new_tokens * think_ratio))

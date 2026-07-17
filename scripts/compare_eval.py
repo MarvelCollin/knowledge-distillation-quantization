@@ -238,7 +238,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
                    think_ratio: float = 0.5, repetition_penalty: float = 1.05,
                    budget_hint: bool = False, strict_naming: bool = False,
-                   cp_prompt: bool = False) -> dict:
+                   cp_prompt: bool = False, quick_retry: bool = False) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -258,6 +258,8 @@ def evaluate_model(label: str, model_path: str, problems: list,
         cache_key["strict_naming"] = True
     if cp_prompt:
         cache_key["cp_prompt"] = hashlib.md5(CP_PROMPT.encode()).hexdigest()[:8]
+    if quick_retry:
+        cache_key["quick_retry"] = True
     cached = _load_intermediate(label, dataset_name)
     if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
@@ -333,13 +335,47 @@ def evaluate_model(label: str, model_path: str, problems: list,
             total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
             print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
                   f"({gen_mode} think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
-            if resume_grid is not None and len(resume_grid) == len(formatted_prompts):
+            if quick_retry:
+                gen_grid = [[] for _ in formatted_prompts]
+                unsolved = list(range(len(formatted_prompts)))
+                for rnd in range(num_samples):
+                    if not unsolved:
+                        break
+                    round_t0 = time.time()
+                    print(f"  [round {rnd + 1}/{num_samples}] 1 try for {len(unsolved)} unsolved problems...")
+                    for cs in range(0, len(unsolved), eval_chunk_size):
+                        batch = unsolved[cs:cs + eval_chunk_size]
+                        chunk_grid = budget_forced_generate(
+                            llm, [formatted_prompts[i] for i in batch],
+                            [signatures[i] for i in batch],
+                            1, temperature, top_p, max_new_tokens,
+                            think_ratio=think_ratio, seed=seed + rnd,
+                            repetition_penalty=repetition_penalty, force_sample=True,
+                        )
+                        for i, row in zip(batch, chunk_grid):
+                            gen_grid[i].append(row[0])
+
+                    def _passes(i):
+                        text, _ = gen_grid[i][-1]
+                        r = run_test_cases(extract_code(text), problems[i]["test_cases"])
+                        return i, r["total"] > 0 and r["passed"] == r["total"]
+
+                    still = []
+                    with ThreadPoolExecutor(max_workers=16) as ex:
+                        for i, ok in ex.map(_passes, unsolved):
+                            if not ok:
+                                still.append(i)
+                    print(f"    round {rnd + 1} done in {time.time() - round_t0:.0f}s: "
+                          f"newly solved {len(unsolved) - len(still)}, remaining {len(still)}")
+                    unsolved = sorted(still)
+                _save_gen_grid(label, gen_grid, cache_key)
+            if resume_grid is not None and not quick_retry and len(resume_grid) == len(formatted_prompts):
                 gen_grid = resume_grid
                 done_rows = sum(1 for g in gen_grid if g is not None)
                 print(f"  Resuming generation: {done_rows}/{len(gen_grid)} prompts already cached.")
-            else:
+            elif not quick_retry:
                 gen_grid = [None] * len(formatted_prompts)
-            for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
+            for chunk_start in range(0, 0 if quick_retry else len(formatted_prompts), eval_chunk_size):
                 chunk_end = min(chunk_start + eval_chunk_size, len(formatted_prompts))
                 if all(gen_grid[i] is not None for i in range(chunk_start, chunk_end)):
                     continue
@@ -379,10 +415,10 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if gen_grid is None or any(g is None for g in gen_grid):
         raise RuntimeError(f"Generation incomplete for {label} — missing entries in gen_grid")
 
-    print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
+    print(f"  Running {sum(len(g) for g in gen_grid)} test executions in parallel (max 16 workers)...")
     eval_tasks = []
     for i, prob in enumerate(problems):
-        for j in range(num_samples):
+        for j in range(len(gen_grid[i])):
             final_text, truncated = gen_grid[i][j]
             code = extract_code(final_text)
             eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
@@ -392,7 +428,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
         r = run_test_cases(code, tcs)
         return i, j, code, truncated, r
 
-    sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
+    sample_records_by_problem = {i: [None] * len(gen_grid[i]) for i in range(len(problems))}
     with ThreadPoolExecutor(max_workers=16) as ex:
         for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
             i, j, code, truncated, r = fut
@@ -415,7 +451,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             "passed": first["passed"], "total": first["total"],
             "details": first["details"], "errors": first["errors"], "categories": first["categories"],
             "solved": any_solved, "code": first["code"], "truncated": any_truncated,
-            "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
+            "samples": sample_records, "num_samples": len(sample_records), "num_passing": num_passing,
         })
 
         diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
@@ -704,6 +740,9 @@ def main() -> None:
                         help="Add the competitive-programming deepcheck instructions to eval prompts.")
     parser.add_argument("--skip-original", action="store_true",
                         help="Skip the original student baseline row.")
+    parser.add_argument("--quick-retry", action="store_true",
+                        help="Adaptive mode: one try per round, retry only unsolved problems, "
+                             "stop each problem at its first success.")
     parser.add_argument("--verified", action="store_true",
                         help="Also report metrics on the verified subset (problems whose canonical "
                              "solutions pass all tests per outputs/eval/broken_tests.json).")
@@ -743,6 +782,7 @@ def main() -> None:
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
             strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+            quick_retry=args.quick_retry,
         ))
 
     distilled_path = args.distilled
@@ -763,6 +803,7 @@ def main() -> None:
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
             strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+            quick_retry=args.quick_retry,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
@@ -776,6 +817,7 @@ def main() -> None:
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
             repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
             strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+            quick_retry=args.quick_retry,
         ))
 
     out_dir = Path(config["evaluation"]["output_dir"])
