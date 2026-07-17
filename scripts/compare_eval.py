@@ -30,7 +30,9 @@ from src.evaluation.evaluator import (
     failing_cases,
     write_failure_report,
 )
-from src.evaluation.generation import build_eval_prompts, budget_forced_generate
+import hashlib
+
+from src.evaluation.generation import CP_PROMPT, build_eval_prompts, budget_forced_generate
 from src.utils.gpu import cleanup_vllm, gpu_total_gb, gpu_used_gb, wait_for_gpu_freed
 from src.utils.reasoning import extract_code
 
@@ -255,7 +257,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if strict_naming:
         cache_key["strict_naming"] = True
     if cp_prompt:
-        cache_key["cp_prompt"] = True
+        cache_key["cp_prompt"] = hashlib.md5(CP_PROMPT.encode()).hexdigest()[:8]
     cached = _load_intermediate(label, dataset_name)
     if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")

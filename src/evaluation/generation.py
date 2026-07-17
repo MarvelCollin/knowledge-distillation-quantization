@@ -20,9 +20,10 @@ CP_PROMPT = (
     "choose the SIMPLEST correct approach; confirm its time and space complexity fits the limits "
     "before committing. Plan the solution step by step, then write clean, scalable Python using "
     "EXACTLY the given function signature and parameter names. Define every helper and variable "
-    "before you use it. No comments, no fallback logic, no prints, no placeholders. Before closing "
-    "the code block, verify there are no syntax errors and the code matches your plan. Keep your "
-    "reasoning brief enough to finish the complete function well within the token cap."
+    "before you use it. No comments, no fallback logic, no prints, no placeholders. Think deeply: "
+    "trace your approach against the given examples and the edge cases you listed, and only write "
+    "the code once the logic survives that check. Before closing the code block, verify there are "
+    "no syntax errors and the code matches your plan."
 )
 
 
