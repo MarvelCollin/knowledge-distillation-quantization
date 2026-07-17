@@ -273,10 +273,11 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
     gen_grid = _load_gen_grid(label, cache_key)
 
-    if gen_grid is not None:
+    if gen_grid is not None and all(g is not None for g in gen_grid):
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         llm = None
     else:
+        resume_grid = gen_grid
         total_gb = gpu_total_gb()
         pre_used = gpu_used_gb()
         print(f"  GPU before load: {pre_used:.1f}GB used / {total_gb:.1f}GB total")
@@ -332,10 +333,18 @@ def evaluate_model(label: str, model_path: str, problems: list,
             total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
             print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
                   f"({gen_mode} think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
-            gen_grid = [None] * len(formatted_prompts)
+            if resume_grid is not None and len(resume_grid) == len(formatted_prompts):
+                gen_grid = resume_grid
+                done_rows = sum(1 for g in gen_grid if g is not None)
+                print(f"  Resuming generation: {done_rows}/{len(gen_grid)} prompts already cached.")
+            else:
+                gen_grid = [None] * len(formatted_prompts)
             for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
-                chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
-                chunk_sigs = signatures[chunk_start:chunk_start + eval_chunk_size]
+                chunk_end = min(chunk_start + eval_chunk_size, len(formatted_prompts))
+                if all(gen_grid[i] is not None for i in range(chunk_start, chunk_end)):
+                    continue
+                chunk = formatted_prompts[chunk_start:chunk_end]
+                chunk_sigs = signatures[chunk_start:chunk_end]
                 chunk_idx = chunk_start // eval_chunk_size + 1
                 chunk_t0 = time.time()
                 print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
@@ -345,6 +354,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 )
                 for off, row in enumerate(chunk_grid):
                     gen_grid[chunk_start + off] = row
+                _save_gen_grid(label, gen_grid, cache_key)
                 chunk_elapsed = time.time() - chunk_t0
                 done = chunk_start + len(chunk)
                 avg = chunk_elapsed / len(chunk)
