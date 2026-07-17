@@ -88,6 +88,11 @@ def compute_loss_chunked_backward(
     batch, seq_len, _ = hidden_d.shape
     vocab = lm_head_weight.size(0)
 
+    if torch.is_tensor(alpha):
+        alpha_vec = alpha.view(-1)
+    else:
+        alpha_vec = hidden_d.new_full((batch,), float(alpha))
+
     w_sum = qead_weights.sum().clamp(min=1e-8)
     shift_labels = torch.full_like(labels, -100)
     shift_labels[..., :-1] = labels[..., 1:]
@@ -95,6 +100,7 @@ def compute_loss_chunked_backward(
 
     lam = _lambda_view(skew_lambda)
 
+    total_val = 0.0
     distill_val = 0.0
     task_val = 0.0
     for s in range(0, seq_len, chunk_size):
@@ -102,7 +108,9 @@ def compute_loss_chunked_backward(
         lc = F.linear(hidden_d[:, s:e], lm_head_weight)
 
         kld_per_token = skew_kld_per_token(lc, teacher_ids[:, s:e], teacher_probs[:, s:e], lam, temperature)
-        distill_chunk = (qead_weights[:, s:e] * kld_per_token).sum() / w_sum
+        kld_weighted = qead_weights[:, s:e] * kld_per_token
+        distill_chunk = kld_weighted.sum() / w_sum
+        distill_term = (alpha_vec.view(-1, 1) * kld_weighted).sum() / w_sum
 
         task_flat = F.cross_entropy(
             lc.reshape(-1, vocab),
@@ -110,16 +118,18 @@ def compute_loss_chunked_backward(
             ignore_index=-100,
             reduction="none",
         ).view(batch, -1)
-        task_chunk = (task_flat.sum(dim=-1) / per_sample_valid).mean()
+        task_per_sample = task_flat.sum(dim=-1) / per_sample_valid
+        task_chunk = task_per_sample.mean()
+        task_term = ((1 - alpha_vec) * task_per_sample).mean()
 
-        chunk_loss = alpha * distill_chunk + (1 - alpha) * task_chunk
+        chunk_loss = distill_term + task_term
         (chunk_loss * loss_scale).backward()
 
+        total_val += chunk_loss.item()
         distill_val += distill_chunk.item()
         task_val += task_chunk.item()
 
     if hidden_d.grad is not None:
         hidden.backward(gradient=hidden_d.grad)
 
-    total_val = alpha * distill_val + (1 - alpha) * task_val
     return total_val, distill_val, task_val

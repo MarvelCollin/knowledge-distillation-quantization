@@ -170,7 +170,8 @@ def main():
         print("Offline mode: skipping teacher cache build. Using existing cache only.")
 
     train_dataset, val_dataset = create_datasets(config, student_tokenizer, cache_dir,
-                                                 require_passing=require_passing)
+                                                 require_passing=require_passing,
+                                                 include_short_cot=not args.onpolicy)
 
     student = StudentModel(
         model_name=args.init_from or config["student"]["model_name"],
@@ -372,8 +373,9 @@ def main():
             else:
                 effective_lambda = skew_lambda
 
-            has_teacher = bool(valid_teacher.any())
-            sample_alpha = alpha if has_teacher else 0.0
+            sample_has_teacher = valid_teacher.any(dim=1)
+            sample_alpha = alpha * sample_has_teacher.float()
+            has_teacher = bool(sample_has_teacher.any())
 
             loss_chunk = 512 if seq_len > 8192 else 1024
             total_val, distill_val, task_val = compute_loss_chunked_backward(
