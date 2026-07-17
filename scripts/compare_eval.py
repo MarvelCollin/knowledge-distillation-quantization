@@ -320,6 +320,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 max_num_seqs=8 if is_teacher else 16,
                 enable_chunked_prefill=True,
                 max_num_batched_tokens=2048,
+                swap_space=16,
             )
 
             formatted_prompts, signatures = build_eval_prompts(
