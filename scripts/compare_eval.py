@@ -275,7 +275,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
     gen_grid = _load_gen_grid(label, cache_key)
 
-    if gen_grid is not None and all(g is not None for g in gen_grid):
+    if gen_grid is not None and not quick_retry and all(g is not None for g in gen_grid):
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         llm = None
     else:
@@ -337,15 +337,35 @@ def evaluate_model(label: str, model_path: str, problems: list,
             print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
                   f"({gen_mode} think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
             if quick_retry:
-                gen_grid = [[] for _ in formatted_prompts]
-                unsolved = list(range(len(formatted_prompts)))
+                if resume_grid is not None and len(resume_grid) == len(formatted_prompts):
+                    gen_grid = [list(g) if g else [] for g in resume_grid]
+                    done_rows = sum(1 for g in gen_grid if g)
+                    print(f"  Resuming quick-retry: {done_rows}/{len(gen_grid)} prompts already have tries.")
+                else:
+                    gen_grid = [[] for _ in formatted_prompts]
+
+                def _passes(i):
+                    text, _ = gen_grid[i][-1]
+                    r = run_test_cases(extract_code(text), problems[i]["test_cases"])
+                    return i, r["total"] > 0 and r["passed"] == r["total"]
+
+                solved = set()
+                tried = [i for i in range(len(gen_grid)) if gen_grid[i]]
+                if tried:
+                    with ThreadPoolExecutor(max_workers=16) as ex:
+                        for i, ok in ex.map(_passes, tried):
+                            if ok:
+                                solved.add(i)
+
                 for rnd in range(num_samples):
-                    if not unsolved:
-                        break
+                    todo = [i for i in range(len(gen_grid))
+                            if i not in solved and len(gen_grid[i]) <= rnd]
+                    if not todo:
+                        continue
                     round_t0 = time.time()
-                    print(f"  [round {rnd + 1}/{num_samples}] 1 try for {len(unsolved)} unsolved problems...")
-                    for cs in range(0, len(unsolved), eval_chunk_size):
-                        batch = unsolved[cs:cs + eval_chunk_size]
+                    print(f"  [round {rnd + 1}/{num_samples}] 1 try for {len(todo)} unsolved problems...")
+                    for cs in range(0, len(todo), eval_chunk_size):
+                        batch = todo[cs:cs + eval_chunk_size]
                         chunk_grid = budget_forced_generate(
                             llm, [formatted_prompts[i] for i in batch],
                             [signatures[i] for i in batch],
@@ -355,20 +375,15 @@ def evaluate_model(label: str, model_path: str, problems: list,
                         )
                         for i, row in zip(batch, chunk_grid):
                             gen_grid[i].append(row[0])
+                        _save_gen_grid(label, gen_grid, cache_key)
 
-                    def _passes(i):
-                        text, _ = gen_grid[i][-1]
-                        r = run_test_cases(extract_code(text), problems[i]["test_cases"])
-                        return i, r["total"] > 0 and r["passed"] == r["total"]
-
-                    still = []
                     with ThreadPoolExecutor(max_workers=16) as ex:
-                        for i, ok in ex.map(_passes, unsolved):
-                            if not ok:
-                                still.append(i)
+                        for i, ok in ex.map(_passes, todo):
+                            if ok:
+                                solved.add(i)
+                    remaining = len(gen_grid) - len(solved)
                     print(f"    round {rnd + 1} done in {time.time() - round_t0:.0f}s: "
-                          f"newly solved {len(unsolved) - len(still)}, remaining {len(still)}")
-                    unsolved = sorted(still)
+                          f"solved so far {len(solved)}, remaining {remaining}")
                 _save_gen_grid(label, gen_grid, cache_key)
             if resume_grid is not None and not quick_retry and len(resume_grid) == len(formatted_prompts):
                 gen_grid = resume_grid
