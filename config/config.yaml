@@ -12,6 +12,17 @@ onpolicy:
   top_p: 0.95
   max_tokens: 16384
   gen_chunk_size: 128
+short_cot:
+  model_name: Qwen/Qwen2.5-Coder-7B-Instruct
+  cache_dir: cache/short_cot_coder7b
+  samples: 4
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 4096
+  max_model_len: 8192
+  gpu_memory_utilization: 0.92
+  gen_chunk_size: 128
+  seed: 1234
 student:
   max_length: 32768
   model_name: Qwen/Qwen2.5-Coder-1.5B-Instruct
