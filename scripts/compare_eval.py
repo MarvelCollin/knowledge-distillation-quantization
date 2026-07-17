@@ -317,7 +317,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 trust_remote_code=True,
                 enforce_eager=False,
                 enable_prefix_caching=True,
-                max_num_seqs=8,
+                max_num_seqs=8 if is_teacher else 16,
                 enable_chunked_prefill=True,
                 max_num_batched_tokens=2048,
             )
