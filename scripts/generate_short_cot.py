@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 
 from src.config import load_config
 from src.data.problems import build_user_content, load_problems
-from src.data.short_cot import SHORT_COT_SYSTEM_PROMPT
+from src.data.short_cot import EDGE_COT_SYSTEM_PROMPT, SHORT_COT_SYSTEM_PROMPT
 from src.evaluation.evaluator import run_test_cases
 from src.utils.reasoning import extract_code
 from src.utils.runlog import RunLog
@@ -40,12 +40,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--edge", action="store_true")
     args = parser.parse_args()
 
     load_dotenv()
     config = load_config(args.config)
     sc = config["short_cot"]
-    out_dir = Path(sc["cache_dir"])
+    system_prompt = EDGE_COT_SYSTEM_PROMPT if args.edge else SHORT_COT_SYSTEM_PROMPT
+    seed_base = sc["seed"] + (1000 if args.edge else 0)
+    out_dir = Path(sc["edge_cache_dir"] if args.edge else sc["cache_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(sc["model_name"], trust_remote_code=True)
@@ -66,7 +69,7 @@ def main():
     n_samples = sc["samples"]
     sample_params = [
         SamplingParams(temperature=sc["temperature"], top_p=sc["top_p"],
-                       max_tokens=sc["max_tokens"], n=1, seed=sc["seed"] + j)
+                       max_tokens=sc["max_tokens"], n=1, seed=seed_base + j)
         for j in range(n_samples)
     ]
 
@@ -84,7 +87,7 @@ def main():
         params = []
         for i in batch:
             messages = [
-                {"role": "system", "content": SHORT_COT_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": build_user_content(problems[i])},
             ]
             chat = tokenizer.apply_chat_template(

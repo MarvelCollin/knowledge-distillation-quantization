@@ -106,7 +106,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
     responses = load_passing_responses(cache_dir, len(problems), require_passing)
     n_teacher = len(responses)
     if include_short_cot:
-        responses.update(load_short_cot_responses(config["short_cot"]["cache_dir"], tokenizer))
+        responses.update(load_short_cot_responses(config["short_cot"], tokenizer))
 
     def problem_of(key: int) -> dict:
         return problems[short_problem_idx(key)] if is_short_key(key) else problems[key]
