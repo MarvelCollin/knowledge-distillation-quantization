@@ -30,7 +30,9 @@ from src.evaluation.evaluator import (
     failing_cases,
     write_failure_report,
 )
-from src.evaluation.generation import build_eval_prompts, budget_forced_generate, free_generate
+import hashlib
+
+from src.evaluation.generation import CP_PROMPT, build_eval_prompts, budget_forced_generate
 from src.utils.gpu import cleanup_vllm, gpu_total_gb, gpu_used_gb, wait_for_gpu_freed
 from src.utils.reasoning import extract_code
 
@@ -234,7 +236,9 @@ def evaluate_model(label: str, model_path: str, problems: list,
                    dataset_name: str = "", num_samples: int = 1,
                    temperature: float = 0.7, top_p: float = 0.95,
                    k: int = 1, difficulty: str = "all", seed: int = 1234,
-                   think_ratio: float = 0.5, repetition_penalty: float = 1.05) -> dict:
+                   think_ratio: float = 0.5, repetition_penalty: float = 1.05,
+                   budget_hint: bool = False, strict_naming: bool = False,
+                   cp_prompt: bool = False, quick_retry: bool = False) -> dict:
     cache_key = {
         "num_problems": len(problems),
         "num_samples": num_samples,
@@ -248,6 +252,14 @@ def evaluate_model(label: str, model_path: str, problems: list,
         "repetition_penalty": repetition_penalty,
         "model_fingerprint": _model_fingerprint(model_path),
     }
+    if budget_hint:
+        cache_key["budget_hint"] = True
+    if strict_naming:
+        cache_key["strict_naming"] = True
+    if cp_prompt:
+        cache_key["cp_prompt"] = hashlib.md5(CP_PROMPT.encode()).hexdigest()[:8]
+    if quick_retry:
+        cache_key["quick_retry"] = True
     cached = _load_intermediate(label, dataset_name)
     if cached and all(cached.get(key) == val for key, val in cache_key.items()):
         print(f"\n  ✓ Reusing cached results for: {label}  (settings unchanged — not re-running)")
@@ -263,10 +275,11 @@ def evaluate_model(label: str, model_path: str, problems: list,
 
     gen_grid = _load_gen_grid(label, cache_key)
 
-    if gen_grid is not None:
+    if gen_grid is not None and not quick_retry and all(g is not None for g in gen_grid):
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         llm = None
     else:
+        resume_grid = gen_grid
         total_gb = gpu_total_gb()
         pre_used = gpu_used_gb()
         print(f"  GPU before load: {pre_used:.1f}GB used / {total_gb:.1f}GB total")
@@ -304,40 +317,96 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 trust_remote_code=True,
                 enforce_eager=False,
                 enable_prefix_caching=True,
-                max_num_seqs=8,
+                max_num_seqs=8 if is_teacher else 16,
                 enable_chunked_prefill=True,
                 max_num_batched_tokens=2048,
+                swap_space=16,
             )
 
-            formatted_prompts, signatures = build_eval_prompts(problems, tokenizer)
+            formatted_prompts, signatures = build_eval_prompts(
+                problems, tokenizer,
+                budget_tokens=max_new_tokens if budget_hint else None,
+                strict_naming=strict_naming, cp_prompt=cp_prompt)
 
             post_load = gpu_used_gb()
             print(f"  GPU after load: {post_load:.1f}GB used  (delta +{post_load - pre_used:.1f}GB)")
 
             eval_chunk_size = 8 if is_teacher else 24
-            gen_mode = "free" if is_teacher else "budget-forced"
+            gen_mode = "budget-forced"
             total_chunks = (len(formatted_prompts) + eval_chunk_size - 1) // eval_chunk_size
             print(f"  Generating {len(problems)} prompts × {num_samples} samples via vLLM "
                   f"({gen_mode} think/code, chunk_size={eval_chunk_size}, {total_chunks} chunks)...")
-            gen_grid = [None] * len(formatted_prompts)
-            for chunk_start in range(0, len(formatted_prompts), eval_chunk_size):
-                chunk = formatted_prompts[chunk_start:chunk_start + eval_chunk_size]
-                chunk_sigs = signatures[chunk_start:chunk_start + eval_chunk_size]
+            if quick_retry:
+                if resume_grid is not None and len(resume_grid) == len(formatted_prompts):
+                    gen_grid = [list(g) if g else [] for g in resume_grid]
+                    done_rows = sum(1 for g in gen_grid if g)
+                    print(f"  Resuming quick-retry: {done_rows}/{len(gen_grid)} prompts already have tries.")
+                else:
+                    gen_grid = [[] for _ in formatted_prompts]
+
+                def _passes(i):
+                    text, _ = gen_grid[i][-1]
+                    r = run_test_cases(extract_code(text), problems[i]["test_cases"])
+                    return i, r["total"] > 0 and r["passed"] == r["total"]
+
+                solved = set()
+                tried = [i for i in range(len(gen_grid)) if gen_grid[i]]
+                if tried:
+                    with ThreadPoolExecutor(max_workers=16) as ex:
+                        for i, ok in ex.map(_passes, tried):
+                            if ok:
+                                solved.add(i)
+
+                for rnd in range(num_samples):
+                    todo = [i for i in range(len(gen_grid))
+                            if i not in solved and len(gen_grid[i]) <= rnd]
+                    if not todo:
+                        continue
+                    round_t0 = time.time()
+                    print(f"  [round {rnd + 1}/{num_samples}] 1 try for {len(todo)} unsolved problems...")
+                    for cs in range(0, len(todo), eval_chunk_size):
+                        batch = todo[cs:cs + eval_chunk_size]
+                        chunk_grid = budget_forced_generate(
+                            llm, [formatted_prompts[i] for i in batch],
+                            [signatures[i] for i in batch],
+                            1, temperature, top_p, max_new_tokens,
+                            think_ratio=think_ratio, seed=seed + rnd,
+                            repetition_penalty=repetition_penalty, force_sample=True,
+                        )
+                        for i, row in zip(batch, chunk_grid):
+                            gen_grid[i].append(row[0])
+                        _save_gen_grid(label, gen_grid, cache_key)
+
+                    with ThreadPoolExecutor(max_workers=16) as ex:
+                        for i, ok in ex.map(_passes, todo):
+                            if ok:
+                                solved.add(i)
+                    remaining = len(gen_grid) - len(solved)
+                    print(f"    round {rnd + 1} done in {time.time() - round_t0:.0f}s: "
+                          f"solved so far {len(solved)}, remaining {remaining}")
+                _save_gen_grid(label, gen_grid, cache_key)
+            if resume_grid is not None and not quick_retry and len(resume_grid) == len(formatted_prompts):
+                gen_grid = resume_grid
+                done_rows = sum(1 for g in gen_grid if g is not None)
+                print(f"  Resuming generation: {done_rows}/{len(gen_grid)} prompts already cached.")
+            elif not quick_retry:
+                gen_grid = [None] * len(formatted_prompts)
+            for chunk_start in range(0, 0 if quick_retry else len(formatted_prompts), eval_chunk_size):
+                chunk_end = min(chunk_start + eval_chunk_size, len(formatted_prompts))
+                if all(gen_grid[i] is not None for i in range(chunk_start, chunk_end)):
+                    continue
+                chunk = formatted_prompts[chunk_start:chunk_end]
+                chunk_sigs = signatures[chunk_start:chunk_end]
                 chunk_idx = chunk_start // eval_chunk_size + 1
                 chunk_t0 = time.time()
                 print(f"  [chunk {chunk_idx}/{total_chunks}] generating {len(chunk)} prompts × {num_samples} samples...")
-                if is_teacher:
-                    chunk_grid = free_generate(
-                        llm, chunk, num_samples, temperature, top_p, max_new_tokens,
-                        seed=seed, repetition_penalty=repetition_penalty,
-                    )
-                else:
-                    chunk_grid = budget_forced_generate(
-                        llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
-                        think_ratio=think_ratio, seed=seed, repetition_penalty=repetition_penalty,
-                    )
+                chunk_grid = budget_forced_generate(
+                    llm, chunk, chunk_sigs, num_samples, temperature, top_p, max_new_tokens,
+                    think_ratio=think_ratio, seed=seed, repetition_penalty=repetition_penalty,
+                )
                 for off, row in enumerate(chunk_grid):
                     gen_grid[chunk_start + off] = row
+                _save_gen_grid(label, gen_grid, cache_key)
                 chunk_elapsed = time.time() - chunk_t0
                 done = chunk_start + len(chunk)
                 avg = chunk_elapsed / len(chunk)
@@ -362,10 +431,10 @@ def evaluate_model(label: str, model_path: str, problems: list,
     if gen_grid is None or any(g is None for g in gen_grid):
         raise RuntimeError(f"Generation incomplete for {label} — missing entries in gen_grid")
 
-    print(f"  Running {len(problems) * num_samples} test executions in parallel (max 16 workers)...")
+    print(f"  Running {sum(len(g) for g in gen_grid)} test executions in parallel (max 16 workers)...")
     eval_tasks = []
     for i, prob in enumerate(problems):
-        for j in range(num_samples):
+        for j in range(len(gen_grid[i])):
             final_text, truncated = gen_grid[i][j]
             code = extract_code(final_text)
             eval_tasks.append((i, j, code, truncated, prob["test_cases"]))
@@ -375,7 +444,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
         r = run_test_cases(code, tcs)
         return i, j, code, truncated, r
 
-    sample_records_by_problem = {i: [None] * num_samples for i in range(len(problems))}
+    sample_records_by_problem = {i: [None] * len(gen_grid[i]) for i in range(len(problems))}
     with ThreadPoolExecutor(max_workers=16) as ex:
         for fut in tqdm(ex.map(_run_one, eval_tasks), total=len(eval_tasks), desc="tests"):
             i, j, code, truncated, r = fut
@@ -398,7 +467,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
             "passed": first["passed"], "total": first["total"],
             "details": first["details"], "errors": first["errors"], "categories": first["categories"],
             "solved": any_solved, "code": first["code"], "truncated": any_truncated,
-            "samples": sample_records, "num_samples": num_samples, "num_passing": num_passing,
+            "samples": sample_records, "num_samples": len(sample_records), "num_passing": num_passing,
         })
 
         diff_tag = f"[{prob.get('difficulty', '')}] " if prob.get("difficulty") else ""
@@ -584,7 +653,7 @@ def _problem_diag(p: dict) -> dict:
     }
 
 
-def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
+def _write_compare_diagnostics(summaries: list, out_dir: Path, suffix: str = "") -> None:
     diag_dir = out_dir / "diagnostics"
     diag_dir.mkdir(parents=True, exist_ok=True)
 
@@ -610,7 +679,7 @@ def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
         row["teacher_reachable_miss"] = ts_ and not ds_
         rows.append(row)
 
-    jsonl_path = diag_dir / "compare_diag.jsonl"
+    jsonl_path = diag_dir / f"compare_diag{suffix}.jsonl"
     with jsonl_path.open("w") as fh:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
@@ -648,7 +717,7 @@ def _write_compare_diagnostics(summaries: list, out_dir: Path) -> None:
     lines.append("=" * 64)
     report = "\n".join(lines)
     print("\n" + report)
-    (diag_dir / "compare_diag.txt").write_text(report + "\n")
+    (diag_dir / f"compare_diag{suffix}.txt").write_text(report + "\n")
 
 
 def main() -> None:
@@ -678,6 +747,21 @@ def main() -> None:
                         help="Graph output path (default: outputs/eval/comparison_<dataset>.png)")
     parser.add_argument("--seed", type=int, default=1234,
                         help="Sampling seed for reproducible pass@k (static models give identical results each run)")
+    parser.add_argument("--budget-hint", action="store_true",
+                        help="Tell models their token cap in the prompt so they finish before it.")
+    parser.add_argument("--strict-naming", action="store_true",
+                        help="Add an emphasized prompt instruction to keep signature names exact "
+                             "and define every symbol before use.")
+    parser.add_argument("--cp-prompt", action="store_true",
+                        help="Add the competitive-programming deepcheck instructions to eval prompts.")
+    parser.add_argument("--skip-original", action="store_true",
+                        help="Skip the original student baseline row.")
+    parser.add_argument("--quick-retry", action="store_true",
+                        help="Adaptive mode: one try per round, retry only unsolved problems, "
+                             "stop each problem at its first success.")
+    parser.add_argument("--verified", action="store_true",
+                        help="Also report metrics on the verified subset (problems whose canonical "
+                             "solutions pass all tests per outputs/eval/broken_tests.json).")
     parser.add_argument("--fresh", action="store_true",
                         help="Ignore and clear cached per-model results, re-evaluating every model from scratch.")
     args = parser.parse_args()
@@ -705,14 +789,17 @@ def main() -> None:
 
     student_base = student_model.split("/")[-1]
 
-    summaries.append(evaluate_model(
-        f"Student original ({student_base})", student_model,
-        problems, max_new_tokens, device, is_teacher=False,
-        dataset_name=dataset_name,
-        num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-        difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
-        repetition_penalty=args.repetition_penalty,
-    ))
+    if not args.skip_original:
+        summaries.append(evaluate_model(
+            f"Student original ({student_base})", student_model,
+            problems, max_new_tokens, device, is_teacher=False,
+            dataset_name=dataset_name,
+            num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
+            difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
+            repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+            strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+            quick_retry=args.quick_retry,
+        ))
 
     distilled_path = args.distilled
     if distilled_path is None:
@@ -730,7 +817,9 @@ def main() -> None:
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
             difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
-            repetition_penalty=args.repetition_penalty,
+            repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+            strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+            quick_retry=args.quick_retry,
         ))
     else:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
@@ -741,7 +830,10 @@ def main() -> None:
             problems, max_new_tokens, device, is_teacher=True,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
-            difficulty=args.difficulty, seed=args.seed,
+            difficulty=args.difficulty, seed=args.seed, think_ratio=args.think_ratio,
+            repetition_penalty=args.repetition_penalty, budget_hint=args.budget_hint,
+            strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
+            quick_retry=args.quick_retry,
         ))
 
     out_dir = Path(config["evaluation"]["output_dir"])
@@ -751,6 +843,20 @@ def main() -> None:
     print(f"Full results → {results_json}")
 
     _write_compare_diagnostics(summaries, out_dir)
+
+    if args.verified:
+        broken_path = out_dir / "broken_tests.json"
+        if not broken_path.exists():
+            raise SystemExit(f"--verified needs {broken_path} — run scripts/verify_tests.py first.")
+        broken = {e["idx"] for e in json.loads(broken_path.read_text())}
+        verified_summaries = []
+        for s in summaries:
+            kept = [r for r in s["per_problem"] if r["idx"] not in broken]
+            verified_summaries.append(_finalise(f"{s['name']} [verified]", kept, s["dataset"], s["k"]))
+        verified_json = out_dir / "comparison_verified.json"
+        verified_json.write_text(json.dumps(verified_summaries, indent=2))
+        print(f"Verified subset ({len(broken)} broken-test problems excluded from all models) → {verified_json}")
+        _write_compare_diagnostics(verified_summaries, out_dir, suffix="_verified")
 
     if len(summaries) >= 2:
         out_png = Path(args.out) if args.out else out_dir / "comparison.png"

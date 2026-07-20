@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.data.problems import build_user_content, load_problems
+from src.data.short_cot import is_short_key, load_short_cot_responses, short_problem_idx
 from src.data.teacher_cache import load_passing_responses, rescore_failed_cache
 from src.utils.reasoning import SYSTEM_PROMPT
 
@@ -90,7 +91,7 @@ class CodingDataset(Dataset):
 
 
 def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = False,
-                    require_passing: bool = True) -> tuple:
+                    require_passing: bool = True, include_short_cot: bool = False) -> tuple:
     max_length = config["student"]["max_length"]
     train_ratio = config["data"]["train_ratio"]
 
@@ -102,43 +103,63 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
         recovered, tested, total_failed = rescore_failed_cache(cache_dir, problems)
         print(f"  Rescored teacher cache (pure KD — re-tests labels only, trajectories untouched): "
               f"recovered {recovered}/{total_failed} previously-failed responses now passing.")
-    teacher_responses = load_passing_responses(cache_dir, len(problems), require_passing)
+    responses = load_passing_responses(cache_dir, len(problems), require_passing)
+    n_teacher = len(responses)
+    if include_short_cot:
+        responses.update(load_short_cot_responses(config["short_cot"], tokenizer))
+
+    def problem_of(key: int) -> dict:
+        return problems[short_problem_idx(key)] if is_short_key(key) else problems[key]
 
     kept_indices = []
     lengths_map = {}
     misaligned = 0
-    for i in sorted(teacher_responses.keys()):
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_content(problems[i])},
-        ]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prompt_len = min(len(tokenizer(prompt, add_special_tokens=False).input_ids), max_length - 1)
-        student_resp_len = len(tokenizer(teacher_responses[i]["text"], add_special_tokens=False).input_ids)
-        if student_resp_len != teacher_responses[i]["token_count"]:
+    prompt_len_cache = {}
+    for i in sorted(responses.keys()):
+        problem_idx = short_problem_idx(i) if is_short_key(i) else i
+        prompt_len = prompt_len_cache.get(problem_idx)
+        if prompt_len is None:
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_user_content(problems[problem_idx])},
+            ]
+            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            prompt_len = min(len(tokenizer(prompt, add_special_tokens=False).input_ids), max_length - 1)
+            prompt_len_cache[problem_idx] = prompt_len
+        student_resp_len = len(tokenizer(responses[i]["text"], add_special_tokens=False).input_ids)
+        if student_resp_len != responses[i]["token_count"]:
             misaligned += 1
         if prompt_len + student_resp_len + 1 <= max_length:
             kept_indices.append(i)
             lengths_map[i] = prompt_len + student_resp_len + 1
 
-    dropped = len(teacher_responses) - len(kept_indices)
-    kept_problems = [problems[i] for i in kept_indices]
-    print(f"  Kept {len(kept_problems)} problems with passing teacher responses from cache "
-          f"({dropped} dropped: prompt+response exceeds max_length={max_length}).")
+    dropped = len(responses) - len(kept_indices)
+    teacher_kept = [i for i in kept_indices if not is_short_key(i)]
+    short_kept = [i for i in kept_indices if is_short_key(i)]
+    print(f"  Kept {len(kept_indices)} responses ({len(teacher_kept)} teacher, {len(short_kept)} "
+          f"short-CoT) from cache ({dropped} dropped: prompt+response exceeds max_length={max_length}).")
     if misaligned:
-        pct = misaligned / max(len(teacher_responses), 1) * 100
-        print(f"  ⚠ Teacher/student token-count mismatch on {misaligned}/{len(teacher_responses)} "
+        pct = misaligned / max(n_teacher, 1) * 100
+        print(f"  ⚠ Teacher/student token-count mismatch on {misaligned}/{n_teacher} "
               f"({pct:.1f}%) responses — teacher logprobs may be positionally misaligned with the "
               f"student tokens on those samples.")
 
-    split = int(len(kept_problems) * train_ratio)
+    split = int(len(teacher_kept) * train_ratio)
+    val_keys = teacher_kept[split:]
+    val_problem_idxs = set(val_keys)
+    train_keys = teacher_kept[:split] + [
+        k for k in short_kept if short_problem_idx(k) not in val_problem_idxs]
+    if short_kept:
+        n_short_train = len(train_keys) - split
+        print(f"  Mix: {split} teacher + {n_short_train} short-CoT train samples "
+              f"(ratio 1:{n_short_train / max(split, 1):.1f}), val stays {len(val_keys)} teacher-only.")
     return (
-        CodingDataset(kept_problems[:split], tokenizer, max_length,
-                      teacher_responses, kept_indices[:split],
-                      [lengths_map[i] for i in kept_indices[:split]]),
-        CodingDataset(kept_problems[split:], tokenizer, max_length,
-                      teacher_responses, kept_indices[split:],
-                      [lengths_map[i] for i in kept_indices[split:]]),
+        CodingDataset([problem_of(i) for i in train_keys], tokenizer, max_length,
+                      responses, train_keys,
+                      [lengths_map[i] for i in train_keys]),
+        CodingDataset([problem_of(i) for i in val_keys], tokenizer, max_length,
+                      responses, val_keys,
+                      [lengths_map[i] for i in val_keys]),
     )
 
 

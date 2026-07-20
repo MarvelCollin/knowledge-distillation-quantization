@@ -19,6 +19,8 @@ services:
     volumes:
       - .:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
+    tmpfs:
+      - /tmp:size=8g
     command: python scripts/train.py --config config/config.yaml
     deploy: *gpu-deploy
 
@@ -29,6 +31,8 @@ services:
     volumes:
       - .:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
+    tmpfs:
+      - /tmp:size=8g
     command: python scripts/evaluate.py --config config/config.yaml --checkpoint outputs/final
     deploy: *gpu-deploy
 
@@ -39,6 +43,8 @@ services:
     volumes:
       - .:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
+    tmpfs:
+      - /tmp:size=8g
     command: python scripts/compare_eval.py
     deploy: *gpu-deploy
 
