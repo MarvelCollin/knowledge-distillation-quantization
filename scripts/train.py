@@ -10,6 +10,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import argparse
 import random
+import shutil
 import time
 import numpy as np
 import torch.nn.functional as F
@@ -125,6 +126,13 @@ def main():
         print(f"  CUDA memory cap  : 22 GB / {_total_mem / 1024**3:.1f} GB (fraction={_cap_frac:.3f})")
     output_dir = Path(config["training"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    final_last = output_dir / "final_last"
+    if final_last.exists():
+        backup = output_dir / "final_last_prev"
+        if backup.exists():
+            shutil.rmtree(backup)
+        final_last.rename(backup)
+        print("Previous outputs/final_last preserved at outputs/final_last_prev.")
 
     require_passing = True
     if args.onpolicy:
