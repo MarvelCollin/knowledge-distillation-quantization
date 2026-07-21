@@ -13,11 +13,28 @@ Same student (Qwen2.5-Coder-1.5B), same fullset (228), pass@5, temperature 0.6.
 | Two teacher seed 7 (final) | same | 36 | 15.8% | 3 | best checkpoint |
 | Over mixed edge (1 to 5.5) | mix + third short wave | 29 | 12.7% | n/a | regressed |
 | Barebone base untrained | none (base, not instruct) | 28 | 12.3% | 103 | abandoned, floor too high |
+| General base untrained | none (Qwen2.5-1.5B general) | 12 | 5.3% | 29 | floor for gap study |
+| General base distilled | two teacher mix, seed 7 | 25 | 11.0% | 0 | +13 abs, x2.08 rel, trunc 0 |
 | Teacher R1-7B (ceiling) | none | 126 | 55.3% | 0 | upper bound |
 
 ## Barebone (base 1.5B) experiment, abandoned
 
 Tested Qwen2.5-Coder-1.5B base (non-instruct) as the student, hoping a weaker starting point would widen the original to distilled gap. It backfired: the raw base already solves 28 (higher than the instruct baseline 22), because plain code completion suits the base Coder model and LeetCode is completion-like. Since the distilled ceiling is capacity-bound at about 36 regardless of start, the base gap would be roughly +8 versus the instruct +14, a smaller story, not bigger. The base also truncates massively (103 problems versus 5) with no instruction tuning to stop it. Skipped training. Instruct student stays the headline.
+
+## General (non-code) base 1.5B experiment, trained
+
+Swapped the student to Qwen2.5-1.5B, the general (non code specialized) base, to get a low floor with the same 1.5B capacity. Same two teacher mix, seed 7, same R1 cache (verified tokenizer identical, alignment delta median 1 token = eos).
+
+| Metric | Original (general base) | Distilled | Abs gap | Relative |
+|---|---|---|---|---|
+| solved | 12/228 | 25/228 | +13 | x2.08 |
+| pass@1 | 1.6% | 4.9% | | x3.1 |
+| pass@5 | 5.3% | 11.0% | +5.7 pts | x2.08 |
+| test-case | 10.3% | 20.3% | +10.0 pts | x2.0 |
+| truncated | 29 | 0 | | perfect |
+| easy / med / hard | 8 / 2 / 2 | 18 / 5 / 2 | +10 / +3 / 0 | |
+
+Verdict: the floor dropped as hoped (12, well below the instruct 22 and the Coder base 28), but the distilled ceiling also dropped (25 versus the instruct 36), because a non code base holds less code strategy at the same size. So the absolute gap (+13) is tied with the instruct (+14), confirming again that the gap is capacity bound. The relative gap is genuinely bigger though: distillation more than doubles the base (x2.08 solved, x3.1 pass@1) versus the instruct x1.6, and the two teacher mix drove truncation to a clean 0 (from 29), the best efficiency result yet. Distillation also erased missing_function failures entirely (1651 to 0). One cost: 93 new syntax errors appeared (the base learned to emit code but not always valid), net still strongly positive.
 
 ## What this shows
 
