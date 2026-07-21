@@ -1,0 +1,69 @@
+data:
+  dataset_name: newfacade/LeetCodeDataset
+  max_samples: 2600
+  teacher_cache_dir: cache/teacher_logprobs_r1_full
+  onpolicy_cache_dir: cache/onpolicy_r1
+  train_ratio: 0.9
+evaluation:
+  max_new_tokens: 30720
+  output_dir: outputs/eval
+onpolicy:
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 16384
+  gen_chunk_size: 128
+short_cot:
+  model_name: Qwen/Qwen2.5-Coder-7B-Instruct
+  cache_dir: cache/short_cot_coder7b
+  edge_cache_dir: cache/short_cot_edge7b
+  max_per_problem: 6
+  samples: 4
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 4096
+  max_model_len: 8192
+  gpu_memory_utilization: 0.92
+  gen_chunk_size: 128
+  seed: 1234
+student:
+  max_length: 32768
+  model_name: Qwen/Qwen2.5-Coder-3B-Instruct
+teacher:
+  local_model_path: cache/teacher-model-r1-7b
+  max_tokens: 32768
+  temperature: 0.6
+  top_p: 0.95
+  top_logprobs: 20
+  gpu_memory_utilization: 0.92
+  max_model_len: 32768
+  kv_cache_dtype: auto
+  enable_chunked_prefill: true
+  max_num_batched_tokens: 4096
+  max_num_seqs: 16
+  cache_chunk_size: 16
+  rejection_samples: 4
+  rejection_wave: 2
+  rejection_temperature: 1.0
+  rejection_top_p: 0.95
+training:
+  alpha: 0.7
+  batch_size: 1
+  batch_token_budget: 16384
+  max_batch_size: 2
+  curriculum: length
+  distill_temperature: 3.0
+  eval_steps: 100
+  gradient_accumulation_steps: 4
+  learning_rate: 5e-6
+  max_grad_norm: 1.0
+  num_epochs: 2
+  output_dir: outputs_3b
+  seed: 42
+  skew_lambda: 0.2
+  skew_lambda_max: 0.5
+  adaptive_skew: true
+  teacher_confidence_weight: false
+  entropy_focus: false
+  warmup_steps: 30
+  weight_decay: 0.01
+  neftune_alpha: 5.0
