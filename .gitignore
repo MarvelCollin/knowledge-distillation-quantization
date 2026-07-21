@@ -10,6 +10,7 @@ build/
 
 cache/
 outputs/
+outputs_*/
 
 *.pt
 *.bin
@@ -21,8 +22,10 @@ outputs/
 Thumbs.db
 
 *.log
+*.out
 logs/train_metrics.jsonl
 logs/status.json
+logs/short_cot.jsonl
 .venv
 
 *.pem
