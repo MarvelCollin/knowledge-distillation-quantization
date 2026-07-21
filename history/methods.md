@@ -12,7 +12,12 @@ Same student (Qwen2.5-Coder-1.5B), same fullset (228), pass@5, temperature 0.6.
 | Two teacher mix | R1 logits + Coder-7B short CoT | 38 | 16.7% | 3 | same solves, 14x fewer trunc |
 | Two teacher seed 7 (final) | same | 36 | 15.8% | 3 | best checkpoint |
 | Over mixed edge (1 to 5.5) | mix + third short wave | 29 | 12.7% | n/a | regressed |
+| Barebone base untrained | none (base, not instruct) | 28 | 12.3% | 103 | abandoned, floor too high |
 | Teacher R1-7B (ceiling) | none | 126 | 55.3% | 0 | upper bound |
+
+## Barebone (base 1.5B) experiment, abandoned
+
+Tested Qwen2.5-Coder-1.5B base (non-instruct) as the student, hoping a weaker starting point would widen the original to distilled gap. It backfired: the raw base already solves 28 (higher than the instruct baseline 22), because plain code completion suits the base Coder model and LeetCode is completion-like. Since the distilled ceiling is capacity-bound at about 36 regardless of start, the base gap would be roughly +8 versus the instruct +14, a smaller story, not bigger. The base also truncates massively (103 problems versus 5) with no instruction tuning to stop it. Skipped training. Instruct student stays the headline.
 
 ## What this shows
 
