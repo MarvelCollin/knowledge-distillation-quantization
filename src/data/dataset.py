@@ -113,7 +113,7 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
 
     kept_indices = []
     lengths_map = {}
-    misaligned = 0
+    teacher_deltas = []
     prompt_len_cache = {}
     for i in sorted(responses.keys()):
         problem_idx = short_problem_idx(i) if is_short_key(i) else i
@@ -127,8 +127,8 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
             prompt_len = min(len(tokenizer(prompt, add_special_tokens=False).input_ids), max_length - 1)
             prompt_len_cache[problem_idx] = prompt_len
         student_resp_len = len(tokenizer(responses[i]["text"], add_special_tokens=False).input_ids)
-        if student_resp_len != responses[i]["token_count"]:
-            misaligned += 1
+        if not is_short_key(i):
+            teacher_deltas.append(student_resp_len - responses[i]["token_count"])
         if prompt_len + student_resp_len + 1 <= max_length:
             kept_indices.append(i)
             lengths_map[i] = prompt_len + student_resp_len + 1
@@ -138,11 +138,17 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
     short_kept = [i for i in kept_indices if is_short_key(i)]
     print(f"  Kept {len(kept_indices)} responses ({len(teacher_kept)} teacher, {len(short_kept)} "
           f"short-CoT) from cache ({dropped} dropped: prompt+response exceeds max_length={max_length}).")
-    if misaligned:
-        pct = misaligned / max(n_teacher, 1) * 100
-        print(f"  ⚠ Teacher/student token-count mismatch on {misaligned}/{n_teacher} "
-              f"({pct:.1f}%) responses — teacher logprobs may be positionally misaligned with the "
-              f"student tokens on those samples.")
+    if teacher_deltas:
+        absd = sorted(abs(x) for x in teacher_deltas)
+        n = len(absd)
+        median = absd[n // 2]
+        drift = sum(1 for x in absd if x > 2)
+        benign = n - drift
+        print(f"  KD alignment: teacher/student length delta median |Δ|={median} tok, max={absd[-1]} "
+              f"({benign}/{n} benign |Δ|≤2 e.g. eos, {drift} drift |Δ|>2).")
+        if drift and drift / n > 0.05:
+            print(f"  ⚠ {drift} teacher samples ({100 * drift / n:.1f}%) drift >2 tokens — KD may be "
+                  f"positionally misaligned there; verify the student tokenizer matches the cache build.")
 
     split = int(len(teacher_kept) * train_ratio)
     val_keys = teacher_kept[split:]
