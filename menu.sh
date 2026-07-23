@@ -132,11 +132,29 @@ ensure_gpu_free() {
     return 1
 }
 
+CFG=config/config.yaml
+
+# Pick the student config (instruct vs general base). Sets: CFG
+choose_config() {
+    echo -e "  ${BOLD}Student config${NC}"
+    echo -e "     ${GREEN}1${NC}  instruct     (config/config.yaml — Qwen2.5-Coder-1.5B-Instruct)"
+    echo -e "     2  general base (config/config_general.yaml — Qwen2.5-1.5B)"
+    echo -n "  config [default: 1]: "
+    read -r cfg_choice
+    if [ "$cfg_choice" = "2" ]; then
+        CFG=config/config_general.yaml
+    else
+        CFG=config/config.yaml
+    fi
+    echo -e "  → using ${GREEN}${CFG}${NC}"
+    echo ""
+}
+
 # Fixed compare-eval parameters — no prompts, always full 3-way paper-grade run.
 # Sets: CMP_SKIP_FLAG, CMP_NP, CMP_DIFFICULTY, COMPARE_AFTER
 set_fixed_compare_params() {
     local eval_mnt
-    eval_mnt=$(grep 'max_new_tokens' config/config.yaml 2>/dev/null | awk '{print $2}')
+    eval_mnt=$(grep 'max_new_tokens' "$CFG" 2>/dev/null | awk '{print $2}')
     CMP_SKIP_FLAG=""
     CMP_NP=228
     CMP_DIFFICULTY="all"
@@ -162,7 +180,7 @@ set_fixed_compare_params() {
 compare_cache_status() {
     [ -d outputs/eval/intermediate ] || { echo -e "  ${YELLOW}No cached evals yet — all models will run.${NC}"; echo ""; return 0; }
     local student_model
-    student_model=$(grep 'model_name' config/config.yaml 2>/dev/null | awk '{print $2}')
+    student_model=$(grep 'model_name' "$CFG" 2>/dev/null | awk '{print $2}' | head -1)
     echo -e "  ${BOLD}Cached eval status${NC} for num_problems=${CMP_NP}, difficulty=${CMP_DIFFICULTY}:"
     python3 - "$CMP_NP" "$CMP_DIFFICULTY" "$student_model" "$CMP_SKIP_FLAG" <<'PY'
 import json, os, sys
@@ -197,7 +215,7 @@ PY
 # Run compare-eval using already-collected CMP_* params (NO prompts).
 run_compare_with_params() {
     compare_cache_status
-    run_cmd "sudo docker compose run --rm compare_eval python scripts/compare_eval.py --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.6 --top-p 0.95 $CMP_SKIP_FLAG"
+    run_cmd "sudo docker compose run --rm compare_eval python scripts/compare_eval.py --config $CFG --num-problems $CMP_NP --difficulty $CMP_DIFFICULTY --num-samples 5 --temperature 0.6 --top-p 0.95 $CMP_SKIP_FLAG"
     echo -e "  Graph saved to: ${GREEN}outputs/eval/comparison.png${NC}"
 }
 
@@ -205,6 +223,7 @@ run_compare_eval() {
     header
     echo -e "  ${BOLD}Compare original | teacher | distilled on LeetCode test split${NC}"
     echo ""
+    choose_config
     ensure_gpu_free || return
 
     set_fixed_compare_params
@@ -357,16 +376,17 @@ while true; do
         1)
             header
             NS=2600
-            cfg_epochs=$(grep 'num_epochs' config/config.yaml | awk '{print $2}')
-            cfg_alpha=$(grep 'alpha:' config/config.yaml | awk '{print $2}')
-            cfg_lr=$(grep 'learning_rate' config/config.yaml | awk '{print $2}')
-            cfg_seed=$(grep 'seed:' config/config.yaml | awk '{print $2}')
-            cfg_temp=$(grep 'distill_temperature' config/config.yaml | awk '{print $2}')
-            cfg_alen=$(grep 'max_length' config/config.yaml | awk '{print $2}')
-            cache_dir=$(grep 'teacher_cache_dir' config/config.yaml | awk '{print $2}')
+            choose_config
+            cfg_epochs=$(grep 'num_epochs' "$CFG" | awk '{print $2}')
+            cfg_alpha=$(grep 'alpha:' "$CFG" | awk '{print $2}' | head -1)
+            cfg_lr=$(grep 'learning_rate' "$CFG" | awk '{print $2}')
+            cfg_seed=$(grep 'seed:' "$CFG" | awk '{print $2}' | tail -1)
+            cfg_temp=$(grep 'distill_temperature' "$CFG" | awk '{print $2}')
+            cfg_alen=$(grep 'max_length' "$CFG" | awk '{print $2}' | head -1)
+            cache_dir=$(grep 'teacher_cache_dir' "$CFG" | awk '{print $2}')
             echo -e "  ${BOLD}Training${NC} (offline train on R1 cache, then full 3-way compare)"
             echo ""
-            echo -e "  ${BOLD}Fixed config${NC} (edit config/config.yaml to change):"
+            echo -e "  ${BOLD}Fixed config${NC} (edit ${CFG} to change):"
             echo "    max_samples         : ${NS}  (full LeetCode train split)"
             echo "    epochs              : ${cfg_epochs}"
             echo "    alpha (distill mix) : ${cfg_alpha}"
@@ -387,7 +407,7 @@ while true; do
             echo ""
             echo -n "  cache mode [default: 2]: "
             read -r cache_mode
-            TRAIN_FLAGS="--max-samples $NS"
+            TRAIN_FLAGS="--config $CFG --max-samples $NS"
             if [ "$cache_mode" = "1" ]; then
                 echo -e "  ${GREEN}→ Cache build/refresh with R1 teacher will run before training.${NC}"
             else
