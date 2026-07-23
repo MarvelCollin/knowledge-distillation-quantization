@@ -159,6 +159,13 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
         n_short_train = len(train_keys) - split
         print(f"  Mix: {split} teacher + {n_short_train} short-CoT train samples "
               f"(ratio 1:{n_short_train / max(split, 1):.1f}), val stays {len(val_keys)} teacher-only.")
+    hard_oversample = int(config["training"].get("hard_oversample", 1))
+    if hard_oversample > 1:
+        hard_keys = [k for k in teacher_kept[:split]
+                     if problems[k]["difficulty"].lower() == "hard"]
+        train_keys += hard_keys * (hard_oversample - 1)
+        print(f"  Hard oversample x{hard_oversample}: +{len(hard_keys) * (hard_oversample - 1)} "
+              f"duplicated hard teacher (long-CoT) train samples.")
     return (
         CodingDataset([problem_of(i) for i in train_keys], tokenizer, max_length,
                       responses, train_keys,

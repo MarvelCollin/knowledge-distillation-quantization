@@ -54,16 +54,17 @@ training:
   distill_temperature: 3.0
   eval_steps: 100
   gradient_accumulation_steps: 4
-  learning_rate: 5e-6
+  learning_rate: 1e-5
   max_grad_norm: 1.0
-  num_epochs: 2
-  output_dir: outputs_general
+  num_epochs: 3
+  output_dir: outputs_general_v2
   seed: 7
   skew_lambda: 0.2
   skew_lambda_max: 0.5
   adaptive_skew: true
   teacher_confidence_weight: false
   entropy_focus: false
-  warmup_steps: 30
+  warmup_steps: 100
+  hard_oversample: 2
   weight_decay: 0.01
   neftune_alpha: 5.0
