@@ -4,10 +4,11 @@ Title: "Efficient Reasoning for Competitive Programming via Knowledge Distillati
 
 ## Project Scope
 
-Distill a large reasoning teacher (DeepSeek-R1-Distill-Qwen-7B, bf16) into a small student
-(DeepSeek-R1-Distill-Qwen-1.5B) on LeetCode coding problems, then apply Post-Training Quantization
-(PTQ INT8 via bitsandbytes) and show that the QEAD-distilled student degrades less after quantization
-than a naively distilled one.
+Distill a large reasoning teacher (DeepSeek-R1-Distill-Qwen-7B, bf16, long-CoT) plus a short-CoT
+helper teacher (Qwen2.5-Coder-7B-Instruct) into a small student (Qwen2.5-Coder-1.5B-Instruct;
+gap-study track: Qwen2.5-1.5B general base) on LeetCode coding problems, then apply Post-Training
+Quantization (PTQ INT8 via bitsandbytes) and show that the QEAD-distilled student degrades less
+after quantization than a naively distilled one.
 
 ### Novel contributions (ours)
 - **QEAD token weighting** — simulate INT8 quantization error on student logits per position,
@@ -23,7 +24,7 @@ than a naively distilled one.
 | Skew-KL loss | DistiLLM (arXiv 2402.03898, ICML 2024) | We compute KL(mixture ‖ teacher) where mixture = λ·student + (1−λ)·teacher. DistiLLM defines SKL as KL(teacher ‖ mixture) — arguments swapped. Our variant is still stable (mixture prevents zero-denominator) but is technically a different objective. Frame as "inspired by" in writeup. |
 | Adaptive skew λ | DistiLLM-2 (arXiv 2503.07067) | Per-sample λ = tanh(KL_gap / 4), same as paper. |
 | Rejection filtering | DeepSeek-R1 (arXiv 2501.12948) | Only keep teacher traces that pass all unit tests. |
-| Curriculum ordering | Self-Paced KD (arXiv 2408.03680) | Currently DISABLED (`curriculum: none`). |
+| Curriculum ordering | Self-Paced KD (arXiv 2408.03680) | ENABLED, length-based (`curriculum: length`). |
 | Thinking-budget forcing | s1 (arXiv 2502.04267) | 75% think / 25% code budget split. |
 | Top-k logit caching | Sparse Logit Sampling (arXiv 2503.16870) | Top-20 token-id + logprob cached per position, remapped to student vocab. |
 
@@ -46,61 +47,57 @@ QEAD targets. On-policy sampling would make that signal noisy.
 
 ---
 
-## Current State (as of 2026-06-10)
+## Current State (as of 2026-07-23)
 
-### Teacher cache (`cache/teacher_logprobs_r1_7b/`)
-- 1000 files cached, **481 pass all unit tests** (48.1%)
-- After rejection filtering: ~433 train / ~48 val samples
-- ⚠️ 48% pass rate is low — half the dataset is discarded. Consider: increase `max_tokens` (currently
-  8192), retry failed problems, or investigate why they fail.
+### Teacher caches (all offline — R1 teacher weights DELETED, never regenerate non-offline)
+- `cache/teacher_logprobs_r1_full/` — 2600 files, **1809 pass all unit tests** (69%): Easy 89%,
+  Medium 70%, Hard 47% (283/596 passing hard traces)
+- `cache/short_cot_coder7b/` — Coder-7B short-CoT helper traces, ~5760 usable train samples
+- Two-teacher mix: 1628 R1 (logit KD) + 5385 short-CoT (CE) train, val stays 181 pure-R1
 
-### Trained checkpoints
-| Checkpoint | Date | Notes |
+### Evaluation protocol
+- Full LeetCode test split: 228 problems (48 easy / 101 medium / 79 hard), pass@5, temp 0.6
+- 112/228 problems have broken references → verified-116 subset is the paper headline metric
+- Teacher ceiling: R1-7B = 126/228 (55.3% pass@5)
+
+### Headline results (228 problems, pass@5)
+
+| Model | Solved | Notes |
 |---|---|---|
-| `outputs/final` | Jun 9 | Latest training run (R1-7B teacher, α=0.5, T=2.0) |
-| `outputs/final_T2_alpha05` | Jun 4 | Earlier run, same hyperparams based on name |
+| Instruct original (Coder-1.5B-Instruct) | 22 | |
+| Instruct distilled, best (R1-only KD) | 39 | 31.9% on verified-116 |
+| Instruct distilled, two-teacher (seed 7) | 36 | truncation 42 → 3 |
+| General base original (Qwen2.5-1.5B) | 12 | low-floor gap study |
+| General base distilled (two-teacher) | 25 | ×2.08 relative, truncation 0 |
+| Teacher R1-7B | 126 | upper bound |
 
-### Evaluation results
+### Key findings (see `history/findings.md`)
+- Pure-KD ceiling on the 1.5B instruct student is proven exhausted (~38-39): on-policy probe showed
+  96.6% teacher-student token agreement; 4 configs converge to the same score. Bigger student (3B)
+  is the real lever.
+- Teacher swap to OCR-Nemotron-7B regressed and was reverted — R1 cache is canonical.
+- Truncation was degeneration loops, not token budget; the short-CoT mix fixed it (42 → 3 → 0).
 
-**Completed 3-way comparison (Jun 5) — 30 problems, pass@5, teacher SKIPPED:**
-
-| Model | Solved | pass@5 | test_pass_rate |
-|---|---|---|---|
-| Student (original) | 27/30 (90%) | 90.0% | 70.0% |
-| Student (distilled) | 28/30 (93.3%) | 93.3% | 53.3% |
-
-Mixed signal: distilled solves +1 problem but lower raw test pass rate. n=30 is too small.
-
-**In-progress comparison (Jun 10) — 100 problems, pass@5, teacher SKIPPED:**
-
-Only Student (original) completed so far:
-
-| | pass@1 | pass@5 | solved | truncated |
-|---|---|---|---|---|
-| Student (original) | 35.4% | 60% | 39/100 | 35 |
-
-Notably lower than the 30-problem run → earlier run likely got an easy problem sample.
-35/100 outputs truncated (hit token budget) — worth monitoring.
-
-**Older evaluate.py run (May 29):** 6/20 solved (30%) — earlier checkpoint or config.
-
-### Known issues to fix
-- `compare_eval.py` comparison runs all skip the teacher (`--skip-teacher`). Need a full 3-way run.
-- `notes.md` contains the Self-Instruct/Alpaca/WizardLM notes from a synthetic-data exploration
-  session — not directly used in the pipeline but useful if dataset augmentation is needed later.
+### Active run (started 2026-07-23)
+Base-track v2: lr 5e-6→1e-5, epochs 2→3, warmup 100, hard R1 traces oversampled 2× (+256).
+Goal: raise base-distilled above 25, especially hard solves. Output: `outputs_general_v2/`.
 
 ---
 
 ## Roadmap Status
 
-### Phase 1: Clean end-to-end run — ~70%
-- [x] Teacher cache built (1000 problems, 481 passing)
-- [x] Training completed (2 checkpoint runs)
-- [ ] compare_eval with 100+ problems (in progress, student-original done)
-- [ ] **Include teacher in comparison** (all runs so far skip it)
-- [ ] Verify distilled checkpoint is from the latest training run (Jun 9 `outputs/final`)
+### Phase 1: Clean end-to-end run — DONE
+- [x] Teacher cache built (2600 problems, 1809 passing)
+- [x] Full 3-way 228-problem compare with teacher included
+- [x] Two-teacher mix pipeline (R1 long-CoT logit KD + Coder-7B short-CoT CE)
+- [x] Verified-116 eval subset for paper-grade numbers
 
-### Phase 2: PTQ INT8 evaluation — not started
+### Phase 1.5: Base-model gap study — in progress
+- [x] General base (Qwen2.5-1.5B) baseline 12/228 and distilled 25/228
+- [ ] v2 recipe (higher LR, 3 epochs, hard oversample) — RUNNING
+- [ ] Difficulty-awareness conditioning (postponed by design)
+
+### Phase 2: PTQ INT8 evaluation — not started (next priority; it is in the paper title)
 - [ ] Add `--load-in-8bit` flag to `evaluate.py` / `compare_eval.py` using `BitsAndBytesConfig`
 - [ ] Run student (original) bf16 vs INT8 as degradation baseline
 - [ ] Run student (distilled) bf16 vs INT8 — this is the headline number
@@ -112,9 +109,10 @@ Notably lower than the 30-problem run → earlier run likely got an easy problem
 - [ ] Run the 2×2 matrix: {QEAD on, QEAD off} × {bf16, INT8}
 - [ ] **Key claim: Δpass-rate(bf16→INT8) is smaller for QEAD student**
 
-### Phase 4: Supporting experiments — not started
+### Phase 4: Scaling + supporting experiments — not started
+- [ ] 3B student (`config_3b.yaml`, `outputs_3b/` empty) — the proven lever for hard problems;
+      measure untrained 3B baseline first
 - [ ] Ablate confidence weighting (on/off) and adaptive λ (on/off)
 - [ ] Correlate per-token QEAD weights with actual INT8 prediction flips (preempts reviewer attack)
 - [ ] Efficiency table: size / VRAM / tokens-per-sec for teacher vs student bf16 vs student INT8
-- [ ] Statistical rigor: pass@5 with multiple seeds, ≥100 test problems
-- [ ] (Deferred) Synthetic data augmentation via Evol-Instruct — only if dataset size is the bottleneck
+- [ ] Statistical rigor: pass@5 with multiple seeds on the verified-116 subset
