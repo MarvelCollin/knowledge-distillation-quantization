@@ -68,7 +68,7 @@ QEAD targets. On-policy sampling would make that signal noisy.
 | Instruct distilled, best (R1-only KD) | 39 | 31.9% on verified-116 |
 | Instruct distilled, two-teacher (seed 7) | 36 | truncation 42 → 3 |
 | General base original (Qwen2.5-1.5B) | 12 | low-floor gap study |
-| General base distilled (two-teacher) | 25 | ×2.08 relative, truncation 0 |
+| General base distilled, best (v2 final_last) | 28 | ×2.33 relative, hard 2→5, trunc 1 |
 | Teacher R1-7B | 126 | upper bound |
 
 ### Key findings (see `history/findings.md`)
@@ -77,10 +77,15 @@ QEAD targets. On-policy sampling would make that signal noisy.
   is the real lever.
 - Teacher swap to OCR-Nemotron-7B regressed and was reverted — R1 cache is canonical.
 - Truncation was degeneration loops, not token budget; the short-CoT mix fixed it (42 → 3 → 0).
+- Val loss (pure-R1 val set) measures R1 imitation, not solving — decoupled from solve count.
+  Best-val checkpoint selection picks inferior snapshots on the base track; always eval `final_last`.
+- Base track converged to its own ceiling band (25-28 across three recipes: v1 mix 25, v2 28,
+  two-stage curriculum 26), mirroring the instruct 35-39 band. ~73% of failures are wrong_answer
+  with zero syntax errors — capacity-bound, not recipe-bound.
 
-### Active run (started 2026-07-23)
-Base-track v2: lr 5e-6→1e-5, epochs 2→3, warmup 100, hard R1 traces oversampled 2× (+256).
-Goal: raise base-distilled above 25, especially hard solves. Output: `outputs_general_v2/`.
+### Active run (started 2026-07-24)
+Base-track v2 seed rerun (identical recipe, new seed) to confirm 28 is not a lucky draw.
+Output: `outputs_general_v2_seed42/`. After this: base track closes; next GPU goes to PTQ / 3B.
 
 ---
 
@@ -92,9 +97,12 @@ Goal: raise base-distilled above 25, especially hard solves. Output: `outputs_ge
 - [x] Two-teacher mix pipeline (R1 long-CoT logit KD + Coder-7B short-CoT CE)
 - [x] Verified-116 eval subset for paper-grade numbers
 
-### Phase 1.5: Base-model gap study — in progress
+### Phase 1.5: Base-model gap study — wrapping up
 - [x] General base (Qwen2.5-1.5B) baseline 12/228 and distilled 25/228
-- [ ] v2 recipe (higher LR, 3 epochs, hard oversample) — RUNNING
+- [x] v2 recipe (higher LR, 3 epochs, hard oversample) — best: 28/228 from `final_last`
+- [x] Two-stage curriculum (short-CoT SFT → mix) — 26/228, null vs mixing
+- [x] Checkpoint-selection lesson: eval `final_last`, val loss decoupled from solves
+- [ ] Seed rerun of v2 recipe to confirm 28 — RUNNING
 - [ ] Difficulty-awareness conditioning (postponed by design)
 
 ### Phase 2: PTQ INT8 evaluation — not started (next priority; it is in the paper title)
