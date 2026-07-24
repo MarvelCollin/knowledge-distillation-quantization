@@ -87,6 +87,10 @@ def main():
                         help="On-policy GKD stage: train on student-generated sequences scored by the teacher.")
     parser.add_argument("--init-from", default=None,
                         help="Initialise the student from this checkpoint instead of the base model.")
+    parser.add_argument("--data-mix", choices=["mix", "short_only", "r1_only"], default=None,
+                        help="Restrict train split to one teacher: short_only (Coder short-CoT SFT) or r1_only (R1 logit KD). Val stays pure R1.")
+    parser.add_argument("--output-dir", default=None,
+                        help="Override training.output_dir from config.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -102,6 +106,10 @@ def main():
         config["training"]["seed"] = args.seed
     if args.cache_dir is not None:
         config["data"]["teacher_cache_dir"] = args.cache_dir
+    if args.data_mix is not None:
+        config["training"]["data_mix"] = args.data_mix
+    if args.output_dir is not None:
+        config["training"]["output_dir"] = args.output_dir
 
     seed = config["training"].get("seed", 42)
     random.seed(seed)

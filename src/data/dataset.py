@@ -159,8 +159,15 @@ def create_datasets(config: dict, tokenizer, cache_dir: str, rescore: bool = Fal
         n_short_train = len(train_keys) - split
         print(f"  Mix: {split} teacher + {n_short_train} short-CoT train samples "
               f"(ratio 1:{n_short_train / max(split, 1):.1f}), val stays {len(val_keys)} teacher-only.")
+    data_mix = config["training"].get("data_mix", "mix")
+    if data_mix == "short_only":
+        train_keys = [k for k in train_keys if is_short_key(k)]
+        print(f"  Data mix: short_only — {len(train_keys)} Coder short-CoT train samples (pure SFT stage).")
+    elif data_mix == "r1_only":
+        train_keys = [k for k in train_keys if not is_short_key(k)]
+        print(f"  Data mix: r1_only — {len(train_keys)} R1 long-CoT train samples (logit-KD stage).")
     hard_oversample = int(config["training"].get("hard_oversample", 1))
-    if hard_oversample > 1:
+    if hard_oversample > 1 and data_mix != "short_only":
         hard_keys = [k for k in teacher_kept[:split]
                      if problems[k]["difficulty"].lower() == "hard"]
         train_keys += hard_keys * (hard_oversample - 1)

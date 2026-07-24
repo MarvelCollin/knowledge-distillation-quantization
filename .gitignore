@@ -32,4 +32,4 @@ logs/short_cot.jsonl
 *.key
 credentials.json
 secrets.yaml
-token.json
+token.jsonhistory/eval_snapshots/
