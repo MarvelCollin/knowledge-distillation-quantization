@@ -66,7 +66,9 @@ Results (228 problems, pass@5, one sampling draw per cell):
 | Instruct distilled (seed 7 two teacher) | 36 | 30 | -6 | 24.3% to 24.4% |
 | General base distilled (v2 final_last) | 28 | 31 | +3 | 22.6% to 21.9% |
 
-Reading: only the instruct distilled delta (-6) is at the edge of the noise band; original and base rows show no measurable degradation. The interesting detail is that the instruct distilled test case rate is unchanged (24.3 to 24.4 over ~19k test executions) while solves dropped: INT8 did not remove per-test competence, it removed consistency, knocking borderline problems off the all-tests-green edge. Pending: second sampling seed on the instruct distilled INT8 row to size the noise, then the Phase 3 QEAD-off ablation, which is where the actual claim (QEAD degrades less than naive KD) is tested.
+Reading: only the instruct distilled delta (-6) is at the edge of the noise band; original and base rows show no measurable degradation. The interesting detail is that the instruct distilled test case rate is unchanged (24.3 to 24.4 over ~19k test executions) while solves dropped: INT8 did not remove per-test competence, it removed consistency, knocking borderline problems off the all-tests-green edge.
+
+Second sampling draw on the instruct distilled INT8 row (seed 42): 35 solved, pass@5 15.4%, test rate 25.8%. The INT8 draws {30, 35} overlap the bf16 seed band (35 to 38), so the -6 was mostly sampling noise. Phase 2 verdict: at 1.5B, per-channel W8 weight quantization causes no measurable degradation for any model (original, distilled, or base) on this eval. Clean deployment result, but it removes the contrast Phase 3 needs: if nothing degrades at INT8, QEAD-on vs QEAD-off cannot differ on solves. Decision: tighten to INT4 (group-128 symmetric, `--bits 4` in quantize_int8.py, the standard W4 granularity) to induce measurable degradation, then run the 2x2 there. Paper framing: robust at INT8, differentiated at INT4.
 
 ## What this shows
 

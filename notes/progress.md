@@ -112,8 +112,10 @@ Next GPU work: PTQ INT8 evaluation (Phase 2), then 3B student (Phase 4).
 - [x] Instruct original bf16 22 → INT8 24 (+2, no measurable degradation)
 - [x] Instruct distilled bf16 36 → INT8 30 (−6, edge of noise; test-rate unchanged → consistency loss)
 - [x] Base distilled bf16 28 → INT8 31 (+3, no measurable degradation)
-- [ ] Second sampling seed on instruct-distilled INT8 (size the −6)
-- [ ] (Optional) base-original INT8 for table symmetry; GPTQ/AWQ 4-bit stretch goal
+- [x] Second sampling seed on instruct-distilled INT8: 35 → the −6 was noise; INT8 draws {30, 35}
+      overlap the bf16 band. **Verdict: no measurable INT8 degradation for any model at 1.5B.**
+- [ ] INT4 (`--bits 4`, group-128 symmetric) — induce measurable degradation, run the grid there
+- [ ] (Optional) base-original INT8/INT4 for table symmetry
 
 ### Phase 3: 2×2 QEAD headline experiment — not started
 - [ ] Add `qead_enabled: true/false` config flag (~5 lines in `train.py`)
