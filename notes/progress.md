@@ -83,9 +83,9 @@ QEAD targets. On-policy sampling would make that signal noisy.
   two-stage curriculum 26), mirroring the instruct 35-39 band. ~73% of failures are wrong_answer
   with zero syntax errors — capacity-bound, not recipe-bound.
 
-### Active run (started 2026-07-24)
-Base-track v2 seed rerun (identical recipe, new seed) to confirm 28 is not a lucky draw.
-Output: `outputs_general_v2_seed42/`. After this: base track closes; next GPU goes to PTQ / 3B.
+### Active run
+None. Base track closed 2026-07-25 (28/228 replicated across seeds 7 and 42).
+Next GPU work: PTQ INT8 evaluation (Phase 2), then 3B student (Phase 4).
 
 ---
 
@@ -102,7 +102,7 @@ Output: `outputs_general_v2_seed42/`. After this: base track closes; next GPU go
 - [x] v2 recipe (higher LR, 3 epochs, hard oversample) — best: 28/228 from `final_last`
 - [x] Two-stage curriculum (short-CoT SFT → mix) — 26/228, null vs mixing
 - [x] Checkpoint-selection lesson: eval `final_last`, val loss decoupled from solves
-- [ ] Seed rerun of v2 recipe to confirm 28 — RUNNING
+- [x] Seed rerun of v2 recipe — 28/228 replicated (seed 42), band confirmed; track closed
 - [ ] Difficulty-awareness conditioning (postponed by design)
 
 ### Phase 2: PTQ INT8 evaluation — not started (next priority; it is in the paper title)

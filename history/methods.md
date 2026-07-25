@@ -18,6 +18,7 @@ Same student (Qwen2.5-Coder-1.5B), same fullset (228), pass@5, temperature 0.6.
 | General base v2 (best-val ep2) | mix, lr 1e-5, 3ep, hard x2 | 22 | 9.6% | 6 | wrong ckpt picked by val loss |
 | General base v2 (final_last ep3) | same run, last epoch ckpt | 28 | 12.3% | 1 | base best: easy 19, hard 5 |
 | General base two stage | short CoT SFT then mix, init-from | 26 | 11.4% | 1 | ordering no better than mixing |
+| General base v2 seed 42 | same v2 recipe, seed 42, final_last | 28 | 12.3% | 2 | 28 replicated, not a lucky draw |
 | Teacher R1-7B (ceiling) | none | 126 | 55.3% | 0 | upper bound |
 
 ## Barebone (base 1.5B) experiment, abandoned
@@ -50,6 +51,8 @@ Two lessons. First, val loss (pure R1 traces) measures R1 imitation, not solving
 Tested whether ordering beats mixing for a raw base: stage 1 pure SFT on the 5385 Coder short CoT samples only (2 epochs, lr 1e-5, no R1 signal), then stage 2 full mix (2 epochs, lr 5e-6) initialised from the stage 1 last checkpoint. Result 26 solved (easy 18, medium 4, hard 4, trunc 1), between v1 (25) and v2 final_last (28), inside the noise band. Ordering is not better than mixing. Stage 1 did make the model structurally tidier (missing_function test failures 421 to 58, the lowest ever) but tidiness does not convert to solves. Side observation: after stage 1 the val loss on R1 traces was 1.2275, worse than the raw base 1.1402, then stage 2 recovered it to 1.0425, more evidence that R1 imitation and capability move independently.
 
 Failure autopsy of v2 final_last vs two stage: both models fail identically. About 73% of failed samples are wrong_answer (clean, complete, running code with wrong logic), syntax errors are zero in both, and only about 12 of 1140 samples are near misses passing 90%+ of tests. The base recipes changed how the model learns, not what kind of model comes out. The only measurable difference is consistency: v2 final_last lands 71 fully correct samples vs 56 for two stage, same knowledge, more reliable execution. Three independent recipes (v1 mix 25, v2 28, two stage 26) converge to a 25 to 28 band, the base track mirror of the instruct 35 to 39 ceiling. Capacity bound, recipe exhausted; remaining item is a seed rerun of the v2 recipe to confirm 28 is not a lucky draw.
+
+Seed rerun result (seed 42, identical v2 recipe, final_last): 28 solved again, pass@5 12.3% identical, val loss 0.9372 vs 0.9375, near identical training dynamics. 28 is the real level, not a draw. Caveat inside the total: the difficulty composition swings across seeds (seed 7: easy 19 / med 4 / hard 5; seed 42: easy 17 / med 9 / hard 2), so per-difficulty counts on the base track are noise at the plus or minus 3 to 5 level and should not be reported as findings, only the total. The hard=5 in seed 7 was partly a lucky composition. Base track final: 12 to 28 (x2.33), replicated across two seeds, band 25 to 28 across recipes. Track closed.
 
 ## What this shows
 
