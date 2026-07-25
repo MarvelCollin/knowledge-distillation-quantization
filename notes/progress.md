@@ -105,11 +105,15 @@ Next GPU work: PTQ INT8 evaluation (Phase 2), then 3B student (Phase 4).
 - [x] Seed rerun of v2 recipe — 28/228 replicated (seed 42), band confirmed; track closed
 - [ ] Difficulty-awareness conditioning (postponed by design)
 
-### Phase 2: PTQ INT8 evaluation — not started (next priority; it is in the paper title)
-- [ ] Add `--load-in-8bit` flag to `evaluate.py` / `compare_eval.py` using `BitsAndBytesConfig`
-- [ ] Run student (original) bf16 vs INT8 as degradation baseline
-- [ ] Run student (distilled) bf16 vs INT8 — this is the headline number
-- [ ] (Optional) Also evaluate GPTQ/AWQ 4-bit for stronger compression story
+### Phase 2: PTQ INT8 evaluation — mostly done (2026-07-25)
+- [x] INT8 via `scripts/quantize_int8.py` — simulated per-channel symmetric W8 fake-quant
+      (real compressed INT8 checkpoints are unreadable by vLLM 0.6.x; verified writer-side correct)
+- [x] `--original` / `--tag` / `--skip-distilled` flags in compare_eval.py
+- [x] Instruct original bf16 22 → INT8 24 (+2, no measurable degradation)
+- [x] Instruct distilled bf16 36 → INT8 30 (−6, edge of noise; test-rate unchanged → consistency loss)
+- [x] Base distilled bf16 28 → INT8 31 (+3, no measurable degradation)
+- [ ] Second sampling seed on instruct-distilled INT8 (size the −6)
+- [ ] (Optional) base-original INT8 for table symmetry; GPTQ/AWQ 4-bit stretch goal
 
 ### Phase 3: 2×2 QEAD headline experiment — not started
 - [ ] Add `qead_enabled: true/false` config flag (~5 lines in `train.py`)

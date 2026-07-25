@@ -54,6 +54,20 @@ Failure autopsy of v2 final_last vs two stage: both models fail identically. Abo
 
 Seed rerun result (seed 42, identical v2 recipe, final_last): 28 solved again, pass@5 12.3% identical, val loss 0.9372 vs 0.9375, near identical training dynamics. 28 is the real level, not a draw. Caveat inside the total: the difficulty composition swings across seeds (seed 7: easy 19 / med 4 / hard 5; seed 42: easy 17 / med 9 / hard 2), so per-difficulty counts on the base track are noise at the plus or minus 3 to 5 level and should not be reported as findings, only the total. The hard=5 in seed 7 was partly a lucky composition. Base track final: 12 to 28 (x2.33), replicated across two seeds, band 25 to 28 across recipes. Track closed.
 
+## PTQ INT8 (Phase 2): simulated quantization, first grid
+
+Implementation note: real compressed INT8 checkpoints (llm-compressor W8A16 pack-quantized and W8A8 int-quantized) load in vLLM 0.6.6 but generate deterministic garbage on both the Marlin WNA16 and CUTLASS W8A8 kernel paths; the written checkpoints were verified byte-level correct (true int8 weights, sane per-channel scales), so the fault is vLLM 0.6.x's reader. Pivoted to simulated PTQ: per-channel symmetric int8 round-trip on every Linear weight (lm_head excluded), saved as plain bf16 (`scripts/quantize_int8.py`). Numerically equivalent to W8A16 inference for accuracy; the real INT8 footprint (2.12 GB vs 2.91 GB bf16) is cited from the compressed checkpoint. Verified: 86% of weights changed, mean |delta| 4e-4, embeddings untouched, coherent generation.
+
+Results (228 problems, pass@5, one sampling draw per cell):
+
+| Model | bf16 solved | INT8 solved | delta | test rate bf16 to INT8 |
+|---|---|---|---|---|
+| Instruct original | 22 | 24 | +2 | 15.3% to 19.7% |
+| Instruct distilled (seed 7 two teacher) | 36 | 30 | -6 | 24.3% to 24.4% |
+| General base distilled (v2 final_last) | 28 | 31 | +3 | 22.6% to 21.9% |
+
+Reading: only the instruct distilled delta (-6) is at the edge of the noise band; original and base rows show no measurable degradation. The interesting detail is that the instruct distilled test case rate is unchanged (24.3 to 24.4 over ~19k test executions) while solves dropped: INT8 did not remove per-test competence, it removed consistency, knocking borderline problems off the all-tests-green edge. Pending: second sampling seed on the instruct distilled INT8 row to size the noise, then the Phase 3 QEAD-off ablation, which is where the actual claim (QEAD degrades less than naive KD) is tested.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.

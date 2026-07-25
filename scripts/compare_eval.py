@@ -725,6 +725,13 @@ def main() -> None:
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--distilled", default=None,
                         help="Path to distilled student checkpoint (auto-detected if omitted)")
+    parser.add_argument("--original", default=None,
+                        help="Path override for the original student row (e.g. an INT8-quantized copy).")
+    parser.add_argument("--tag", default=None,
+                        help="Label suffix for student rows (e.g. int8) — keeps cached results "
+                             "separate from the bf16 rows instead of reusing/overwriting them.")
+    parser.add_argument("--skip-distilled", action="store_true",
+                        help="Skip the distilled student row.")
     parser.add_argument("--num-problems", type=int, default=228,
                         help="Number of LeetCode test problems to evaluate (default: 228 = full test split)")
     parser.add_argument("--difficulty", default="all",
@@ -788,10 +795,13 @@ def main() -> None:
     summaries = []
 
     student_base = student_model.split("/")[-1]
+    if args.tag:
+        student_base = f"{student_base} {args.tag}"
+    original_path = args.original or student_model
 
     if not args.skip_original:
         summaries.append(evaluate_model(
-            f"Student original ({student_base})", student_model,
+            f"Student original ({student_base})", original_path,
             problems, max_new_tokens, device, is_teacher=False,
             dataset_name=dataset_name,
             num_samples=args.num_samples, temperature=args.temperature, top_p=args.top_p, k=k,
@@ -802,7 +812,9 @@ def main() -> None:
         ))
 
     distilled_path = args.distilled
-    if distilled_path is None:
+    if args.skip_distilled:
+        distilled_path = None
+    elif distilled_path is None:
         out_dir = Path(config["training"]["output_dir"])
         for name in ("final", "final_last"):
             cand = out_dir / name
@@ -821,7 +833,7 @@ def main() -> None:
             strict_naming=args.strict_naming, cp_prompt=args.cp_prompt,
             quick_retry=args.quick_retry,
         ))
-    else:
+    elif not args.skip_distilled:
         print("\nNo distilled checkpoint found — run train.py first to generate one.")
 
     if not args.skip_teacher:
