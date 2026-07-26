@@ -15,14 +15,19 @@ def fused_qead_kld_pass(hidden: torch.Tensor, lm_head_weight: torch.Tensor,
                         response_mask: torch.Tensor, teacher_ids: torch.Tensor,
                         teacher_probs: torch.Tensor, temperature: float,
                         compute_kld: bool = True, chunk_size: int = 1024,
-                        int8_rows: int = 512) -> tuple:
+                        int8_rows: int = 512, compute_error: bool = True) -> tuple:
+    # compute_error=False is the QEAD-off ablation: uniform weights over response
+    # tokens instead of quantization-error weights; the KLD path is unchanged.
     with torch.no_grad():
         batch, seq_len, dim = hidden.shape
         device = hidden.device
-        error = torch.zeros(batch, seq_len, device=device)
+        error = (torch.zeros(batch, seq_len, device=device) if compute_error
+                 else response_mask.float())
         per_token_kld = torch.zeros(batch, seq_len, device=device) if compute_kld else None
 
         for s in range(0, seq_len, chunk_size):
+            if not compute_error and not compute_kld:
+                break
             e = min(s + chunk_size, seq_len)
             logits = F.linear(hidden[:, s:e].detach(), lm_head_weight)
 
@@ -33,17 +38,19 @@ def fused_qead_kld_pass(hidden: torch.Tensor, lm_head_weight: torch.Tensor,
                 safe_teacher = teacher_probs[:, s:e].clamp(min=1e-10)
                 per_token_kld[:, s:e] = (teacher_probs[:, s:e] * (safe_teacher.log() - student_at)).sum(dim=-1)
 
-            flat = logits.reshape(-1, logits.size(-1))
-            idx = response_mask[:, s:e].reshape(-1).nonzero(as_tuple=True)[0]
-            err_flat = torch.zeros(flat.size(0), device=device)
-            for r in range(0, len(idx), int8_rows):
-                rows_idx = idx[r : r + int8_rows]
-                rows = flat.index_select(0, rows_idx).float()
-                rows_q = simulate_int8_quantization(rows)
-                err_flat[rows_idx] = torch.norm(rows.sub_(rows_q), p=2, dim=-1)
-                del rows, rows_q
-            error[:, s:e] = err_flat.reshape(batch, e - s)
-            del logits, flat, err_flat
+            if compute_error:
+                flat = logits.reshape(-1, logits.size(-1))
+                idx = response_mask[:, s:e].reshape(-1).nonzero(as_tuple=True)[0]
+                err_flat = torch.zeros(flat.size(0), device=device)
+                for r in range(0, len(idx), int8_rows):
+                    rows_idx = idx[r : r + int8_rows]
+                    rows = flat.index_select(0, rows_idx).float()
+                    rows_q = simulate_int8_quantization(rows)
+                    err_flat[rows_idx] = torch.norm(rows.sub_(rows_q), p=2, dim=-1)
+                    del rows, rows_q
+                error[:, s:e] = err_flat.reshape(batch, e - s)
+                del flat, err_flat
+            del logits
 
         row_sums = error.sum(dim=-1, keepdim=True).clamp(min=1e-8)
         return error / row_sums, per_token_kld

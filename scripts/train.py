@@ -91,6 +91,8 @@ def main():
                         help="Restrict train split to one teacher: short_only (Coder short-CoT SFT) or r1_only (R1 logit KD). Val stays pure R1.")
     parser.add_argument("--output-dir", default=None,
                         help="Override training.output_dir from config.")
+    parser.add_argument("--no-qead", action="store_true",
+                        help="Disable QEAD error weighting (uniform-weight ablation).")
     args = parser.parse_args()
 
     load_dotenv()
@@ -110,6 +112,8 @@ def main():
         config["training"]["data_mix"] = args.data_mix
     if args.output_dir is not None:
         config["training"]["output_dir"] = args.output_dir
+    if args.no_qead:
+        config["training"]["qead"] = False
 
     seed = config["training"].get("seed", 42)
     random.seed(seed)
@@ -295,6 +299,8 @@ def main():
     use_adaptive_skew = config["training"].get("adaptive_skew", False)
     use_confidence = config["training"].get("teacher_confidence_weight", False)
     use_entropy_focus = config["training"].get("entropy_focus", False)
+    qead_enabled = config["training"].get("qead", True)
+    print(f"QEAD error weighting: {'on' if qead_enabled else 'OFF (uniform weights ablation)'}")
     distill_temp = config["training"]["distill_temperature"]
     max_grad_norm = config["training"]["max_grad_norm"]
     eval_steps = config["training"]["eval_steps"]
@@ -369,7 +375,7 @@ def main():
             predict_mask[:, :-1] = response_mask[:, 1:]
             qead_weights, per_token_kld = fused_qead_kld_pass(
                 hidden, lm_head_weight, predict_mask, teacher_ids, teacher_probs,
-                distill_temp, compute_kld=use_adaptive_skew,
+                distill_temp, compute_kld=use_adaptive_skew, compute_error=qead_enabled,
             )
 
             valid_teacher = teacher_probs.sum(dim=-1) > 1e-8

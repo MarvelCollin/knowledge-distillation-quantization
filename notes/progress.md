@@ -120,7 +120,8 @@ Next GPU work: PTQ INT8 evaluation (Phase 2), then 3B student (Phase 4).
 - [ ] (Optional) base-original INT8/INT4 for table symmetry; second INT4 draw on instruct distilled
 
 ### Phase 3: 2×2 QEAD headline experiment — not started
-- [ ] Add `qead_enabled: true/false` config flag (~5 lines in `train.py`)
+- [x] `qead: false` config flag / `--no-qead` CLI flag (uniform weights over response tokens;
+      KLD path unchanged, verified identical between modes)
 - [ ] Train student with `qead: off` (uniform weights) — same teacher cache, reusable
 - [ ] Run the 2×2 matrix: {QEAD on, QEAD off} × {bf16, INT8}
 - [ ] **Key claim: Δpass-rate(bf16→INT8) is smaller for QEAD student**
