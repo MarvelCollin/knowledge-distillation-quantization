@@ -70,6 +70,20 @@ Reading: only the instruct distilled delta (-6) is at the edge of the noise band
 
 Second sampling draw on the instruct distilled INT8 row (seed 42): 35 solved, pass@5 15.4%, test rate 25.8%. The INT8 draws {30, 35} overlap the bf16 seed band (35 to 38), so the -6 was mostly sampling noise. Phase 2 verdict: at 1.5B, per-channel W8 weight quantization causes no measurable degradation for any model (original, distilled, or base) on this eval. Clean deployment result, but it removes the contrast Phase 3 needs: if nothing degrades at INT8, QEAD-on vs QEAD-off cannot differ on solves. Decision: tighten to INT4 (group-128 symmetric, `--bits 4` in quantize_int8.py, the standard W4 granularity) to induce measurable degradation, then run the 2x2 there. Paper framing: robust at INT8, differentiated at INT4.
 
+## PTQ INT4: degradation appears, and it is asymmetric
+
+INT4 grid (group-128 symmetric W4, 228 problems, pass@5, one draw per cell):
+
+| Model | bf16 | INT8 | INT4 | INT4 delta vs bf16 | trunc |
+|---|---|---|---|---|---|
+| Instruct original | 22 | 24 | 21 | -1 | 2 |
+| Instruct distilled | 36 | 30 / 35 | 17 | -19 | 22 |
+| Base distilled | 28 | 31 | 7 | -21 | 158 |
+
+Headline finding: the original instruct model is essentially INT4-robust (-1, within noise) while both distilled models collapse (roughly halved or worse). Distillation dramatically increases quantization fragility at 4-bit. Failure mode is visible in truncation counts: base distilled hits 158/1140 truncated samples with degenerate output (including bracket spam deep enough to overflow CPython's parser stack, fixed in reasoning.py by treating MemoryError/RecursionError as unparseable). The distilled weight distributions evidently occupy sharper/more outlier-heavy configurations that group-128 W4 cannot represent; the pretrained instruct weights are flatter and survive.
+
+This sets up Phase 3 cleanly: the current distilled checkpoints are QEAD-on, so the 2x2 question is whether QEAD-off distillation degrades even worse at INT4. If yes, QEAD partially mitigates a real fragility that distillation itself introduces (an honest and novel framing: distillation creates INT4 fragility, QEAD recovers part of it). If QEAD-off is the same, QEAD does not help and the paper reports the fragility finding itself, with INT8 robustness as the deployment recommendation.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.
