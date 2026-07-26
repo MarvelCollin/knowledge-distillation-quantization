@@ -123,6 +123,41 @@ def fig4_int4_failure_mode():
     fig.savefig(f"{OUT}/fig4_int4_failure_mode.png", dpi=200)
 
 
+def fig5_failure_mixture():
+    # Per-test-execution category shares, base model, 116,170 executions per format
+    formats = ["bf16\noriginal", "bf16\ndistilled", "INT8\ndistilled", "INT4\ndistilled"]
+    cats = ["pass", "wrong_answer", "runtime_error", "missing_function", "syntax_error", "timeout"]
+    shares = {
+        "pass":             [10.9, 20.7, 20.4, 5.2],
+        "wrong_answer":     [60.7, 62.7, 62.7, 38.2],
+        "runtime_error":    [12.7, 12.7, 13.8, 30.3],
+        "missing_function": [14.0, 0.9, 0.6, 21.4],
+        "syntax_error":     [0.1, 0.0, 0.1, 1.7],
+        "timeout":          [1.6, 3.0, 2.4, 3.2],
+    }
+    colors = {
+        "pass": C_TEACH, "wrong_answer": "#fdae6b", "runtime_error": C_BAD,
+        "missing_function": "#756bb1", "syntax_error": "#e7298a", "timeout": "#666666",
+    }
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    xs = range(len(formats))
+    bottom = [0.0] * len(formats)
+    for c in cats:
+        ax.bar(xs, shares[c], 0.6, bottom=bottom, color=colors[c], label=c)
+        bottom = [b + v for b, v in zip(bottom, shares[c])]
+    for x, f in zip(xs, formats):
+        ax.text(x, shares["pass"][x] / 2, f"{shares['pass'][x]:g}%", ha="center",
+                fontsize=8.5, color="white", fontweight="bold")
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(formats)
+    ax.set_ylabel("Share of test executions (%)")
+    ax.set_ylim(0, 100)
+    ax.set_title("INT4 changes the kind of failure, not just the amount\n(base model, 116k test executions per format)")
+    ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.0, 0.5))
+    fig.tight_layout()
+    fig.savefig(f"{OUT}/fig5_failure_mixture.png", dpi=200)
+
+
 if __name__ == "__main__":
     import os
 
@@ -131,4 +166,5 @@ if __name__ == "__main__":
     fig2_gap_study()
     fig3_quantization()
     fig4_int4_failure_mode()
-    print(f"wrote 4 figures to {OUT}/")
+    fig5_failure_mixture()
+    print(f"wrote 5 figures to {OUT}/")

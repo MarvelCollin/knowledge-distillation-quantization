@@ -84,6 +84,23 @@ Headline finding: the original instruct model is essentially INT4-robust (-1, wi
 
 This sets up Phase 3 cleanly: the current distilled checkpoints are QEAD-on, so the 2x2 question is whether QEAD-off distillation degrades even worse at INT4. If yes, QEAD partially mitigates a real fragility that distillation itself introduces (an honest and novel framing: distillation creates INT4 fragility, QEAD recovers part of it). If QEAD-off is the same, QEAD does not help and the paper reports the fragility finding itself, with INT8 robustness as the deployment recommendation.
 
+## Failure mixture across formats (base model, 116,170 test executions per format)
+
+Per test execution category share:
+
+| Category | bf16 original | bf16 distilled | INT8 distilled | INT4 distilled |
+|---|---|---|---|---|
+| pass | 10.9% | 20.7% | 20.4% | 5.2% |
+| wrong_answer | 60.7% | 62.7% | 62.7% | 38.2% |
+| runtime_error | 12.7% | 12.7% | 13.8% | 30.3% |
+| missing_function | 14.0% | 0.9% | 0.6% | 21.4% |
+| syntax_error | 0.1% | 0.0% | 0.1% | 1.7% |
+| timeout | 1.6% | 3.0% | 2.4% | 3.2% |
+
+Per sample (dominant failure of each of the 1140 generations): fully passed 18 / 59 / 62 / 15; empty extracted code 118 / 0 / 0 / 155.
+
+Two conclusions. First, the INT8 column is indistinguishable from bf16 distilled in every category (wrong_answer 62.7 vs 62.7, fully passed 59 vs 62): the +3 solve delta has no mechanism behind it, confirming it is sampling noise, not improvement. Second, INT4 changes the kind of failure, not just the amount: wrong_answer (the competent failure mode, clean running code with wrong logic) drops to 38.2% while structural failures explode (missing_function 0.9 to 21.4%, runtime errors 12.7 to 30.3%, syntax errors 39 to 1986 executions, empty extractions 0 to 155). Distillation had specifically eliminated missing_function and empty output; INT4 resurrects both above the untrained original's level. bf16/INT8 distilled fails like a programmer with wrong ideas; INT4 distilled fails like a broken text generator. This is the quantitative core of the fragility claim (fig5).
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.
