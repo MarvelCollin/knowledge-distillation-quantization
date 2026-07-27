@@ -84,6 +84,21 @@ Headline finding: the original instruct model is essentially INT4-robust (-1, wi
 
 This sets up Phase 3 cleanly: the current distilled checkpoints are QEAD-on, so the 2x2 question is whether QEAD-off distillation degrades even worse at INT4. If yes, QEAD partially mitigates a real fragility that distillation itself introduces (an honest and novel framing: distillation creates INT4 fragility, QEAD recovers part of it). If QEAD-off is the same, QEAD does not help and the paper reports the fragility finding itself, with INT8 robustness as the deployment recommendation.
 
+## INT4 grid completed: quantization erases the distillation gain
+
+Strengthening runs: second INT4 draw on instruct distilled (seed 42) scored 23 (first draw 17, bf16 band 35 to 38), confirming the collapse is real, roughly 36 to 20. Base original rows: INT8 11 (bf16 12, free like everywhere else), INT4 6 (bf16 12, halved, truncation 29 to 70).
+
+Full 2x3 grid (solved / 228):
+
+| Model | bf16 | INT8 | INT4 |
+|---|---|---|---|
+| Instruct original | 22 | 24 | 21 |
+| Instruct distilled | 36 | 30 / 35 | 17 / 23 |
+| Base original | 12 | 11 | 6 |
+| Base distilled | 28 | 31 | 7 |
+
+Unified finding: at bf16 the distilled models lead the originals by +14 (instruct) and +16 (base). At INT4 the gap vanishes on both tracks: instruct 20 vs 21, base 7 vs 6, statistically identical. W4 quantization erases the distillation gain completely, while the pretrained backbone capability survives (instruct fully at -1, base partially at -6). INT8 preserves the gain fully on all four models. The knowledge added by KD is stored in weight structure that 4-bit rounding destroys; this is a sharper claim than "distilled models degrade more" and is the paper's headline pending the Phase 3 QEAD-off ablation (does error-aware weighting change where the knowledge is stored, or is the fragility inherent to KD).
+
 ## Failure mixture across formats (base model, 116,170 test executions per format)
 
 Per test execution category share:

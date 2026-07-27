@@ -73,30 +73,37 @@ def fig2_gap_study():
 
 
 def fig3_quantization():
-    # bf16 / INT8 / INT4 grid; instruct-distilled INT8 = mean of two draws {30, 35}
-    models = ["Instruct\noriginal", "Instruct\ndistilled", "Base\ndistilled"]
-    bf16 = [22, 36, 28]
-    int8 = [24, 32.5, 31]
-    int4 = [21, 17, 7]
-    fig, ax = plt.subplots(figsize=(7, 4.2))
-    xs = [0, 1, 2]
+    # Full 2x3 grid; multi-draw cells plotted as the mean with an error bar:
+    # instruct-distilled INT8 {30, 35}, INT4 {17, 23}
+    models = ["Instruct\noriginal", "Instruct\ndistilled", "Base\noriginal", "Base\ndistilled"]
+    bf16 = [22, 36, 12, 28]
+    int8 = [24, 32.5, 11, 31]
+    int4 = [21, 20, 6, 7]
+    fig, ax = plt.subplots(figsize=(8.5, 4.4))
+    xs = [0, 1, 2, 3]
     w = 0.26
     ax.bar([x - w for x in xs], bf16, w, color="#444444", label="bf16")
     ax.bar(xs, int8, w, color=C_DIST, label="INT8 (per-channel W8)")
     ax.bar([x + w for x in xs], int4, w, color=C_BAD, label="INT4 (group-128 W4)")
-    ax.errorbar([1], [32.5], yerr=[[2.5], [2.5]], fmt="none", ecolor="black", capsize=3, lw=1)
+    ax.errorbar([1], [32.5], yerr=2.5, fmt="none", ecolor="black", capsize=3, lw=1)
+    ax.errorbar([1 + w], [20], yerr=3, fmt="none", ecolor="black", capsize=3, lw=1)
     for x, b, i8, i4 in zip(xs, bf16, int8, int4):
         ax.text(x - w, b + 0.8, f"{b:g}", ha="center", fontsize=9)
         ax.text(x, i8 + (3.5 if x == 1 else 0.8), f"{i8:g}", ha="center", fontsize=9)
-        ax.text(x + w, i4 + 0.8, f"{i4:g}", ha="center", fontsize=9)
-    d4 = [i4 - b for b, i4 in zip(bf16, int4)]
-    for x, d in zip(xs, d4):
-        ax.text(x + w, 1.5, f"{d:+d}", ha="center", fontsize=9, color="white", fontweight="bold")
+        ax.text(x + w, i4 + (3.8 if x == 1 else 0.8), f"{i4:g}", ha="center", fontsize=9)
+    # distilled-vs-original gap annotations per track
+    for track, (xo, xd) in {"instruct": (0, 1), "base": (2, 3)}.items():
+        gap_bf = bf16[xd] - bf16[xo]
+        gap_i4 = int4[xd] - int4[xo]
+        ax.text((xo + xd) / 2, max(bf16[xd], int8[xd]) + 4.5,
+                f"KD gap bf16: +{gap_bf}\nKD gap INT4: {gap_i4:+d}",
+                ha="center", fontsize=8.5, style="italic")
     ax.set_xticks(xs)
     ax.set_xticklabels(models)
+    ax.set_ylim(0, 46)
     ax.set_ylabel("Problems solved / 228 (pass@5)")
-    ax.set_title("INT8 is free for all models; INT4 collapses only the distilled ones")
-    ax.legend(fontsize=9)
+    ax.set_title("INT8 preserves the distillation gain; INT4 erases it on both tracks")
+    ax.legend(fontsize=9, loc="center left", bbox_to_anchor=(1.0, 0.5))
     fig.tight_layout()
     fig.savefig(f"{OUT}/fig3_quantization.png", dpi=200)
 

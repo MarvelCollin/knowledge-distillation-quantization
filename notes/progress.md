@@ -117,7 +117,10 @@ Next GPU work: PTQ INT8 evaluation (Phase 2), then 3B student (Phase 4).
 - [x] INT4 grid: instruct original 22→21 (**robust**), instruct distilled 36→17, base distilled
       28→7 (trunc 158, degenerate loops). **Distillation dramatically increases INT4 fragility.**
 - [ ] Phase 3: train QEAD-off distilled, eval bf16 + INT4 — does QEAD mitigate the fragility?
-- [ ] (Optional) base-original INT8/INT4 for table symmetry; second INT4 draw on instruct distilled
+- [x] Second INT4 draw instruct distilled: 23 (draws {17, 23} vs bf16 35-38 — collapse confirmed)
+- [x] Base original INT8 11 / INT4 6 (bf16 12) — grid complete
+- **Headline: INT4 erases the distillation gain on both tracks (instr 20 vs 21, base 7 vs 6);
+  INT8 preserves it fully everywhere**
 
 ### Phase 3: 2×2 QEAD headline experiment — not started
 - [x] `qead: false` config flag / `--no-qead` CLI flag (uniform weights over response tokens;
