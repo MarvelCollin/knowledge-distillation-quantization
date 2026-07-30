@@ -1,50 +1,11 @@
 {
- "phase": "cache_build",
- "updated": "2026-07-08 07:49:35",
- "elapsed_s": 1636.0,
+ "phase": "train_metrics",
+ "updated": "2026-07-29 14:13:31",
+ "elapsed_s": 30728.9,
  "last_event": {
-  "t": 1636.0,
-  "kind": "chunk",
-  "idx": 4,
-  "of": 119,
-  "secs": 424.2,
-  "s_per_prompt": 26.5,
-  "chunk_pass": 13,
-  "chunk_fail": 3,
-  "total_pass": 42,
-  "tested": 64,
-  "pass_rate": 0.6562,
-  "by_difficulty": {
-   "Easy": {
-    "pass": 15,
-    "fail": 4,
-    "causes": {
-     "wrong_answer": 3,
-     "runtime_error": 1
-    }
-   },
-   "Medium": {
-    "pass": 18,
-    "fail": 10,
-    "causes": {
-     "runtime_error": 1,
-     "wrong_answer": 7,
-     "missing_function": 1,
-     "timeout": 1
-    }
-   },
-   "Hard": {
-    "pass": 9,
-    "fail": 8,
-    "causes": {
-     "runtime_error": 2,
-     "missing_function": 3,
-     "wrong_answer": 2,
-     "timeout": 1
-    }
-   }
-  },
-  "gpu_gb": 22.1,
-  "eta_s": 46829
+  "t": 30728.9,
+  "kind": "train_done",
+  "best_val_loss": 0.9402,
+  "steps": 5385
  }
 }

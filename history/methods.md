@@ -19,6 +19,8 @@ Same student (Qwen2.5-Coder-1.5B), same fullset (228), pass@5, temperature 0.6.
 | General base v2 (final_last ep3) | same run, last epoch ckpt | 28 | 12.3% | 1 | base best: easy 19, hard 5 |
 | General base two stage | short CoT SFT then mix, init-from | 26 | 11.4% | 1 | ordering no better than mixing |
 | General base v2 seed 42 | same v2 recipe, seed 42, final_last | 28 | 12.3% | 2 | 28 replicated, not a lucky draw |
+| Instruct QEAD-off | mix, seed 7, uniform token weights | 32.5 (30, 35) | 15.4% | 0-1 | null vs QEAD-on 36 |
+| General base QEAD-off | v2 recipe, seed 7, uniform weights | 26 | 11.4% | 0 | null vs QEAD-on 28 |
 | Teacher R1-7B (ceiling) | none | 126 | 55.3% | 0 | upper bound |
 
 ## Barebone (base 1.5B) experiment, abandoned
@@ -115,6 +117,29 @@ Per test execution category share:
 Per sample (dominant failure of each of the 1140 generations): fully passed 18 / 59 / 62 / 15; empty extracted code 118 / 0 / 0 / 155.
 
 Two conclusions. First, the INT8 column is indistinguishable from bf16 distilled in every category (wrong_answer 62.7 vs 62.7, fully passed 59 vs 62): the +3 solve delta has no mechanism behind it, confirming it is sampling noise, not improvement. Second, INT4 changes the kind of failure, not just the amount: wrong_answer (the competent failure mode, clean running code with wrong logic) drops to 38.2% while structural failures explode (missing_function 0.9 to 21.4%, runtime errors 12.7 to 30.3%, syntax errors 39 to 1986 executions, empty extractions 0 to 155). Distillation had specifically eliminated missing_function and empty output; INT4 resurrects both above the untrained original's level. bf16/INT8 distilled fails like a programmer with wrong ideas; INT4 distilled fails like a broken text generator. This is the quantitative core of the fragility claim (fig5).
+
+## Phase 3: the QEAD ablation is a null on both tracks
+
+The 2x2 (QEAD-on vs QEAD-off) x (bf16 vs INT4) was run on both student tracks. QEAD-off means uniform per-token weights over the response instead of quantization-error weights; the KLD path is byte-identical between modes (unit tested), same teacher cache, same seed 7, same recipe per track. INT8 was dropped from the matrix because Phase 2 showed nothing degrades there, so there is no contrast to measure.
+
+| Track | Variant | bf16 | INT4 | Absolute drop | Retention |
+|---|---|---|---|---|---|
+| Instruct | QEAD-on | 36 | 20 (draws 17, 23) | -16 | 55.6% |
+| Instruct | QEAD-off | 32.5 (draws 30, 35) | 18 (draws 16, 20) | -14.5 | 55.4% |
+| Base | QEAD-on | 28 | 6 (draws 7, 5) | -22 | 21.4% |
+| Base | QEAD-off | 26 | 8 | -18 | 30.8% |
+
+Two separate claims fail here, and both fail cleanly.
+
+First, QEAD does not improve distillation quality. The instruct QEAD-off first draw was 30 against QEAD-on's 36, a +6 that sat at the edge of the noise band and looked like it might be real. The second draw (seed 42) came back 35, so the draws are {30, 35} against 36: indistinguishable, and overlapping the same band the QEAD-on training seeds themselves occupied (38, 35, 36). The base track had already said the same thing more quietly at 28 vs 26. Two tracks, two nulls.
+
+Second, QEAD does not confer quantization robustness, which was the original point of the method. On the instruct track, where all four cells are now double-drawn, retention is 55.6 percent for QEAD-on and 55.4 percent for QEAD-off. The two students keep the same fraction of their bf16 accuracy to within two tenths of a point.
+
+The base track's apparent 9.4 point gap in the opposite direction (21.4 vs 30.8) is a single-draw artifact. It rests on one QEAD-off INT4 measurement of 8 against a two-draw mean of 6, and the instruct cells now show directly that single INT4 draws scatter by 4 to 6 solves ({17, 23} and {16, 20}). A lone 8 against a mean of 6 is inside that scatter. Where the sampling is adequate the two variants are identical; where it is thin the difference points the wrong way for the hypothesis anyway.
+
+The cleanest way to see it is that the instruct INT4 gap (20 vs 16) is just the bf16 gap carried forward, not widened. If error-aware weighting were protecting the weights from 4-bit rounding, quantization would separate the two students further apart than they already are. It does not.
+
+Verdict: QEAD is a complete null, and the paper reports it as the negative control that rules out the obvious mitigation. This does not weaken the headline finding, it sharpens it. The INT4 erasure is not an artifact of one training recipe, and it is not fixable by reweighting which tokens the distillation loss attends to. The knowledge that quantization destroys is not concentrated in the tokens QEAD upweights.
 
 ## What this shows
 

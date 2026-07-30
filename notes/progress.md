@@ -105,10 +105,17 @@ KD gap by precision: bf16 +14 / +16 → INT8 ~+8.5 / +20 → **INT4 −1 / +1**.
 
 | Track | Variant | bf16 | INT4 | Drop | Retention |
 |---|---|---|---|---|---|
-| Instruct | QEAD-on | 36 | 20 | −16 | 55.6% |
-| Instruct | QEAD-off | 30 | 16 | −14 | 53.3% |
-| Base | QEAD-on | 28 | 6 | −22 | 21.4% |
+| Instruct | QEAD-on | 36 | 20 *(17, 23)* | −16 | **55.6%** |
+| Instruct | QEAD-off | 32.5 *(30, 35)* | 18 *(16, 20)* | −14.5 | **55.4%** |
+| Base | QEAD-on | 28 | 6 *(7, 5)* | −22 | 21.4% |
 | Base | QEAD-off | 26 | 8 | −18 | 30.8% |
+
+**Both QEAD claims fail.** (a) No distillation-quality benefit: instruct 36 vs 32.5, base 28 vs 26 —
+both inside noise. The instruct first draw of 30 looked like a real +6 until the seed-42 draw returned
+35. (b) No quantization robustness: on instruct, where all four cells are double-drawn, retention is
+55.6% vs 55.4% — identical to two tenths of a point. Base's opposite-signed 9.4-pt gap is a
+single-draw artifact: it rests on one QEAD-off INT4 measurement of 8 against a two-draw mean of 6,
+and the instruct cells show single INT4 draws scatter by 4-6 solves ({17,23} and {16,20}).
 
 ### Key findings (see `history/findings.md`)
 - Pure-KD ceiling on the 1.5B instruct student is proven exhausted (~38-39): on-policy probe showed
@@ -125,15 +132,15 @@ KD gap by precision: bf16 +14 / +16 → INT8 ~+8.5 / +20 → **INT4 −1 / +1**.
   behind them (failure mixture is identical to bf16 in every category).
 - **INT4 erases the KD gain on both tracks** while the pretrained backbone survives. KD knowledge
   lives in weight structure that 4-bit rounding destroys.
-- **QEAD does not confer quantization robustness** (negative result). Retention is 55.6% vs 53.3%
-  on instruct (inside noise) and 21.4% vs 30.8% on base (opposite sign). The instruct INT4 gap
-  (20 vs 16) is just the bf16 gap (36 vs 30) carried forward, not widened — if QEAD protected the
-  weights the gap would grow under quantization. It doesn't.
+- **QEAD is a complete null** (negative result, both tracks). It improves neither distillation
+  quality (bf16 36 vs 32.5 instruct, 28 vs 26 base) nor quantization retention (55.6% vs 55.4% on
+  instruct, all cells double-drawn). The knowledge INT4 destroys is not concentrated in the tokens
+  QEAD upweights.
 
 ### Active run
-None. Phase 3 closed 2026-07-29 — the QEAD 2×2 is complete on both tracks.
-Next GPU work: optional second draw on instruct QEAD-off bf16 (see Phase 3), then 3B student
-(Phase 4) if the paper needs a scaling result.
+None. Phase 3 fully closed 2026-07-30 — both instruct second draws landed (bf16 35, INT4 20) and
+confirmed the null at 55.6% vs 55.4% retention.
+Next GPU work: 3B student (Phase 4) if the paper needs a scaling result.
 
 ---
 
@@ -180,11 +187,15 @@ Next GPU work: optional second draw on instruct QEAD-off bf16 (see Phase 3), the
 - [x] Train QEAD-off instruct student (`outputs_qead_off`, seed 7, 2ep) — bf16 30, INT4 16
 - [x] Train QEAD-off base student (`outputs_general_qead_off`, seed 7, 3ep, val 0.9402) — bf16 26, INT4 8
 - [x] Full 2×2 × 2 tracks at {bf16, INT4} (INT8 dropped — no degradation there to differentiate)
-- [x] **Original key claim FALSIFIED**: retention is 55.6% vs 53.3% (instruct, inside noise) and
-      21.4% vs 30.8% (base, opposite sign). QEAD confers no quantization robustness on either track.
-- [ ] *Optional:* second draw on instruct QEAD-off bf16 to settle whether the +6 bf16 lead
-      (36 vs 30) is a real distillation-quality effect or noise — base's +2 does not corroborate it.
-      This is the one cheap run that could still change what gets written.
+- [x] Second draw instruct QEAD-off bf16 (seed 42): 35 → draws {30, 35} vs QEAD-on 36. The +6 was a
+      low draw; **no distillation-quality benefit either.**
+- [x] Second draw instruct QEAD-off INT4 (seed 42): 20 → draws {16, 20}, mean 18. All four instruct
+      cells now double-drawn.
+- [x] **Both original claims FALSIFIED.** No bf16 quality gain (36 vs 32.5 instruct, 28 vs 26 base);
+      no INT4 retention gain (55.6% vs 55.4% on the fully double-drawn instruct track). QEAD is a
+      complete null. Base's opposite-signed gap is a single-draw artifact — see the table above.
+- [ ] *Optional:* second INT4 draw on base QEAD-off (n=1 at 8) — the only remaining single-drawn
+      cell in the ablation. Would tighten the base row but cannot change the verdict.
 
 ### Paper status
 - §1-§5 (intro, method, KD ceiling, gap study, quantization grid + failure mixture) — fully
