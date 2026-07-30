@@ -1,74 +1,74 @@
 # Progress Report — July Week 4 (2026-07-22 to 2026-07-29)
 
-## Overview
+## Summary
 
-This week completed the PTQ quantization study (Phase 2) across two model tracks and began the QEAD ablation (Phase 3). The headline finding: **INT4 quantization completely erases the knowledge gained through distillation, while INT8 preserves it fully.** The QEAD-off instruct ablation is complete, and the base ablation is training now.
+Completed the post-training quantization study across both student tracks, and began the QEAD ablation.
 
-14 commits this week. 20+ evaluation runs. 5 paper-ready figures generated.
-
----
-
-## 1. Simulated PTQ Implementation
-
-Real compressed INT8 checkpoints (llm-compressor, W8A16 and W8A8) load in vLLM 0.6.6 but produce garbage output on both Marlin and CUTLASS kernel paths. The written checkpoints were verified byte-correct — the fault is vLLM 0.6.x's reader.
-
-**Solution:** simulated PTQ via `scripts/quantize_int8.py` — quantize-then-dequantize round-trip saved as bf16. Numerically equivalent to real weight-only quantization for accuracy purposes.
-
-| Mode | Granularity | Script flag |
-|---|---|---|
-| INT8 | Per-channel symmetric | `--bits 8` |
-| INT4 | Group-128 symmetric | `--bits 4` |
-
-Both modes exclude `lm_head` from quantization. Verified: 86% of weights change, mean |delta| ~4e-4, embeddings untouched.
+**Headline finding: INT4 quantization erases the entire gain from knowledge distillation. INT8 preserves it completely.**
 
 ---
 
-## 2. Full Quantization Grid (Phase 2)
+## 1. How Quantization Was Applied
 
-Evaluated all 4 models across 3 precisions. All numbers are **228 problems, pass@5, temp 0.6**.
+Real compressed INT8 checkpoints load in vLLM 0.6.6 but generate garbage. The checkpoints themselves are byte-correct, so the fault is in vLLM's reader, not the writer.
+
+We therefore use **simulated quantization**: round each weight to the target precision, then convert back to bf16. The model is numerically identical to what real weight-only quantization would produce, so accuracy measurements are valid. Only the memory savings are not captured.
+
+| Mode | Granularity |
+|---|---|
+| INT8 | Per-channel symmetric |
+| INT4 | Group-128 symmetric |
+
+`lm_head` is excluded in both modes.
+
+---
+
+## 2. The Quantization Grid
+
+All numbers are **problems solved out of 228, pass@5, temperature 0.6**. Cells with two values were sampled twice with different seeds to separate real effects from sampling noise.
 
 | Model | bf16 | INT8 | INT4 |
 |---|---|---|---|
-| Instruct original (Coder-1.5B-Instruct) | 22 | 24 | 21 |
-| Instruct distilled (QEAD-on, seed 7) | 36 | 32.5 (draws: 30, 35) | 20 (draws: 17, 23) |
-| Base original (Qwen2.5-1.5B) | 12 | 11 | 6 |
-| Base distilled (QEAD-on, v2 final_last) | 28 | 31 | 6 (draws: 7, 5) |
-
-Multi-draw cells (instruct distilled INT8/INT4) were sampled twice with different seeds to distinguish noise from real effects.
+| Instruct original | 22 | 24 | 21 |
+| Instruct distilled | 36 | 32.5 *(30, 35)* | 20 *(17, 23)* |
+| Base original | 12 | 11 | 6 |
+| Base distilled | 28 | 31 | 6 *(7, 5)* |
 
 ![Quantization grid](../figures/fig3_quantization.png)
 
-### KD Gap Analysis
+### What the grid says
 
-The distillation gain (distilled minus original) at each precision:
+The clearest way to read it is the **KD gap** — how far the distilled model leads its own original at each precision:
 
 | Precision | Instruct gap | Base gap |
 |---|---|---|
 | bf16 | +14 | +16 |
 | INT8 | ~+8.5 | +20 |
-| INT4 | -1 | +1 |
+| INT4 | **−1** | **+1** |
 
-**Verdict:** INT4 completely erases the distillation gain on both independent model tracks. The knowledge added by KD is stored in weight structure that 4-bit rounding destroys. The pretrained backbone capability survives (instruct original: 22 → 21 at INT4, essentially unchanged). INT8 preserves the gain fully everywhere.
+At bf16 distillation is worth +14 and +16 problems. At INT4 that advantage is gone on both tracks — the distilled model and the untrained model score the same.
 
----
-
-## 3. INT8 Verdict: No Measurable Degradation
-
-The initial instruct-distilled INT8 result (30, down from 36) looked like degradation. A second sampling draw (seed 42) scored 35 — the draws {30, 35} overlap the bf16 noise band (35-38).
-
-**Key evidence:** the test-case pass rate is identical between bf16 and INT8 (24.3% vs 24.4% over ~19k test executions). The solve count fluctuation is pure sampling noise, not a real accuracy change.
-
-**Conclusion:** at 1.5B scale, per-channel W8 quantization is free for all models — original, distilled, and base.
+Meanwhile the *original* models barely move (instruct 22 → 21). The pretrained backbone survives 4-bit rounding; only the distilled knowledge is destroyed. This is a sharper claim than "distilled models degrade more," and it holds on two independent tracks.
 
 ---
 
-## 4. INT4 Failure Mode Analysis
+## 3. INT8 Is Free
 
-INT4 doesn't just reduce accuracy — it changes *how* the model fails.
+The instruct-distilled INT8 result first came in at 30, down from 36, which looked like real degradation. A second sampling draw scored 35. The draws {30, 35} overlap the bf16 noise band.
 
-### Truncation Counts (degenerate generation loops)
+The decisive evidence is the test-case pass rate: **24.3% at bf16 vs 24.4% at INT8**, measured over ~19,000 test executions. Per-test competence is unchanged. Solve-count swings of ±3-6 are sampling noise with no mechanism behind them.
 
-| Model | bf16 trunc | INT4 trunc |
+**Conclusion: at 1.5B, INT8 weight quantization costs nothing — for original, distilled, and base models alike.** This is the deployment recommendation.
+
+---
+
+## 4. How INT4 Breaks the Model
+
+INT4 does not just lower accuracy. It changes what kind of output the model produces.
+
+### Degenerate generation
+
+| Model | bf16 truncated | INT4 truncated |
 |---|---|---|
 | Instruct original | 5 | 2 |
 | Instruct distilled | 3 | 22 |
@@ -76,9 +76,9 @@ INT4 doesn't just reduce accuracy — it changes *how* the model fails.
 
 ![INT4 failure mode](../figures/fig4_int4_failure_mode.png)
 
-Base distilled INT4 produces degenerate output: bracket spam deep enough to overflow CPython's `ast.parse` stack (MemoryError/RecursionError — fixed in `src/utils/reasoning.py`).
+Base-distilled INT4 falls into repetition loops. Some outputs are nested brackets deep enough to overflow CPython's parser.
 
-### Failure Mixture (base track, ~116k test executions per format)
+### Failure mixture (base track, ~116k test executions per format)
 
 | Category | bf16 original | bf16 distilled | INT8 distilled | INT4 distilled |
 |---|---|---|---|---|
@@ -91,99 +91,86 @@ Base distilled INT4 produces degenerate output: bracket spam deep enough to over
 
 ![Failure mixture](../figures/fig5_failure_mixture.png)
 
-**Two conclusions:**
+Two things fall out of this table:
 
-1. **INT8 = bf16** in every failure category (wrong_answer 62.7% vs 62.7%, pass 20.7% vs 20.4%). No mechanism behind the solve-count fluctuation — confirmed as noise.
-2. **INT4 changes the kind of failure:** wrong_answer (the "competent" failure: clean running code with wrong logic) drops from 62.7% to 38.2%. Structural failures explode: missing_function 0.9% → 21.4%, runtime_error 12.7% → 30.3%. bf16/INT8 distilled fails like a programmer with wrong ideas; INT4 distilled fails like a broken text generator.
+**INT8 is identical to bf16 in every category.** wrong_answer 62.7% vs 62.7%, pass 20.7% vs 20.4%. There is no mechanism behind the solve-count difference — mechanical proof that it is noise.
+
+**INT4 changes the type of failure.** wrong_answer is the *competent* failure mode: clean, running code with wrong logic. It drops from 62.7% to 38.2%, while structural breakage explodes — missing_function 0.9% → 21.4%, runtime_error 12.7% → 30.3%. A bf16 or INT8 distilled model fails like a programmer with wrong ideas. An INT4 distilled model fails like a broken text generator.
 
 ---
 
-## 5. QEAD Ablation — Instruct Track (Phase 3, partial)
+## 5. QEAD Ablation — Instruct Track
 
-Trained a QEAD-off student (uniform per-token weights instead of quantization-error weights; same recipe, same seed 7, same teacher cache). Evaluated at bf16 and INT4.
+Trained a QEAD-off student (uniform per-token weights instead of quantization-error weights; everything else identical).
 
-| Model | bf16 | INT4 | Drop |
+| Variant | bf16 | INT4 | Drop |
 |---|---|---|---|
-| QEAD-on (existing) | 36 | 20 (mean of {17, 23}) | -16 |
-| QEAD-off (new) | 30 | 16 | -14 |
+| QEAD-on | 36 | 20 *(17, 23)* | −16 |
+| QEAD-off | 30 | 16 | −14 |
 
-**Observations:**
+Two observations, both provisional until the base track finishes:
 
-- **QEAD-off bf16 = 30:** removing QEAD drops bf16 accuracy by 6 (from 36 to 30). QEAD helps the distillation itself, not just quantization robustness. The uniform-weight student is worse than the QEAD-weighted student even before any quantization.
-- **INT4 drop magnitude is similar:** QEAD-on loses 16 (36→20), QEAD-off loses 14 (30→16). QEAD does not measurably protect against INT4 collapse on the instruct track.
-- **Interpretation pending:** the base-track QEAD-off ablation (training now) will determine whether this pattern holds across tracks.
+- **QEAD-off scores 6 lower at bf16** (30 vs 36). If real, QEAD helps the distillation itself, independent of quantization. This sits at the edge of the noise band and needs a second draw.
+- **The INT4 drop is the same size in both** (−16 vs −14). QEAD's lead is carried forward under quantization, not widened. That is not what protection would look like.
 
 ---
 
-## 6. Verified-116 Subset Numbers (Base Track)
+## 6. Verified-116 Numbers for the Base Track
 
-The verified-116 subset (228 minus 112 broken-reference problems) is the paper headline metric. This week we obtained the base track verified numbers for the first time.
+The verified-116 subset excludes the 112 problems with broken reference solutions, and is the paper's headline metric. Base-track numbers were measured for the first time this week.
 
 | Model | 228-set | Verified-116 | Verified pass@5 |
 |---|---|---|---|
 | Base original | 12 | 11 | 9.5% |
 | Base distilled | 28 | 27 | 23.3% |
-| Instruct original (prior) | 22 | — | — |
-| Instruct distilled (prior) | 39 (best) | — | 31.9% |
-
-Base distilled on verified-116: **27/116 (23.3%)** — more than double the original's 11/116.
 
 ---
 
-## 7. Paper Framing Decision
+## 7. Framing Decision
 
-Decided to **invert the framing**: lead with the base result, keep instruct as supporting evidence.
+Decided to lead the paper with the **base track** rather than the instruct track.
 
-- **Abstract/intro lead:** "A general-purpose 1.5B model (12/228) reaches 28/228 after distillation — surpassing Qwen2.5-Coder-1.5B-Instruct's native 22/228, a model specifically fine-tuned for code."
-- **Ceiling section:** still uses instruct data (5 methods converging to 35-39, on-policy probe, 96.6% token agreement) — strongest evidence, all instruct.
-- **Quantization + QEAD sections:** both tracks shown side by side for two-track replication.
+The base result is the more striking claim: a general-purpose model with no code specialization reaches 28/228 after distillation, **beating Qwen2.5-Coder-1.5B-Instruct's native 22/228** — a model explicitly fine-tuned for code.
+
+The instruct track stays as the ceiling evidence, because that evidence only exists there (five converging methods, the on-policy probe, 96.6% token agreement). No experiments change; only which result the abstract leads with.
 
 ---
 
-## 8. Prior Findings (carried forward)
+## 8. Context From Earlier Work
 
-### KD Ceiling Proven Exhausted
+### The KD ceiling is exhausted
 
-Five independent KD methods converge to the same 35-39 solve band on the instruct student. On-policy GKD showed 96.6% teacher-student token agreement — the teacher has nothing left to teach at this capacity.
+Five independent distillation methods converge to the same 35-39 band on the instruct student. On-policy GKD found 96.6% teacher-student token agreement — at this capacity the teacher has nothing left to transfer.
 
 ![Methods ceiling](../figures/fig1_methods_ceiling.png)
 
-### Distillation Gap is Capacity-Bound
+### The gain is capacity-bound
 
-Both tracks show the same absolute gain regardless of starting floor:
+| Track | Original | Distilled | Absolute | Relative |
+|---|---|---|---|---|
+| Instruct | 22 | 36 | +14 | ×1.64 |
+| Base | 12 | 28 | +16 | ×2.33 |
 
-- Instruct: 22 → 36 (+14, x1.64)
-- Base: 12 → 28 (+16, x2.33)
-
-The base track's relative gain is stronger (x2.33 vs x1.64), and the distilled base (28) beats the instruct original (22) — a non-code model outperforming a code-specialized model of the same size.
+Both tracks gain roughly the same absolute amount regardless of where they start. The base track's relative gain is far larger, and its distilled model overtakes the instruct original.
 
 ![Gap study](../figures/fig2_gap_study.png)
 
-### Base Track Ceiling Replicated
+### The base track has its own ceiling
 
-Three independent recipes (v1 mix: 25, v2: 28, two-stage: 26) converge to a 25-28 band. Seed rerun of v2: 28 again. Capacity-bound, recipe-exhausted.
-
----
-
-## 9. Bug Fixes This Week
-
-| Fix | File | Issue |
-|---|---|---|
-| Parser stack overflow | `src/utils/reasoning.py` | INT4 degenerate output (deeply nested brackets) crashed `ast.parse` with MemoryError. Now caught alongside SyntaxError. |
-| history/methods.md zeroed | `history/methods.md` | Disk-full corruption wiped the file to 0 bytes. Restored via `git restore`. |
-| vLLM INT8 garbage output | — | Diagnosed as vLLM 0.6.x reader bug, not writer bug. Pivoted to simulated PTQ. |
+Three recipes (v1 mix 25, v2 28, two-stage 26) land in a 25-28 band, and a seed rerun of v2 reproduced 28 exactly. Capacity-bound, not recipe-bound.
 
 ---
 
-## 10. What's Left
+## 9. What's Left
 
-| Task | Status | Notes |
-|---|---|---|
-| QEAD-off base training | Running now | `outputs_general_qead_off`, ~6-8h |
-| QEAD-off base bf16 eval | Blocked on training | Sanity check, expect ~25-28 band |
-| QEAD-off base INT4 eval | Blocked on training | The decisive comparison vs QEAD-on's 6 |
-| Update figures with QEAD ablation | After evals | fig6: 2x2 QEAD matrix |
-| Paper sections 1-5 | Ready to draft | All data backed |
-| Paper section 6 (QEAD ablation) | Awaiting Phase 3 | Need both tracks |
+| Task | Status |
+|---|---|
+| QEAD-off base training | Running |
+| QEAD-off base bf16 eval | Blocked on training — expect the 25-28 band |
+| QEAD-off base INT4 eval | Blocked on training — the decisive number against QEAD-on's 6 |
+| Second draw, instruct QEAD-off bf16 | Pending — settles whether the +6 is real |
+| 2×2 ablation figure | After evals |
+| Paper §1-§5 | Ready to draft, fully data-backed |
+| Paper §6 (QEAD ablation) | Awaiting both tracks |
 
-**Expected completion:** Phase 3 data complete by end of July 30. Paper draft can begin immediately for sections 1-5.
+The open question is whether QEAD provides any real quantization protection. If the base track shows QEAD-off collapsing further than QEAD-on's 6, the method has a defensible effect. If the two land together, the fragility is inherent to distillation and the paper reports that, with INT8 robustness as the practical recommendation.
