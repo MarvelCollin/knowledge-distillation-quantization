@@ -1,0 +1,122 @@
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.config import load_config
+from src.data.problems import build_user_content, load_problems
+from src.data.teacher_cache import load_passing_responses
+from src.utils.reasoning import SYSTEM_PROMPT
+
+def build_calibration(config: dict, tokenizer, n_samples: int, max_len: int) -> list:
+    problems = load_problems(config)
+    cache_dir = config["data"]["teacher_cache_dir"]
+    n_train = int(len(problems) * config["data"]["train_ratio"])
+    passing = load_passing_responses(cache_dir, n_train)
+
+    texts = []
+    for idx in sorted(passing)[:n_samples]:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_user_content(problems[idx])},
+        ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        texts.append(prompt + passing[idx]["text"])
+
+    if not texts:
+        raise SystemExit(
+            f"No passing teacher traces found under {cache_dir} for the first {n_train} "
+            "problems. Calibration needs them; check the cache path in config."
+        )
+    print(f"calibration: {len(texts)} sequences from the train split "
+          f"(requested {n_samples}, {len(passing)} passing traces available)")
+    return texts
+
+def build_recipe(method: str, bits: int, group_size: int, ignore: list):
+    scheme = f"W{bits}A16"
+    if method == "gptq":
+        from llmcompressor.modifiers.quantization import GPTQModifier
+        return GPTQModifier(targets="Linear", scheme=scheme, ignore=ignore)
+    if method == "awq":
+        try:
+            from llmcompressor.modifiers.awq import AWQModifier
+        except ImportError as e:
+            raise SystemExit(
+                "AWQModifier not found in the installed llm-compressor. Upgrade it, or run "
+                "--method gptq first -- one calibrated method is enough to test the claim."
+            ) from e
+        return AWQModifier(targets="Linear", scheme=scheme, ignore=ignore)
+    from llmcompressor.modifiers.quantization import QuantizationModifier
+    return QuantizationModifier(targets="Linear", scheme=scheme, ignore=ignore)
+
+def dir_size_gb(path: Path) -> float:
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1e9
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model", required=True, help="Source checkpoint (HF id or local dir).")
+    ap.add_argument("--out", required=True, help="Output dir for the compressed checkpoint.")
+    ap.add_argument("--method", required=True, choices=["gptq", "awq", "rtn"])
+    ap.add_argument("--bits", type=int, default=4, choices=[4, 8])
+    ap.add_argument("--group-size", type=int, default=128,
+                    help="Informational: the W4A16/W8A16 presets are group-128 symmetric, "
+                         "matching quantize_int8.py. A different value needs a custom scheme.")
+    ap.add_argument("--calib-samples", type=int, default=256)
+    ap.add_argument("--calib-max-len", type=int, default=2048)
+    ap.add_argument("--config", default="config/config.yaml")
+    args = ap.parse_args()
+
+    if args.group_size != 128:
+        print(f"WARNING: --group-size {args.group_size} is not applied; the {args.bits}-bit "
+              "preset is group-128. Comparability with the RTN grid requires 128.")
+
+    try:
+        from llmcompressor import oneshot
+    except ImportError:
+        from llmcompressor.transformers import oneshot
+    from datasets import Dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    config = load_config(args.config)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+
+    texts = build_calibration(config, tokenizer, args.calib_samples, args.calib_max_len)
+    ds = Dataset.from_list([
+        {"input_ids": tokenizer(t, max_length=args.calib_max_len, truncation=True)["input_ids"]}
+        for t in texts
+    ])
+
+    print(f"loading {args.model}...")
+    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype="auto",  device_map="auto", trust_remote_code=True)
+
+    recipe = build_recipe(args.method, args.bits, args.group_size, ignore=["lm_head"])
+    print(f"running {args.method.upper()} W{args.bits}A16 oneshot "
+          f"({len(ds)} calibration sequences, max_len={args.calib_max_len})...")
+    oneshot(
+        model=model,
+        dataset=ds,
+        recipe=recipe,
+        output_dir=args.out,
+        max_seq_length=args.calib_max_len,
+        num_calibration_samples=len(ds),
+    )
+    tokenizer.save_pretrained(args.out)
+
+    out = Path(args.out)
+    cfg = json.loads((out / "config.json").read_text()) if (out / "config.json").exists() else {}
+    qcfg = cfg.get("quantization_config", {})
+    print("\n=== verification ===")
+    print(f"method            {args.method.upper()} W{args.bits}A16, lm_head excluded")
+    print(f"output            {out}")
+    print(f"on-disk size      {dir_size_gb(out):.2f} GB")
+    print(f"quant config      {'present' if qcfg else 'MISSING -- checkpoint is not compressed'}")
+    if qcfg:
+        print(f"  format          {qcfg.get('format')}")
+        print(f"  quant_method    {qcfg.get('quant_method')}")
+    print("\nNext: gate this checkpoint before evaluating it.")
+    print(f"  python scripts/sanity_generate.py --model {out} --dtype auto")
+
+if __name__ == "__main__":
+    main()
