@@ -41,6 +41,8 @@ _INTERMEDIATE = Path("outputs/eval/intermediate")
 
 MEM_CEILING_GB = 22.0
 
+EVAL_DTYPE = "bfloat16"
+
 COLORS = {
     "Student original":  "#4e79a7",
     "Teacher":           "#f28e2b",
@@ -311,7 +313,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
         try:
             llm = LLM(
                 model=model_path,
-                dtype="bfloat16",
+                dtype=EVAL_DTYPE,
                 gpu_memory_utilization=gpu_mem_util,
                 max_model_len=max_model_len,
                 trust_remote_code=True,
@@ -771,7 +773,14 @@ def main() -> None:
                              "solutions pass all tests per outputs/eval/broken_tests.json).")
     parser.add_argument("--fresh", action="store_true",
                         help="Ignore and clear cached per-model results, re-evaluating every model from scratch.")
+    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "auto"],
+                        help="vLLM activation dtype. Keep bfloat16 to reproduce the recorded grid. "
+                             "Use auto (or float16) for real compressed checkpoints, where forcing "
+                             "bf16 can dequantize wrongly.")
     args = parser.parse_args()
+
+    global EVAL_DTYPE
+    EVAL_DTYPE = args.dtype
     k = args.k if args.k is not None else args.num_samples
     if k > args.num_samples:
         raise SystemExit(f"--k ({k}) cannot exceed --num-samples ({args.num_samples})")
