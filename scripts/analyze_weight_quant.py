@@ -91,12 +91,14 @@ def quant_survival(wo: torch.Tensor, wd: torch.Tensor, bits: int) -> dict:
     kd_n, kdq_n = kd.pow(2).sum().sqrt(), kdq.pow(2).sum().sqrt()
     denom = (kd_n * kdq_n).item()
     base = wd.pow(2).sum().sqrt()
+    d, dq = kd.abs(), kdq.abs()
     return {
         "noise_rel": ((qd - wd).pow(2).sum().sqrt() / base).item() if base > 0 else float("nan"),
         "kd_cos": (kd * kdq).sum().item() / denom if denom > 0 else float("nan"),
         "kd_rel_after": (kdq_n / base).item() if base > 0 else float("nan"),
+        "frac_erased": (dq < 0.1 * d).double().mean().item(),
+        "frac_amplified": (dq > 2.0 * d).double().mean().item(),
     }
-
 
 def pearson(xs: list, ys: list) -> float:
     x = torch.tensor(xs, dtype=torch.float64)
@@ -230,6 +232,10 @@ def main() -> None:
             "w8_kd_cos": mean(col("kd_cos", "w8_survival")),
             "w4_kd_rel_after": mean(col("kd_rel_after", "w4_survival")),
             "w8_kd_rel_after": mean(col("kd_rel_after", "w8_survival")),
+            "w4_frac_erased": mean(col("frac_erased", "w4_survival")),
+            "w8_frac_erased": mean(col("frac_erased", "w8_survival")),
+            "w4_frac_amplified": mean(col("frac_amplified", "w4_survival")),
+            "w8_frac_amplified": mean(col("frac_amplified", "w8_survival")),
         },
         "medians": {
             "w4_nmse_original": median(col("w4_nmse", "original")),
@@ -297,6 +303,8 @@ def main() -> None:
         print(f"{f'W{b} perturbation':<38}{noise:>12.4%}   = {ratio:5.1f}x the KD update")
         print(f"{f'  KD update direction retained (cos)':<38}{cos:>12.4f}")
         print(f"{f'  KD update size after rounding':<38}{after:>12.4%}")
+        print(f"{f'  weights: KD change erased':<38}{m[f'w{b}_frac_erased']:>12.2%}")
+        print(f"{f'  weights: KD change amplified >2x':<38}{m[f'w{b}_frac_amplified']:>12.2%}")
 
     print("\n--- correlations across layers ---")
     for k, c in summary["correlations"].items():
