@@ -115,7 +115,17 @@ def main() -> None:
             print("embedded chat_template into tokenizer_config.json for the older eval stack")
     elif not template:
         print("WARNING: source tokenizer has no chat_template; eval prompts will not build.")
-    cfg = json.loads((out / "config.json").read_text()) if (out / "config.json").exists() else {}
+
+    cfg_path = out / "config.json"
+    if cfg_path.exists():
+        raw = json.loads(cfg_path.read_text())
+        sparsity = raw.get("quantization_config", {}).get("sparsity_config")
+        if isinstance(sparsity, dict) and not sparsity.get("format"):
+            raw["quantization_config"].pop("sparsity_config")
+            cfg_path.write_text(json.dumps(raw, indent=2))
+            print("dropped empty sparsity_config from config.json for the older eval stack")
+
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     qcfg = cfg.get("quantization_config", {})
     print("\n=== verification ===")
     print(f"method            {args.method.upper()} W{args.bits}A16, lm_head excluded")
