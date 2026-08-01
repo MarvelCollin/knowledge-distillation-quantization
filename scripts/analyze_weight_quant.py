@@ -16,6 +16,8 @@ def resolve(path: str) -> Path:
     p = Path(path)
     if p.is_dir():
         return p
+    if p.exists() or p.parent.is_dir():
+        raise SystemExit(f"'{path}' is not a directory. Check the checkpoint path.")
     from huggingface_hub import snapshot_download
     return Path(snapshot_download(path, allow_patterns=["*.safetensors*", "*.json"]))
 
@@ -80,6 +82,21 @@ def quant_error(w: torch.Tensor, bits: int) -> float:
     q = int_roundtrip_(w32, bits)
     denom = w32.pow(2).sum()
     return (w32 - q).pow(2).sum().item() / denom.item() if denom > 0 else float("nan")
+
+def quant_survival(wo: torch.Tensor, wd: torch.Tensor, bits: int) -> dict:
+    if wo.ndim != 2 or (bits == 4 and wo.shape[1] % 128 != 0):
+        return {"noise_rel": float("nan"), "kd_cos": float("nan"), "kd_rel_after": float("nan")}
+    qo, qd = int_roundtrip_(wo, bits), int_roundtrip_(wd, bits)
+    kd, kdq = wd - wo, qd - qo
+    kd_n, kdq_n = kd.pow(2).sum().sqrt(), kdq.pow(2).sum().sqrt()
+    denom = (kd_n * kdq_n).item()
+    base = wd.pow(2).sum().sqrt()
+    return {
+        "noise_rel": ((qd - wd).pow(2).sum().sqrt() / base).item() if base > 0 else float("nan"),
+        "kd_cos": (kd * kdq).sum().item() / denom if denom > 0 else float("nan"),
+        "kd_rel_after": (kdq_n / base).item() if base > 0 else float("nan"),
+    }
+
 
 def pearson(xs: list, ys: list) -> float:
     x = torch.tensor(xs, dtype=torch.float64)
@@ -175,6 +192,8 @@ def main() -> None:
                           "w4_nmse": quant_error(wd32, 4), "w8_nmse": quant_error(wd32, 8)},
             "kd_delta_fro": delta,
             "kd_delta_rel": delta / base_norm if base_norm > 0 else float("nan"),
+            "w4_survival": quant_survival(wo32, wd32, 4),
+            "w8_survival": quant_survival(wo32, wd32, 8),
         }
         rec["w4_nmse_diff"] = rec["distilled"]["w4_nmse"] - rec["original"]["w4_nmse"]
         rec["kurtosis_diff"] = rec["distilled"]["excess_kurtosis"] - rec["original"]["excess_kurtosis"]
@@ -205,6 +224,12 @@ def main() -> None:
             "outlier_original": mean(col("outlier_ratio", "original")),
             "outlier_distilled": mean(col("outlier_ratio", "distilled")),
             "kd_delta_rel": mean(col("kd_delta_rel")),
+            "w4_noise_rel": mean(col("noise_rel", "w4_survival")),
+            "w8_noise_rel": mean(col("noise_rel", "w8_survival")),
+            "w4_kd_cos": mean(col("kd_cos", "w4_survival")),
+            "w8_kd_cos": mean(col("kd_cos", "w8_survival")),
+            "w4_kd_rel_after": mean(col("kd_rel_after", "w4_survival")),
+            "w8_kd_rel_after": mean(col("kd_rel_after", "w8_survival")),
         },
         "medians": {
             "w4_nmse_original": median(col("w4_nmse", "original")),
@@ -262,6 +287,16 @@ def main() -> None:
         print(f"{lbl:<28}{a:>14.6g}{b:>14.6g}")
     print(f"{'mean rel KD delta':<28}{'':>14}{m['kd_delta_rel']:>14.6g}")
     print(f"distilled quantizes worse in {summary['layers_where_distilled_quantizes_worse']} layers")
+
+    kd_rel = m["kd_delta_rel"]
+    print("\n--- KD update vs quantization perturbation (relative norm) ---")
+    print(f"{'KD update (distill - original)':<38}{kd_rel:>12.4%}")
+    for b in (4, 8):
+        noise, cos, after = m[f"w{b}_noise_rel"], m[f"w{b}_kd_cos"], m[f"w{b}_kd_rel_after"]
+        ratio = noise / kd_rel if kd_rel else float("nan")
+        print(f"{f'W{b} perturbation':<38}{noise:>12.4%}   = {ratio:5.1f}x the KD update")
+        print(f"{f'  KD update direction retained (cos)':<38}{cos:>12.4f}")
+        print(f"{f'  KD update size after rounding':<38}{after:>12.4%}")
 
     print("\n--- correlations across layers ---")
     for k, c in summary["correlations"].items():
