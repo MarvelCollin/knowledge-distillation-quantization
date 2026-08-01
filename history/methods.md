@@ -82,7 +82,7 @@ INT4 grid (group-128 symmetric W4, 228 problems, pass@5, one draw per cell):
 | Instruct distilled | 36 | 30 / 35 | 17 | -19 | 22 |
 | Base distilled | 28 | 31 | 7 | -21 | 158 |
 
-Headline finding: the original instruct model is essentially INT4-robust (-1, within noise) while both distilled models collapse (roughly halved or worse). Distillation dramatically increases quantization fragility at 4-bit. Failure mode is visible in truncation counts: base distilled hits 158/1140 truncated samples with degenerate output (including bracket spam deep enough to overflow CPython's parser stack, fixed in reasoning.py by treating MemoryError/RecursionError as unparseable). The distilled weight distributions evidently occupy sharper/more outlier-heavy configurations that group-128 W4 cannot represent; the pretrained instruct weights are flatter and survive.
+Headline finding: the original instruct model is essentially INT4-robust (-1, within noise) while both distilled models collapse (roughly halved or worse). Distillation dramatically increases quantization fragility at 4-bit. Failure mode is visible in truncation counts: base distilled hits 158/1140 truncated samples with degenerate output (including bracket spam deep enough to overflow CPython's parser stack, fixed in reasoning.py by treating MemoryError/RecursionError as unparseable). The mechanism was assumed at the time to be sharper / more outlier-heavy distilled weight distributions that group-128 W4 cannot represent, with flatter pretrained weights surviving. **That assumption was later measured directly and falsified** — see "Weight-level mechanism" below. Note also that the backbone-survival half of the claim holds only on the instruct track (22 to 21); the base original halved (12 to 6), so it did not survive either.
 
 This sets up Phase 3 cleanly: the current distilled checkpoints are QEAD-on, so the 2x2 question is whether QEAD-off distillation degrades even worse at INT4. If yes, QEAD partially mitigates a real fragility that distillation itself introduces (an honest and novel framing: distillation creates INT4 fragility, QEAD recovers part of it). If QEAD-off is the same, QEAD does not help and the paper reports the fragility finding itself, with INT8 robustness as the deployment recommendation.
 
@@ -140,6 +140,65 @@ The base track's apparent 9.4 point gap in the opposite direction (21.4 vs 30.8)
 The cleanest way to see it is that the instruct INT4 gap (20 vs 16) is just the bf16 gap carried forward, not widened. If error-aware weighting were protecting the weights from 4-bit rounding, quantization would separate the two students further apart than they already are. It does not.
 
 Verdict: QEAD is a complete null, and the paper reports it as the negative control that rules out the obvious mitigation. This does not weaken the headline finding, it sharpens it. The INT4 erasure is not an artifact of one training recipe, and it is not fixable by reweighting which tokens the distillation loss attends to. The knowledge that quantization destroys is not concentrated in the tokens QEAD upweights.
+
+## Weight-level mechanism: the KD update is smaller than one 4-bit quantization step
+
+Measured with `scripts/analyze_weight_quant.py` across all 196 Linear projection weights per model (lm_head and embeddings excluded, matching `quantize_int8.py`, whose quantizer is imported rather than reimplemented so the error measured is exactly the error the eval grid experienced). Four checkpoint pairs, CPU only, zero eval runs.
+
+### The sharpness hypothesis is false
+
+| Track | Statistic | Original | Distilled |
+|---|---|---|---|
+| Base | excess kurtosis | 2.50648 | 2.50679 |
+| Base | outlier ratio (>4 sigma) | 0.00143645 | 0.00143645 |
+| Base | W4 error (nmse) | 0.0161585 | 0.0161443 |
+| Instruct | excess kurtosis | 3.50113 | 3.50118 |
+| Instruct | outlier ratio (>4 sigma) | 0.00149576 | 0.00149582 |
+| Instruct | W4 error (nmse) | 0.0164836 | 0.0164809 |
+
+The distributions are identical to five significant figures on both tracks, and the distilled models quantize marginally *better* than their originals (base: distilled quantizes worse in 0 of 196 layers). Distillation does not sharpen the weights, does not add outliers, and does not make the model harder to quantize.
+
+### What actually happens
+
+The distillation update is tiny compared to the quantization perturbation, and far below the 4-bit grid resolution.
+
+| Pair | KD update | W4 perturbation | W8 perturbation | cos W4 | cos W8 |
+|---|---|---|---|---|---|
+| Base (original to distilled) | 0.892% | 12.67% (14.2x) | 0.983% (1.1x) | 0.194 | 0.718 |
+| Instruct (original to distilled) | 0.459% | 12.80% (27.9x) | 1.008% (2.2x) | 0.110 | 0.589 |
+| Base QEAD-on to QEAD-off | 0.323% | (39.2x) | (3.0x) | 0.144 | 0.464 |
+| Instruct QEAD-on to QEAD-off | 0.141% | (90.5x) | (7.1x) | 0.084 | 0.347 |
+
+All magnitudes are relative Frobenius norm, averaged over layers. `cos` is the cosine between the pre-quantization update (W_distilled - W_original) and the same difference after both models are quantized — how much of the update's direction survives rounding.
+
+Expressed in quantization-step units (step inferred as rms error times sqrt(12)), the picture is unambiguous:
+
+| Pair | KD update as fraction of W8 step | of W4 step |
+|---|---|---|
+| Base | 26% | 2.0% |
+| Instruct | 13% | 1.0% |
+| Base QEAD on/off | 9.4% | 0.74% |
+| Instruct QEAD on/off | 4.0% | 0.32% |
+
+**Distillation moves the weights by roughly 2% of one 4-bit quantization step, but 26% of an 8-bit step.** At W8 the update is a meaningful fraction of a step, crosses bin boundaries often, and is transmitted (cos 0.59 to 0.72). At W4 it is far below the grid resolution, almost never changes which bin a weight lands in, and is not transmitted (cos 0.08 to 0.19, where 0 is an unrelated direction).
+
+Per-weight fate at W4 on the base track: 45.8% of weights have their KD change erased outright, and only 1.35% are amplified beyond 2x. But that 1.35% is enough to make the difference between the two *quantized* models 4.14% of weight norm — 4.6x larger than the true 0.892% update it replaced. So W4 does not shrink the distillation update, it substitutes a larger and differently-directed perturbation built from incidental bin flips. This explains a detail the earlier framing could not: the INT4 distilled model does not behave like the untrained original, it behaves worse in kind (base distilled INT4 truncation 158 vs base original INT4 70, missing_function 21.4% vs the original's 14.0%). It is the original plus a large structureless perturbation, not the original restored.
+
+At W8 the amplified fraction is higher (7.3%) precisely because the step is small enough for the KD nudge to routinely cross a boundary — which is why the update survives there.
+
+### Why QEAD could not have worked
+
+The weight difference between the QEAD-on and QEAD-off checkpoints is 39x (base) to 90x (instruct) smaller than the W4 perturbation, and under 1% of a single quantization step. Whatever error-aware token weighting did to the weights sits roughly two orders of magnitude below the noise floor it was meant to protect against.
+
+The Phase 3 null is therefore not "the mitigation was tried and did not help" but "the mitigation was incapable of mattering at this precision, and here is the measurement." Reported that way it is a considerably stronger negative result.
+
+### Internal consistency and scope
+
+The base KD update (0.892%) is roughly twice the instruct update (0.459%), matching that the base student had more to learn (12 to 28, x2.33) than the instruct student (22 to 36, x1.64).
+
+Scope limit: this is a weight-space measurement. That a destroyed weight-space direction causes the observed behavioural collapse is an inference, not a measurement. The functional half needs an activation-side probe (output divergence against the bf16 reference on a fixed prompt set), which is not yet run.
+
+Open caveat: the instruct pair used `outputs/final_last`, since `outputs/final_last_seed7` named in this repo no longer exists on disk. If that directory was overwritten by a later run, the instruct row describes a checkpoint whose eval numbers are not the recorded 36. The base track is unaffected.
 
 ## What this shows
 

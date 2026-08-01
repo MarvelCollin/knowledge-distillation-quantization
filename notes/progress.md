@@ -130,17 +130,28 @@ and the instruct cells show single INT4 draws scatter by 4-6 solves ({17,23} and
   with zero syntax errors — capacity-bound, not recipe-bound.
 - **INT8 is free at 1.5B** for every model tested; the apparent ±3-6 solve swings have no mechanism
   behind them (failure mixture is identical to bf16 in every category).
-- **INT4 erases the KD gain on both tracks** while the pretrained backbone survives. KD knowledge
-  lives in weight structure that 4-bit rounding destroys.
+- **INT4 erases the KD gain on both tracks.** Note the backbone-survival half holds only on the
+  instruct track (22 → 21); the base original halved (12 → 6). State it as an instruct result.
+- **Mechanism, measured (2026-08-02):** the distillation update is ~0.9% (base) / ~0.5% (instruct)
+  of weight norm — **2% of one W4 quantization step, but 26% of a W8 step**. At W8 the update
+  crosses bin boundaries often and survives (direction cosine 0.72 / 0.59); at W4 it is below the
+  grid resolution and does not (0.19 / 0.11). W4 also *substitutes* a larger perturbation than it
+  erases (4.14% vs the true 0.89%), built from ~1.35% incidental bin flips — which is why INT4
+  distilled models fail worse than the untrained original rather than reverting to it.
+- **The sharpness hypothesis is falsified.** Distilled and original weights are identical in
+  kurtosis and outlier ratio to five significant figures, and distilled models quantize marginally
+  *better*. Distillation does not make weights harder to quantize; its update is simply too small
+  to survive a coarse grid.
 - **QEAD is a complete null** (negative result, both tracks). It improves neither distillation
   quality (bf16 36 vs 32.5 instruct, 28 vs 26 base) nor quantization retention (55.6% vs 55.4% on
-  instruct, all cells double-drawn). The knowledge INT4 destroys is not concentrated in the tokens
-  QEAD upweights.
+  instruct, all cells double-drawn). The weight-level analysis explains why: the QEAD-on vs
+  QEAD-off weight difference is 39-90× smaller than the W4 perturbation, under 1% of one
+  quantization step — two orders of magnitude below the noise floor it was meant to counter.
 
 ### Active run
-None. Phase 3 fully closed 2026-07-30 — both instruct second draws landed (bf16 35, INT4 20) and
-confirmed the null at 55.6% vs 55.4% retention.
-Next GPU work: 3B student (Phase 4) if the paper needs a scaling result.
+None. Phase 3 closed 2026-07-30. Phase 4 mechanism analysis closed 2026-08-02 (CPU only).
+Next GPU work: real GPTQ/AWQ W4 checkpoints and the 8-cell eval grid that tests whether the
+INT4 erasure is an artifact of naive RTN.
 
 ---
 
@@ -199,17 +210,45 @@ Next GPU work: 3B student (Phase 4) if the paper needs a scaling result.
 
 ### Paper status
 - §1-§5 (intro, method, KD ceiling, gap study, quantization grid + failure mixture) — fully
-  data-backed, ready to draft now.
-- §6 (QEAD ablation) — data complete, write as an honest negative control.
+  data-backed, ready to draft now. **Remove the sharpness claim wherever it appears** — falsified
+  2026-08-02.
+- New mechanism section — data complete (weight-level analysis), and it is the paper's answer to
+  "why", which the draft previously could not give.
+- §6 (QEAD ablation) — data complete, write as an honest negative control, now with the
+  quantitative reason it was never able to work.
 - **Title needs revision.** The current title promises QEAD as the contribution; the evidence does
   not support that. Something closer to *"Quantization Erases Knowledge Distillation Gains in Small
   Code Models"* fits what was actually shown.
 
-### Phase 4: Scaling + supporting experiments — not started
-- [ ] 3B student (`config_3b.yaml`, `outputs_3b/` empty) — the proven lever for hard problems;
-      measure untrained 3B baseline first. Now also tests whether the INT4 erasure is scale-dependent.
+### Phase 4: Mechanism, real PTQ, rigor — in progress (plan: `notes/plan-phase4.md`)
+- [x] **Weight-level mechanism analysis** (`scripts/analyze_weight_quant.py`, 2026-08-02, 0 eval
+      runs). Four pairs × 196 Linear weights. Falsified the sharpness hypothesis; established the
+      step-size mechanism and the quantitative explanation of the QEAD null. See
+      `history/methods.md` → "Weight-level mechanism". Outputs in `logs/weightstats_*.json`.
+- [ ] **Real PTQ (GPTQ / AWQ) — the decisive open question.** Every W4 number in the project comes
+      from naive RTN. If calibration-based methods recover the KD gain, the headline is an RTN
+      artifact and the paper repositions. Step-size reasoning cuts both ways: no 4-bit method can
+      make the grid finer, but AWQ's channel scaling and GPTQ's output-space compensation could
+      still preserve function. Prior: roughly even odds.
+- [ ] Activation-side probe — closes the weight-space-to-behaviour inference, and doubles as a
+      cheap screening metric (output KL vs bf16 on a fixed prompt set, a fraction of an eval run)
+- [ ] Real compressed checkpoints + simulated-vs-real agreement check (validates the fake-quant
+      methodology every recorded number depends on)
+
+### Supporting experiments — remaining and cut
 - [ ] Efficiency table: size / VRAM / tokens-per-sec for teacher vs student bf16 vs student INT8
       (INT8 is the deployment recommendation, so this table supports the practical claim)
-- [ ] Statistical rigor: pass@5 with multiple seeds on the verified-116 subset
+- [ ] Statistical rigor: pass@5 with multiple seeds on the verified-116 subset. No number in the
+      paper currently carries a confidence interval, and single INT4 draws scatter by 4-6 solves.
+- [ ] Second benchmark (EvalPlus) on existing checkpoints — the cheapest generality result, no
+      retraining. Contamination is answerable: the claim is relative degradation within one model,
+      so it inflates both precisions equally and cancels.
+- ~~3B student~~ — cut per `notes/plan-phase4.md`. A bf16 full fine-tune of 3B does not fit the
+  single 24 GB card alongside 32k-token traces, and any workaround (LoRA, shortened context,
+  offload) makes the run protocol-mismatched to every 1.5B number in the paper. Declared as a
+  limitation with the VRAM reason stated.
+- ~~Second model family~~ — infeasible, not merely unaffordable: the R1 cache stores top-20 token
+  ids remapped to the Qwen2.5 vocabulary and the teacher weights are deleted, so a non-Qwen student
+  cannot consume it and re-caching is impossible. Declared as a limitation.
 - ~~Ablate confidence weighting / adaptive λ~~ — deprioritized; QEAD is no longer the contribution
 - ~~Correlate per-token QEAD weights with INT8 prediction flips~~ — moot given the Phase 3 null
