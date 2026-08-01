@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 import json
 import sys
@@ -43,7 +42,18 @@ def load_tensor(shard: Path, name: str) -> torch.Tensor:
         return f.get_tensor(name)
 
 def linear_weights(idx: dict) -> list:
-    names = [n for n in idx if n.startswith("model.layers.") and n.endswith(".weight")]
+    names = [
+        n for n in idx
+        if n.startswith("model.layers.")
+        and n.endswith(".weight")
+        and n.split(".")[-2] in PROJ_TYPES
+    ]
+    if not names:
+        found = sorted({n.split(".")[-2] for n in idx if n.startswith("model.layers.")})
+        raise SystemExit(
+            f"No projection weights matched PROJ_TYPES. Modules under model.layers: {found}. "
+            "Update PROJ_TYPES for this architecture."
+        )
     return sorted(names, key=lambda n: (int(n.split(".")[2]), n.split(".")[-2]))
 
 def shape_stats(w: torch.Tensor, sigma_k: float) -> dict:
@@ -63,6 +73,8 @@ def shape_stats(w: torch.Tensor, sigma_k: float) -> dict:
 
 def quant_error(w: torch.Tensor, bits: int) -> float:
     w32 = w.float()
+    if w32.ndim != 2:
+        return float("nan")
     if bits == 4 and w32.shape[1] % 128 != 0:
         return float("nan")
     q = int_roundtrip_(w32, bits)
