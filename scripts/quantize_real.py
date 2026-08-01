@@ -105,6 +105,16 @@ def main() -> None:
     tokenizer.save_pretrained(args.out)
 
     out = Path(args.out)
+    template = getattr(tokenizer, "chat_template", None)
+    tok_cfg_path = out / "tokenizer_config.json"
+    if template and tok_cfg_path.exists():
+        tok_cfg = json.loads(tok_cfg_path.read_text())
+        if not tok_cfg.get("chat_template"):
+            tok_cfg["chat_template"] = template
+            tok_cfg_path.write_text(json.dumps(tok_cfg, indent=2))
+            print("embedded chat_template into tokenizer_config.json for the older eval stack")
+    elif not template:
+        print("WARNING: source tokenizer has no chat_template; eval prompts will not build.")
     cfg = json.loads((out / "config.json").read_text()) if (out / "config.json").exists() else {}
     qcfg = cfg.get("quantization_config", {})
     print("\n=== verification ===")
