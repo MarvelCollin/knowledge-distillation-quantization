@@ -83,9 +83,12 @@ def _largest_parseable_prefix(code: str) -> str:
             end = nxt if 0 < nxt < end else end - 1
             continue
         except (MemoryError, RecursionError):
-            # Degenerate model output (e.g. thousands of nested brackets)
-            # overflows CPython's parser stack.
             end -= 1
+            continue
+        except ValueError:
+            nul = candidate.find("\x00")
+            nxt = candidate.count("\n", 0, nul) if nul >= 0 else end - 1
+            end = nxt if 0 < nxt < end else end - 1
             continue
         return candidate.rstrip()
     return ""
