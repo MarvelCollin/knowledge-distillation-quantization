@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Mount the Drive backup as a READ-optimized folder (browse/read without full download).
+# Usage: gdrive-mount [mountpoint]   (default: ~/gdrive-kd)
+# Read-only on purpose, so nothing in the backup can be changed/deleted by accident.
+export HOME=/home/hendrik-n PATH=/home/hendrik-n/.local/bin:$PATH
+MP="${1:-$HOME/gdrive-kd}"
+mkdir -p "$MP"
+rclone mount gdrive:kd-backup "$MP" \
+  --read-only \
+  --vfs-cache-mode full \
+  --vfs-cache-max-size 8G \
+  --vfs-cache-max-age 168h \
+  --vfs-read-chunk-size 128M \
+  --vfs-read-chunk-size-limit 2G \
+  --vfs-read-ahead 512M \
+  --buffer-size 128M \
+  --dir-cache-time 72h \
+  --attr-timeout 5s \
+  --drive-chunk-size 128M \
+  --daemon
+sleep 2
+if mountpoint -q "$MP"; then
+  echo "Mounted (read-only, optimized): gdrive:kd-backup -> $MP"
+  echo "Unmount with: fusermount3 -u $MP"
+else
+  echo "Mount did not come up; check: rclone mount ... (run without --daemon to see errors)"
+fi
