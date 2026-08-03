@@ -613,17 +613,17 @@ PYEOF
             header
             echo -e "  ${BOLD}Free disk${NC} — redundant checkpoint backups:"
             echo ""
-            for d in outputs/final outputs/final_last outputs/final_baseline_bak; do
+            for d in outputs/final outputs/final_baseline_bak; do
                 [ -d "$d" ] && echo "    $(du -sh "$d" 2>/dev/null)"
             done
             echo ""
             echo -e "  ${CYAN}KEPT: outputs/final_r1_control (the 39/228 checkpoint, byte-identical to outputs/final)"
-            echo -e "        outputs/final_last_29pct_bak (R1-era model, pending re-eval)${NC}"
+            echo -e "        outputs/final_last_29pct_bak (R1-era model, pending re-eval)"
             echo ""
             echo -n "  Delete the listed dirs? (yes/n): "
             read -r ans
             if [ "$ans" = "yes" ]; then
-                sudo rm -rf outputs/final outputs/final_last outputs/final_baseline_bak
+                sudo rm -rf outputs/final outputs/final_baseline_bak
                 echo -e "  ${GREEN}✓ Deleted. Free now: $(df -h / | tail -1 | awk '{print $4}')${NC}"
             else
                 echo "  Cancelled."
