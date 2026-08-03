@@ -781,6 +781,10 @@ def main() -> None:
 
     global EVAL_DTYPE
     EVAL_DTYPE = args.dtype
+
+    for flag, p in (("--original", args.original), ("--distilled", args.distilled)):
+        if p and not Path(p).is_dir() and (Path(p).exists() or Path(p).parent.is_dir()):
+            raise SystemExit(f"{flag} '{p}' is not a directory. Check the checkpoint path.")
     k = args.k if args.k is not None else args.num_samples
     if k > args.num_samples:
         raise SystemExit(f"--k ({k}) cannot exceed --num-samples ({args.num_samples})")
