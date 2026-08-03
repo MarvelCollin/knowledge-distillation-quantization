@@ -16,15 +16,24 @@ def build_calibration(config: dict, tokenizer, n_samples: int, max_len: int) -> 
     n_train = int(len(problems) * config["data"]["train_ratio"])
     passing = load_passing_responses(cache_dir, n_train)
 
-    texts = []
-    for idx in sorted(passing)[:n_samples]:
+    texts, skipped = [], 0
+    for idx in sorted(passing):
+        if len(texts) >= n_samples:
+            break
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_content(problems[idx])},
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        texts.append(prompt + passing[idx]["text"])
+        seq = prompt + passing[idx]["text"]
+        if len(tokenizer(seq)["input_ids"]) > max_len:
+            skipped += 1
+            continue
+        texts.append(seq)
 
+    if skipped:
+        print(f"calibration: skipped {skipped} traces longer than --calib-max-len {max_len} "
+              "(kept only complete prompt+reasoning+code sequences)")
     if not texts:
         raise SystemExit(
             f"No passing teacher traces found under {cache_dir} for the first {n_train} "
