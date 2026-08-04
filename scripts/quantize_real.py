@@ -75,6 +75,8 @@ def main() -> None:
     ap.add_argument("--calib-samples", type=int, default=256)
     ap.add_argument("--calib-max-len", type=int, default=2048)
     ap.add_argument("--config", default="config/config.yaml")
+    ap.add_argument("--save-mode", choices=["fake", "compressed"], default="fake",
+                    help="fake (default): dequantize back to bf16 and save a plain checkpoint")
     args = ap.parse_args()
 
     if args.group_size != 128:
@@ -104,14 +106,20 @@ def main() -> None:
     recipe = build_recipe(args.method, args.bits, args.group_size, ignore=["lm_head"])
     print(f"running {args.method.upper()} W{args.bits}A16 oneshot "
           f"({len(ds)} calibration sequences, max_len={args.calib_max_len})...")
-    oneshot(
+    oneshot_kwargs = dict(
         model=model,
         dataset=ds,
         recipe=recipe,
-        output_dir=args.out,
         max_seq_length=args.calib_max_len,
         num_calibration_samples=len(ds),
     )
+    if args.save_mode == "compressed":
+        oneshot_kwargs["output_dir"] = args.out
+    oneshot(**oneshot_kwargs)
+
+    if args.save_mode == "fake":
+        print("saving dequantized (fake-quant) bf16 checkpoint...")
+        model.save_pretrained(args.out, save_compressed=False)
     tokenizer.save_pretrained(args.out)
 
     out = Path(args.out)
@@ -139,9 +147,13 @@ def main() -> None:
     qcfg = cfg.get("quantization_config", {})
     print("\n=== verification ===")
     print(f"method            {args.method.upper()} W{args.bits}A16, lm_head excluded")
+    print(f"save mode         {args.save_mode}")
     print(f"output            {out}")
     print(f"on-disk size      {dir_size_gb(out):.2f} GB")
-    print(f"quant config      {'present' if qcfg else 'MISSING -- checkpoint is not compressed'}")
+    if args.save_mode == "fake":
+        print("quant config      absent by design (dequantized bf16, loads as a normal model)")
+    else:
+        print(f"quant config      {'present' if qcfg else 'MISSING -- checkpoint is not compressed'}")
     if qcfg:
         print(f"  format          {qcfg.get('format')}")
         print(f"  quant_method    {qcfg.get('quant_method')}")
