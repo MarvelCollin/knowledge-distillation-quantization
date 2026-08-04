@@ -74,8 +74,12 @@ def main() -> None:
 
     print(f"\n=== {len(outs) - bad}/{len(outs)} coherent ===")
     if bad:
-        print("FAIL: this checkpoint is not usable. That is a tooling bug, not a result.")
+        print("FAIL: this checkpoint may not be usable. That would be a tooling bug, not a result.")
         print("Try --dtype float16, or --quantization <backend>, before blaming the checkpoint.")
+        print("\nNOT VALID FOR RAW BASE MODELS. Qwen2.5-1.5B base fails this gate unquantized:")
+        print("it has no instruction tuning and this probe omits the code-primer that")
+        print("compare_eval injects, so it echoes the prompt and loops on rare tokens. Gate the")
+        print("bf16 source model first; if that fails too, the gate says nothing here.")
         sys.exit(1)
     print("PASS: safe to evaluate.")
 
