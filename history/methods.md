@@ -220,6 +220,27 @@ Methodological caveats, all of which belong in the paper:
 - Real compressed-tensors checkpoints could not be used. vLLM 0.6.6 loads them but its Marlin path corrupts generation with systematically duplicated closing delimiters followed by repetition loops, on both RTN and GPTQ, while the same weights saved as dequantized bf16 generate cleanly. That is a runtime defect, not a result, and it is why deployment memory and throughput measurements remain unavailable.
 - Calibration data is drawn from the LeetCode train split via the passing R1 traces; the 228 eval problems come from the test split. Disjoint by construction.
 
+## Stage 8 pre-registration: quantization-aware distillation (written 2026-08-04, before any run)
+
+Recorded before running so the success criterion cannot be chosen after seeing the numbers. The QEAD ablation cost weeks partly because a first draw of 30 looked like a real +6 until the second draw returned 35; the criterion below is fixed in advance and both cells are double-drawn from the start.
+
+**Intervention.** Fake-quantize the student's weights in the forward pass (group-128 symmetric W4, straight-through estimator on the backward), so the optimiser searches over weights that survive rounding. Implemented in `src/distillation/qat.py`, gated by `training.qat` / `--qat`, with the off path verified byte-identical (`scripts/smoke_qat.py`).
+
+**Why this and not weight-distribution regularization.** The mechanism analysis found no weight statistic that separates distilled from original models — kurtosis and outlier ratio are identical to five significant figures — so there is nothing to regularize toward. What it did find is that the update sits at ~2% of a W4 step. The intervention must therefore act on where the weights land relative to the grid, which is what training through the quantizer does.
+
+**The 2x2** (base track, `config_general.yaml` v2 recipe, seed 7, `final_last`):
+
+| Variant | bf16 | W4 | Retention |
+|---|---|---|---|
+| Standard KD (recorded) | 28 | 2 (llm-compressor RTN) / 7 (simulated RTN) | 7% / 25% |
+| Quantization-aware KD | ? | ? | ? |
+
+**Success criterion, pre-declared.** QAT-KD succeeds if its W4 cell beats standard KD's W4 cell by more than the observed draw scatter, on **test-case pass rate** rather than solve count — near-floor solve counts (2 of 228) have no resolution, and the base-track cells sit there. Standard KD at W4 scores 1.3% test rate against 22.0% at bf16. A W4 test rate above roughly 8% would be a real recovery; anything under about 3% is noise.
+
+**Pre-declared honest failure case.** QAT may cost bf16 accuracy while improving retention. Deciding now: a result of bf16 24 / W4 18 **counts as success**, because the deployable artifact is the W4 model and the paper's claim is about what survives quantization, not about the bf16 ceiling. A result that improves retention only by lowering the bf16 score without raising the W4 score is **not** success — that is the trap the QEAD ablation fell into, where a bf16 gap carried forward unchanged was mistaken for protection.
+
+**Both cells double-drawn** (seeds 1234 and 42) before any conclusion is recorded.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.
