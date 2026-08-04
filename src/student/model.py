@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 class StudentModel(nn.Module):
     def __init__(self, model_name: str, max_length: int):
         super().__init__()
@@ -30,5 +29,12 @@ class StudentModel(nn.Module):
         return self.model.get_output_embeddings().weight
 
     def save(self, path: str) -> None:
+        from src.distillation.qat import apply_qat, qat_spec, remove_qat
+
+        spec = qat_spec(self.model)
+        if spec:
+            remove_qat(self.model)
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
+        if spec:
+            apply_qat(self.model, **spec)

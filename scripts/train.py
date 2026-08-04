@@ -91,6 +91,10 @@ def main():
                         help="Restrict train split to one teacher: short_only (Coder short-CoT SFT) or r1_only (R1 logit KD). Val stays pure R1.")
     parser.add_argument("--output-dir", default=None,
                         help="Override training.output_dir from config.")
+    parser.add_argument("--qat", action="store_true",
+                        help="Quantization-aware distillation: fake-quantize student weights "
+                             "(W4 group-128, straight-through) during training so the update "
+                             "lands on the grid the eval quantizer uses.")
     parser.add_argument("--no-qead", action="store_true",
                         help="Disable QEAD error weighting (uniform-weight ablation).")
     args = parser.parse_args()
@@ -114,6 +118,8 @@ def main():
         config["training"]["output_dir"] = args.output_dir
     if args.no_qead:
         config["training"]["qead"] = False
+    if args.qat:
+        config["training"]["qat"] = True
 
     seed = config["training"].get("seed", 42)
     random.seed(seed)
@@ -198,6 +204,16 @@ def main():
         max_length=config["student"]["max_length"],
     )
     student.to(device)
+
+    if config["training"].get("qat", False):
+        from src.distillation.qat import apply_qat
+        qat_bits = int(config["training"].get("qat_bits", 4))
+        n_wrapped = apply_qat(student.model, bits=qat_bits)
+        print(f"QAT: ON — W{qat_bits} group-128 fake-quant on {n_wrapped} Linear layers "
+              f"(lm_head excluded, straight-through backward)")
+    else:
+        print("QAT: off (standard bf16 distillation)")
+
     try:
         student.model = torch.compile(student.model, mode="reduce-overhead")
         print("  torch.compile: ON (reduce-overhead)")

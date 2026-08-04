@@ -64,6 +64,8 @@ training:
   adaptive_skew: true
   teacher_confidence_weight: false
   entropy_focus: false
+  qat: false
+  qat_bits: 4
   warmup_steps: 100
   hard_oversample: 2
   weight_decay: 0.01
