@@ -200,6 +200,26 @@ Scope limit: this is a weight-space measurement. That a destroyed weight-space d
 
 Open caveat: the instruct pair used `outputs/final_last`, since `outputs/final_last_seed7` named in this repo no longer exists on disk. If that directory was overwritten by a later run, the instruct row describes a checkpoint whose eval numbers are not the recorded 36. The base track is unaffected.
 
+## Calibrated PTQ does not rescue the distilled model (GPTQ vs RTN, base track)
+
+The recorded W4 grid used naive round-to-nearest, so the erasure could have been an artifact of the weakest available quantizer rather than a property of 4-bit quantization. GPTQ (Hessian-weighted error compensation, 256 calibration sequences drawn from the train-split R1 traces) was run against RTN in the same toolchain (`llm-compressor`, `scripts/quantize_real.py --save-mode fake`), both dequantized back to bf16 so they run on the same inference path that produced every other number here.
+
+| Precision | Original | Distilled | KD gap (solved) | Original test rate | Distilled test rate | KD gap (test rate) |
+|---|---|---|---|---|---|---|
+| bf16 | 12 | 28 | +16 | 10.3% | 22.0% | +11.7 pts |
+| RTN-W4 | 2 | 2 | 0 | 1.1% | 1.3% | +0.2 pts |
+| GPTQ-W4 | 3 | 2 | -1 | 1.4% | 1.4% | 0.0 pts |
+
+Calibration buys essentially nothing at this scale: RTN and GPTQ land within a solve of each other on both rows, and the distilled model sits at or below its own untrained baseline under both. The KD gap is erased on solve count and on test-case rate alike, and the test-case rates agree to the first decimal, which removes the resolution objection that applies to near-floor solve counts.
+
+This is the strongest form of the headline. The erasure is not an artifact of naive rounding; it survives an error-compensating, calibration-based quantizer.
+
+Methodological caveats, all of which belong in the paper:
+
+- `llm-compressor`'s `W4A16` is not numerically identical to `int_roundtrip_` despite both being nominally group-128 symmetric. Base distilled scores 2 (test 1.3%) under the former and 7 (test 4.8%) under the latter. They agree qualitatively — the gain is destroyed either way — but not quantitatively, so this table is read within-toolchain and the recorded simulated grid stands separately.
+- Real compressed-tensors checkpoints could not be used. vLLM 0.6.6 loads them but its Marlin path corrupts generation with systematically duplicated closing delimiters followed by repetition loops, on both RTN and GPTQ, while the same weights saved as dequantized bf16 generate cleanly. That is a runtime defect, not a result, and it is why deployment memory and throughput measurements remain unavailable.
+- Calibration data is drawn from the LeetCode train split via the passing R1 traces; the 228 eval problems come from the test split. Disjoint by construction.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.

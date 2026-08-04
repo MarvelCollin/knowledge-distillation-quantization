@@ -225,11 +225,15 @@ INT4 erasure is an artifact of naive RTN.
       runs). Four pairs × 196 Linear weights. Falsified the sharpness hypothesis; established the
       step-size mechanism and the quantitative explanation of the QEAD null. See
       `history/methods.md` → "Weight-level mechanism". Outputs in `logs/weightstats_*.json`.
-- [ ] **Real PTQ (GPTQ / AWQ) — the decisive open question.** Every W4 number in the project comes
-      from naive RTN. If calibration-based methods recover the KD gain, the headline is an RTN
-      artifact and the paper repositions. Step-size reasoning cuts both ways: no 4-bit method can
-      make the grid finer, but AWQ's channel scaling and GPTQ's output-space compensation could
-      still preserve function. Prior: roughly even odds.
+- [x] **Calibrated PTQ (GPTQ vs RTN) — DONE 2026-08-04, headline SURVIVES.** Base track, same
+      toolchain, fake-quant onto the trusted bf16 path. KD gap: bf16 +16 → RTN-W4 0 → **GPTQ-W4 −1**.
+      Test-case rate gap +11.7 pts → 0.0 pts. Calibration does not rescue distilled knowledge; the
+      distilled model sits at or below its own untrained baseline under both quantizers. The erasure
+      is not an artifact of naive rounding. See `history/methods.md` → "Calibrated PTQ does not
+      rescue the distilled model".
+- [ ] **Reconsider quantization-aware distillation (Stage 8).** `notes/plan-phase4.md` §3 recommended
+      finding-only *unless* the fragility survived calibrated PTQ. It did, so the condition that
+      ruled Stage 8 out no longer holds — revisit whether a fix is worth two training runs.
 - [ ] Activation-side probe — closes the weight-space-to-behaviour inference, and doubles as a
       cheap screening metric (output KL vs bf16 on a fixed prompt set, a fraction of an eval run)
 - [ ] Real compressed checkpoints + simulated-vs-real agreement check (validates the fake-quant
