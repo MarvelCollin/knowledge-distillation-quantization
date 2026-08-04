@@ -137,11 +137,16 @@ def main() -> None:
     cfg_path = out / "config.json"
     if cfg_path.exists():
         raw = json.loads(cfg_path.read_text())
-        sparsity = raw.get("quantization_config", {}).get("sparsity_config")
-        if isinstance(sparsity, dict) and not sparsity.get("format"):
-            raw["quantization_config"].pop("sparsity_config")
-            cfg_path.write_text(json.dumps(raw, indent=2))
-            print("dropped empty sparsity_config from config.json for the older eval stack")
+        if args.save_mode == "fake":
+            if raw.pop("quantization_config", None) is not None:
+                cfg_path.write_text(json.dumps(raw, indent=2))
+                print("removed stale quantization_config; checkpoint is plain bf16")
+        else:
+            sparsity = raw.get("quantization_config", {}).get("sparsity_config")
+            if isinstance(sparsity, dict) and not sparsity.get("format"):
+                raw["quantization_config"].pop("sparsity_config")
+                cfg_path.write_text(json.dumps(raw, indent=2))
+                print("dropped empty sparsity_config from config.json for the older eval stack")
 
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     qcfg = cfg.get("quantization_config", {})
