@@ -63,6 +63,30 @@ def build_recipe(method: str, bits: int, group_size: int, ignore: list):
 def dir_size_gb(path: Path) -> float:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1e9
 
+_QUANT_SUFFIXES = (
+    "weight_scale", "weight_zero_point", "weight_g_idx", "weight_shape", "weight_packed",
+    "input_scale", "input_zero_point",
+)
+
+def strip_quant_params(out: Path) -> int:
+    from safetensors.torch import load_file, save_file
+
+    removed = 0
+    for shard in sorted(out.glob("*.safetensors")):
+        tensors = load_file(str(shard))
+        keep = {k: v for k, v in tensors.items() if not k.endswith(_QUANT_SUFFIXES)}
+        if len(keep) != len(tensors):
+            removed += len(tensors) - len(keep)
+            save_file(keep, str(shard), metadata={"format": "pt"})
+
+    index = out / "model.safetensors.index.json"
+    if index.exists():
+        idx = json.loads(index.read_text())
+        idx["weight_map"] = {k: v for k, v in idx["weight_map"].items()
+                             if not k.endswith(_QUANT_SUFFIXES)}
+        index.write_text(json.dumps(idx, indent=2))
+    return removed
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="Source checkpoint (HF id or local dir).")
@@ -141,6 +165,9 @@ def main() -> None:
             if raw.pop("quantization_config", None) is not None:
                 cfg_path.write_text(json.dumps(raw, indent=2))
                 print("removed stale quantization_config; checkpoint is plain bf16")
+            n = strip_quant_params(out)
+            if n:
+                print(f"stripped {n} quantization-parameter tensors (scales, zero points)")
         else:
             sparsity = raw.get("quantization_config", {}).get("sparsity_config")
             if isinstance(sparsity, dict) and not sparsity.get("format"):
