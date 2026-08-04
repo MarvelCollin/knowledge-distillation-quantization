@@ -190,7 +190,9 @@ def main() -> None:
         print(f"  format          {qcfg.get('format')}")
         print(f"  quant_method    {qcfg.get('quant_method')}")
     print("\nNext: gate this checkpoint before evaluating it.")
-    print(f"  python scripts/sanity_generate.py --model {out} --dtype auto")
+    print(f"  docker compose run --rm compare_eval \\")
+    print(f"    python scripts/sanity_generate.py --model {out} \\")
+    print(f"    --dtype bfloat16 --max-tokens 800 --chars 1500")
 
 if __name__ == "__main__":
     main()
