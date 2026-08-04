@@ -98,7 +98,8 @@ def main() -> None:
     ])
 
     print(f"loading {args.model}...")
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype="auto",  device_map="auto", trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype="auto", device_map={"": 0}, trust_remote_code=True)
 
     recipe = build_recipe(args.method, args.bits, args.group_size, ignore=["lm_head"])
     print(f"running {args.method.upper()} W{args.bits}A16 oneshot "
