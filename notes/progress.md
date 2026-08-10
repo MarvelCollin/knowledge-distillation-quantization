@@ -23,6 +23,9 @@ itself, with the QEAD ablation reported as the negative control that rules out t
   (missing_function, empty output, degenerate loops).
 - **Error-aware token weighting does not prevent it** — QEAD, the natural mitigation, shows no
   measurable retention benefit on either track (negative result, Phase 3).
+- **Neither calibrated PTQ nor quantization-aware training rescues it** — GPTQ (Stage 4) and
+  QAT-KD (Stage 8) both fail to recover the W4 gap; QAT-KD additionally costs a large, statistically
+  confirmed bf16 accuracy drop (negative result, Phase 4).
 
 ### Method components (implemented, no longer claimed as the contribution)
 - **QEAD token weighting** — simulate INT8 quantization error on student logits per position,
@@ -147,11 +150,18 @@ and the instruct cells show single INT4 draws scatter by 4-6 solves ({17,23} and
   instruct, all cells double-drawn). The weight-level analysis explains why: the QEAD-on vs
   QEAD-off weight difference is 39-90× smaller than the W4 perturbation, under 1% of one
   quantization step — two orders of magnitude below the noise floor it was meant to counter.
+- **Quantization-aware distillation (Stage 8) also fails, and worse than QEAD.** Training through a
+  straight-through W4 fake-quantizer (base track, seed 7) misses its own pre-registered success bar
+  (W4 test rate 3.2-3.3% vs the declared ~8% threshold) and significantly damages bf16 accuracy
+  (28 → 10/11 solved, p<0.005, 95% CI excludes 0) while the W4 change itself is not distinguishable
+  from standard KD's W4 cell (p=1, CI includes 0). See `history/methods.md` → "Stage 8 result:
+  quantization-aware distillation fails".
 
 ### Active run
-None. Phase 3 closed 2026-07-30. Phase 4 mechanism analysis closed 2026-08-02 (CPU only).
-Next GPU work: real GPTQ/AWQ W4 checkpoints and the 8-cell eval grid that tests whether the
-INT4 erasure is an artifact of naive RTN.
+None. Phase 3 closed 2026-07-30. Phase 4 mechanism analysis closed 2026-08-02, calibrated PTQ
+grid closed 2026-08-04, statistics + Stage 8 (QAT-KD, failed) closed 2026-08-10 (all CPU/single
+training run, no active GPU work). Next GPU work: second benchmark (EvalPlus, Stage 7,
+no retraining) or the activation-side probe.
 
 ---
 
@@ -231,9 +241,13 @@ INT4 erasure is an artifact of naive RTN.
       distilled model sits at or below its own untrained baseline under both quantizers. The erasure
       is not an artifact of naive rounding. See `history/methods.md` → "Calibrated PTQ does not
       rescue the distilled model".
-- [ ] **Reconsider quantization-aware distillation (Stage 8).** `notes/plan-phase4.md` §3 recommended
-      finding-only *unless* the fragility survived calibrated PTQ. It did, so the condition that
-      ruled Stage 8 out no longer holds — revisit whether a fix is worth two training runs.
+- [x] **Quantization-aware distillation (Stage 8) — DONE 2026-08-10, FAILS its pre-registration.**
+      Trained through a straight-through W4 fake-quantizer, base track, double-drawn. Misses the
+      declared success bar (W4 test rate 3.2-3.3% vs ~8% threshold) and significantly costs bf16
+      accuracy (28 → 10/11 solved, p<0.005) while the W4 change is not distinguishable from standard
+      KD's W4 cell (p=1). See `history/methods.md` → "Stage 8 result: quantization-aware
+      distillation fails". No fix survives; the finding-paper framing from `plan-phase4.md` §3
+      is confirmed as the right call.
 - [ ] Activation-side probe — closes the weight-space-to-behaviour inference, and doubles as a
       cheap screening metric (output KL vs bf16 on a fixed prompt set, a fraction of an eval run)
 - [ ] Real compressed checkpoints + simulated-vs-real agreement check (validates the fake-quant
@@ -242,8 +256,10 @@ INT4 erasure is an artifact of naive RTN.
 ### Supporting experiments — remaining and cut
 - [ ] Efficiency table: size / VRAM / tokens-per-sec for teacher vs student bf16 vs student INT8
       (INT8 is the deployment recommendation, so this table supports the practical claim)
-- [ ] Statistical rigor: pass@5 with multiple seeds on the verified-116 subset. No number in the
-      paper currently carries a confidence interval, and single INT4 draws scatter by 4-6 solves.
+- [x] **Statistical rigor on the full-228 headline cells — DONE 2026-08-10.** Paired exact McNemar +
+      bootstrap CI (`scripts/significance_tests.py`) now covers every bf16/INT4/INT8/RTN4/GPTQ4/QAT
+      comparison in the grid; see `notes/significance_tests.md` and `history/methods.md`. Remaining
+      gap: not yet re-run on the verified-116 subset specifically.
 - [ ] Second benchmark (EvalPlus) on existing checkpoints — the cheapest generality result, no
       retraining. Contamination is answerable: the claim is relative degradation within one model,
       so it inflates both precisions equally and cancels.

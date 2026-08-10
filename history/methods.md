@@ -220,6 +220,8 @@ Methodological caveats, all of which belong in the paper:
 - Real compressed-tensors checkpoints could not be used. vLLM 0.6.6 loads them but its Marlin path corrupts generation with systematically duplicated closing delimiters followed by repetition loops, on both RTN and GPTQ, while the same weights saved as dequantized bf16 generate cleanly. That is a runtime defect, not a result, and it is why deployment memory and throughput measurements remain unavailable.
 - Calibration data is drawn from the LeetCode train split via the passing R1 traces; the 228 eval problems come from the test split. Disjoint by construction.
 
+**Significance (added 2026-08-10, `scripts/significance_tests.py`):** the KD gap at both real quantizers is now a confirmed null, not an eyeballed one. RTN-W4 gap (orig 2 vs distilled 2): McNemar p=1, Δsolved 0, 95% CI [−4,+4]. GPTQ-W4 gap (orig 3 vs distilled 2): McNemar p=1, Δsolved −1, 95% CI [−4,+2]. Both bracket zero comfortably, consistent with the bf16 gap's CI ([+6,+26]) being nowhere near either.
+
 ## Stage 8 pre-registration: quantization-aware distillation (written 2026-08-04, before any run)
 
 Recorded before running so the success criterion cannot be chosen after seeing the numbers. The QEAD ablation cost weeks partly because a first draw of 30 looked like a real +6 until the second draw returned 35; the criterion below is fixed in advance and both cells are double-drawn from the start.
@@ -240,6 +242,24 @@ Recorded before running so the success criterion cannot be chosen after seeing t
 **Pre-declared honest failure case.** QAT may cost bf16 accuracy while improving retention. Deciding now: a result of bf16 24 / W4 18 **counts as success**, because the deployable artifact is the W4 model and the paper's claim is about what survives quantization, not about the bf16 ceiling. A result that improves retention only by lowering the bf16 score without raising the W4 score is **not** success — that is the trap the QEAD ablation fell into, where a bf16 gap carried forward unchanged was mistaken for protection.
 
 **Both cells double-drawn** (seeds 1234 and 42) before any conclusion is recorded.
+
+## Stage 8 result: quantization-aware distillation fails (run 2026-08-10)
+
+Trained per the pre-registration above (`--qat --offline`, base track, seed 7, 3 epochs, `outputs_qat_base/final_last`, 9h05m wall-clock, best_val_loss 0.9939). Quantized with the same RTN-W4 fake-quant path as every other real-PTQ cell in this project. Both bf16 and W4 double-drawn (seeds 1234, 42) before conclusions, as declared.
+
+| Variant | bf16 (solved / test rate) | W4, RTN real (solved / test rate) | Retention (test rate) |
+|---|---|---|---|
+| Standard KD (recorded) | 28 / 22.0% | 2 / 1.3% | 5.9% |
+| Quantization-aware KD | 10, 11 / 13.5%, 14.0% | 3, 1 / 3.2%, 3.3% | ~23.6% |
+
+Paired significance (`scripts/significance_tests.py`, McNemar + bootstrap CI over the 228 problems):
+
+- **The bf16 cost is real and large.** QAT-KD vs standard KD at bf16: both draws significant (p=0.0014, p=0.0033), Δsolved −18 / −17, 95% CI [−29,−8] / [−28,−7] — excludes 0 comfortably.
+- **The W4 gain is not distinguishable from standard KD's W4 cell.** Both draws p=1 (ns), Δsolved +1 / −1, 95% CI [−3,+5] / [−5,+2] — includes 0. Caveat: only 4-5 discordant problems, so power is weak; the two W4 test-rate draws (3.2%, 3.3%) agree closely with each other, which is weak evidence the rate itself moved even though solve-count can't confirm it.
+
+**Verdict against the pre-registration: fail.** The declared success bar was W4 test rate above ~8%; QAT-KD reaches 3.2-3.3%, short of it and only marginally past the ~3% noise floor also declared in advance. The retention percentage looks better than standard KD's (23.6% vs 5.9%), but that is arithmetic, not evidence: the denominator (bf16) collapsed by a large, confirmed margin, while the numerator's (W4) apparent rise is not confirmed. This is the shape of result the pre-registration's honest-failure clause was written to catch, even though it does not match the clause's literal wording (W4 did move, nominally).
+
+Training through a straight-through W4 fake-quantizer for 3 epochs, at this model scale and data budget, damages general capability more than it protects distilled knowledge from rounding. No fix is proposed; per `plan-phase4.md` §3, this project reports the finding rather than chasing a working mitigation. This closes the question outcome A left open: neither calibrated PTQ (Stage 4) nor quantization-aware training (Stage 8) rescues the distilled model at W4.
 
 ## What this shows
 
