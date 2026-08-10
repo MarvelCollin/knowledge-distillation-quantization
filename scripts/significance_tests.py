@@ -1,14 +1,3 @@
-"""Paired significance tests over the saved per-problem eval records.
-
-Exact two-sided McNemar (binomial on discordant pairs) plus a paired bootstrap CI
-on the solved-count difference, for every headline quantization comparison. No GPU:
-reads only the `per_problem[].solved` flags written by compare_eval.py.
-
-Restore the intermediate eval files first (offloaded to Drive):
-    gdrive-pull outputs/eval/intermediate
-Then:
-    EVAL_DIR=outputs/eval/intermediate python scripts/significance_tests.py
-"""
 import json, os, random
 from math import comb
 
@@ -22,10 +11,9 @@ def load(f):
 
 
 def mcnemar_exact(A, B):
-    """Two-sided exact McNemar (binomial) on paired boolean dicts A, B."""
     keys = sorted(set(A) & set(B))
-    b = sum(1 for k in keys if A[k] and not B[k])   # A solves, B doesn't
-    c = sum(1 for k in keys if B[k] and not A[k])   # B solves, A doesn't
+    b = sum(1 for k in keys if A[k] and not B[k])
+    c = sum(1 for k in keys if B[k] and not A[k])
     n = b + c
     if n == 0:
         return b, c, 1.0
@@ -35,7 +23,6 @@ def mcnemar_exact(A, B):
 
 
 def boot_ci(A, B, iters=20000):
-    """Bootstrap 95% CI on (solves_B - solves_A), paired over problems."""
     keys = sorted(set(A) & set(B))
     diffs = [(1 if B[k] else 0) - (1 if A[k] else 0) for k in keys]
     n = len(diffs)
@@ -63,6 +50,11 @@ F = dict(
     oB_i4="Student_original_Qwen2.5-1.5B_int4.json",
     dB_g4="Student_distilled_Qwen2.5-1.5B_gptq4.json",
     oB_g4="Student_original_Qwen2.5-1.5B_gptq4.json",
+    dB_rtn4fq="Student_distilled_Qwen2.5-1.5B_rtn4fq.json",
+    qat_bf="Student_distilled_Qwen2.5-1.5B_qatbf16.json",
+    qat_bfb="Student_distilled_Qwen2.5-1.5B_qatbf16_s42.json",
+    qat_rtn4="Student_distilled_Qwen2.5-1.5B_qatrtn4.json",
+    qat_rtn4b="Student_distilled_Qwen2.5-1.5B_qatrtn4_s42.json",
 )
 
 TESTS = [
@@ -77,8 +69,9 @@ TESTS = [
     ("9  QEAD INT4 (instruct)   : on(17/23) vs off(16/20)", "dI_i4", ["qoff_i4", "qoff_i4b"]),
     ("B1 Real GPTQ4 base        : distilled bf16(28) vs GPTQ4(1)", "dB", ["dB_g4"]),
     ("B2 GPTQ4 gap (base)       : orig GPTQ4(1) vs distilled GPTQ4(1)", "oB_g4", ["dB_g4"]),
+    ("Q1 QAT bf16 vs standard KD bf16  : dB(28) vs QAT-KD bf16(10/11)", "dB", ["qat_bf", "qat_bfb"]),
+    ("Q2 QAT RTN4 vs standard KD RTN4  : rtn4fq(2) vs QAT-KD RTN4(3/1)", "dB_rtn4fq", ["qat_rtn4", "qat_rtn4b"]),
 ]
-
 
 def main():
     L = {k: load(v) for k, v in F.items()}
@@ -93,7 +86,6 @@ def main():
             print(f"    vs {bk:<8} solved {nsolv(a):>2}->{nsolv(bk):<2} | discordant b={b:>2} c={c:>2} "
                   f"| McNemar p={p:.4g} [{star}] | dsolved={obs:+d} 95%CI[{lo:+d},{hi:+d}]")
         print()
-
 
 if __name__ == "__main__":
     main()
