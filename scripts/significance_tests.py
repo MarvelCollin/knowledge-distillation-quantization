@@ -4,11 +4,12 @@ from math import comb
 random.seed(12345)
 D = os.environ.get("EVAL_DIR", "outputs/eval/intermediate")
 
-
 def load(f):
-    d = json.load(open(os.path.join(D, f)))
+    try:
+        d = json.load(open(os.path.join(D, f)))
+    except FileNotFoundError:
+        return None
     return {p["idx"]: bool(p["solved"]) for p in d["per_problem"]}
-
 
 def mcnemar_exact(A, B):
     keys = sorted(set(A) & set(B))
@@ -48,9 +49,10 @@ F = dict(
     dB_i4b="Student_distilled_Qwen2.5-1.5B_base_distilled_int4_s42.json",
     dB_i8="Student_distilled_Qwen2.5-1.5B_int8.json",
     oB_i4="Student_original_Qwen2.5-1.5B_int4.json",
-    dB_g4="Student_distilled_Qwen2.5-1.5B_gptq4.json",
-    oB_g4="Student_original_Qwen2.5-1.5B_gptq4.json",
+    dB_g4="Student_distilled_Qwen2.5-1.5B_gptq4fq.json",
+    oB_g4="Student_original_Qwen2.5-1.5B_gptq4fq.json",
     dB_rtn4fq="Student_distilled_Qwen2.5-1.5B_rtn4fq.json",
+    oB_rtn4fq="Student_original_Qwen2.5-1.5B_rtn4fq.json",
     qat_bf="Student_distilled_Qwen2.5-1.5B_qatbf16.json",
     qat_bfb="Student_distilled_Qwen2.5-1.5B_qatbf16_s42.json",
     qat_rtn4="Student_distilled_Qwen2.5-1.5B_qatrtn4.json",
@@ -67,19 +69,27 @@ TESTS = [
     ("7  Instruct INT8 preserve : distilled bf16(36) vs INT8(30/35)", "dI", ["dI_i8", "dI_i8b"]),
     ("8  QEAD bf16 (instruct)   : on(36) vs off(30/35)", "dI", ["qoff_bf", "qoff_bfb"]),
     ("9  QEAD INT4 (instruct)   : on(17/23) vs off(16/20)", "dI_i4", ["qoff_i4", "qoff_i4b"]),
-    ("B1 Real GPTQ4 base        : distilled bf16(28) vs GPTQ4(1)", "dB", ["dB_g4"]),
-    ("B2 GPTQ4 gap (base)       : orig GPTQ4(1) vs distilled GPTQ4(1)", "oB_g4", ["dB_g4"]),
+    ("B1 Real GPTQ4 base        : distilled bf16(28) vs GPTQ4(2)", "dB", ["dB_g4"]),
+    ("B2 GPTQ4 gap (base)       : orig GPTQ4(3) vs distilled GPTQ4(2)", "oB_g4", ["dB_g4"]),
+    ("B3 RTN4 gap (base, real)  : orig RTN4(2) vs distilled RTN4(2)", "oB_rtn4fq", ["dB_rtn4fq"]),
     ("Q1 QAT bf16 vs standard KD bf16  : dB(28) vs QAT-KD bf16(10/11)", "dB", ["qat_bf", "qat_bfb"]),
     ("Q2 QAT RTN4 vs standard KD RTN4  : rtn4fq(2) vs QAT-KD RTN4(3/1)", "dB_rtn4fq", ["qat_rtn4", "qat_rtn4b"]),
 ]
 
 def main():
     L = {k: load(v) for k, v in F.items()}
+    missing = [k for k, v in L.items() if v is None]
+    if missing:
+        print(f"skipping (file not found): {', '.join(missing)}")
+        print()
     nsolv = lambda k: sum(L[k].values())
     print("=" * 92)
     for title, a, blist in TESTS:
         print(title)
         for bk in blist:
+            if L[a] is None or L[bk] is None:
+                print(f"    vs {bk:<8} skipped (missing file)")
+                continue
             b, c, p = mcnemar_exact(L[a], L[bk])
             obs, lo, hi = boot_ci(L[a], L[bk])
             star = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
