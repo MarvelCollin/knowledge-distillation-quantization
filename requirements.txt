@@ -8,3 +8,4 @@ pyyaml>=6.0
 python-dotenv>=1.0.0
 sentencepiece>=0.1.99
 matplotlib>=3.8.0
+evalplus>=0.3.1
