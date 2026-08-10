@@ -1,4 +1,5 @@
 outputs/
+outputs_*/
 cache/
 .git/
 __pycache__/
