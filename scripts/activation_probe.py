@@ -98,6 +98,45 @@ def compare(tag_a, tag_b):
     print(f"  top-1 agreement                                : {agree}/{n} ({agree / max(n,1):.1%})")
     print(f"  {tag_a} top-1 token missing from {tag_b} top-{TOP_K}   : {fell_out}/{n} ({fell_out / max(n,1):.1%})")
 
+def _seq_agreement(pos_a, pos_b):
+    n = len(pos_a)
+    if n == 0:
+        return 0.0
+    agree = sum(
+        1 for x, y in zip(pos_a, pos_b)
+        if max(x["topk"], key=x["topk"].get) == max(y["topk"], key=y["topk"].get)
+    )
+    return agree / n
+
+def compare_gap(dist_bf, orig_bf, dist_w4, orig_w4):
+    import random
+    random.seed(12345)
+
+    def load(tag):
+        return {s["idx"]: s["positions"] for s in json.loads((OUT_DIR / f"{tag}.json").read_text())}
+
+    A_bf, B_bf, A_w4, B_w4 = load(dist_bf), load(orig_bf), load(dist_w4), load(orig_w4)
+    idxs = sorted(set(A_bf) & set(B_bf) & set(A_w4) & set(B_w4))
+
+    deltas = []
+    for idx in idxs:
+        pa_bf, pb_bf, pa_w4, pb_w4 = A_bf[idx], B_bf[idx], A_w4[idx], B_w4[idx]
+        if len(pa_bf) != len(pb_bf) or len(pa_w4) != len(pb_w4):
+            continue
+        deltas.append(_seq_agreement(pa_w4, pb_w4) - _seq_agreement(pa_bf, pb_bf))
+
+    n = len(deltas)
+    mean_delta = sum(deltas) / n
+    iters = 20000
+    boots = sorted(sum(deltas[random.randrange(n)] for _ in range(n)) / n for _ in range(iters))
+    lo, hi = boots[int(0.025 * iters)], boots[int(0.975 * iters)]
+    n_pos = sum(1 for d in deltas if d > 0)
+
+    print(f"Gap-convergence test over {n} independent sequences "
+          f"({dist_bf}/{orig_bf} agreement-rate -> {dist_w4}/{orig_w4} agreement-rate delta):")
+    print(f"  mean delta (w4_agree - bf16_agree): {mean_delta:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]")
+    print(f"  sequences where dist-orig agreement increased under W4: {n_pos}/{n} ({n_pos / n:.1%})")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model")
@@ -105,13 +144,18 @@ def main():
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "auto"])
     ap.add_argument("--compare", nargs=2, metavar=("TAG_A", "TAG_B"))
+    ap.add_argument("--compare-gap", nargs=4,
+                     metavar=("DIST_BF16", "ORIG_BF16", "DIST_W4", "ORIG_W4"))
     args = ap.parse_args()
 
+    if args.compare_gap:
+        compare_gap(*args.compare_gap)
+        return
     if args.compare:
         compare(*args.compare)
         return
     if not args.model or not args.tag:
-        ap.error("--model and --tag are required unless --compare is given")
+        ap.error("--model and --tag are required unless --compare/--compare-gap is given")
     score(args)
 
 if __name__ == "__main__":
