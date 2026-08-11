@@ -36,7 +36,9 @@ def score(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     llm = LLM(model=args.model, dtype=args.dtype, max_model_len=MAX_LEN,
-              gpu_memory_utilization=0.9, trust_remote_code=True)
+              gpu_memory_utilization=0.70, trust_remote_code=True,
+              enforce_eager=True, enable_chunked_prefill=True,
+              max_num_batched_tokens=1024, enable_prefix_caching=False)
 
     params = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=1, prompt_logprobs=TOP_K)
     cap = MAX_LEN - 1
