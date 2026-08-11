@@ -306,6 +306,34 @@ Both metrics move the same direction: agreement rises, and the rate at which the
 
 **This is the activation-level confirmation of erasure.** The effect is modest per-token (well under one percentage point) but statistically unambiguous at n=100 independent sequences, and modest per-token shifts are exactly what should compound, over a full multi-hundred-token generation, into the large sequence-level accuracy collapse already measured (28 solved to 2, both real quantizers). The weight-space finding (KD update ~2% of a W4 step, cosine 0.19) and the eval-level finding (KD gap 12/28 to 2/2) are now connected by a direct behavioural measurement, not just an inference bridging them.
 
+## Efficiency table: teacher vs distilled student (measured 2026-08-11)
+
+Both models profiled identically (`scripts/efficiency_table.py`): 24 fixed prompts, temperature
+0.6, top_p 0.95, max 512 new tokens, vLLM 0.6.6, bf16, single RTX 3090.
+
+| Model | On-disk (bf16) | Weights VRAM | Throughput (24-prompt batch) |
+|---|---|---|---|
+| Teacher (R1-Distill-Qwen-7B) | 14.19 GB | 14.22 GiB | 994 tok/s |
+| Student, distilled (1.5B) | 2.88 GB | 2.91 GiB | 2417 tok/s |
+
+The distilled student is ~4.9x smaller and ~2.4x faster than the teacher at bf16, for a fraction of
+the teacher's reasoning capacity (28/228 vs the teacher's 126/228 ceiling) -- expected at this size
+gap, and the point of the deployment argument, not a counterexample to it.
+
+**Theoretical INT8/W4 size** (bit-width only; real compressed-checkpoint throughput and VRAM cannot
+be measured on this stack -- the vLLM 0.6.6 Marlin runtime defect corrupts generation from real
+compressed-tensors checkpoints, see "Calibrated PTQ does not rescue the distilled model" above):
+
+| Model | bf16 | INT8 (theoretical) | W4 (theoretical) |
+|---|---|---|---|
+| Teacher | 14.19 GB | 7.09 GB | 3.55 GB |
+| Student, distilled | 2.88 GB | 1.44 GB | 0.72 GB |
+
+At INT8 -- the precision this project's own grid shows is free (no measurable degradation on any
+model tested, the finding this table exists to support) -- the distilled student's theoretical
+footprint is ~9.9x smaller than the teacher's bf16 footprint. This is the practical form of the
+paper's deployment recommendation: distill to 1.5B, serve at INT8, skip W4.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.

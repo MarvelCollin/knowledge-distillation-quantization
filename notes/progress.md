@@ -266,8 +266,12 @@ no retraining) or the activation-side probe.
       methodology every recorded number depends on)
 
 ### Supporting experiments — remaining and cut
-- [ ] Efficiency table: size / VRAM / tokens-per-sec for teacher vs student bf16 vs student INT8
-      (INT8 is the deployment recommendation, so this table supports the practical claim)
+- [x] **Efficiency table — DONE 2026-08-11.** Teacher vs distilled student, identical profiling
+      conditions (`scripts/efficiency_table.py`). Student is ~4.9x smaller, ~2.4x faster than the
+      teacher at bf16 (14.19GB/994 tok/s vs 2.88GB/2417 tok/s). Theoretical INT8 footprint (bit-width
+      only — real compressed-checkpoint throughput is blocked by the Marlin defect, same limitation
+      as Stage 6) is ~9.9x smaller than the teacher's bf16 size. See `history/methods.md` →
+      "Efficiency table: teacher vs distilled student".
 - [x] **Statistical rigor on the full-228 headline cells — DONE 2026-08-10.** Paired exact McNemar +
       bootstrap CI (`scripts/significance_tests.py`) now covers every bf16/INT4/INT8/RTN4/GPTQ4/QAT
       comparison in the grid; see `notes/significance_tests.md` and `history/methods.md`. Remaining
