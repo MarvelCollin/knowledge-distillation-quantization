@@ -261,6 +261,30 @@ Paired significance (`scripts/significance_tests.py`, McNemar + bootstrap CI ove
 
 Training through a straight-through W4 fake-quantizer for 3 epochs, at this model scale and data budget, damages general capability more than it protects distilled knowledge from rounding. No fix is proposed; per `plan-phase4.md` §3, this project reports the finding rather than chasing a working mitigation. This closes the question outcome A left open: neither calibrated PTQ (Stage 4) nor quantization-aware training (Stage 8) rescues the distilled model at W4.
 
+## Stage 7 result: generality on EvalPlus — the erasure is task-complexity-dependent, not absolute (run 2026-08-11)
+
+Evaluated the same four base-track checkpoints (original vs distilled x bf16 vs the calibrated GPTQ-W4 checkpoints from Stage 4) on HumanEval+ (164 problems) and MBPP+ (378 problems), pass@1 greedy. Generation used this project's own budget-forced think/code protocol (`scripts/evalplus_reasoning_codegen.py`, reusing `src/evaluation/generation.py`), not EvalPlus's own generic completion instruction. An earlier attempt using `evalplus.codegen` directly found a KD gap of essentially zero at both precisions, which turned out to be a measurement artifact: reading `evalplus/provider/vllm.py` and `utility.py` showed its default prompt is a generic "write a self-contained function" chat instruction that never triggers the model's trained `<think>...</think>` reasoning phase. Every other number in this project, including the whole LeetCode grid, comes from a protocol that always invokes that phase; that first measurement is discarded in favor of the reasoning-protocol run below.
+
+| Benchmark | Precision | Original | Distilled | KD gap (pass@1) |
+|---|---|---|---|---|
+| HumanEval+ | bf16 | 33.5% | 37.2% | +3.7 pts |
+| HumanEval+ | GPTQ-W4 | 7.3% | 9.1% | +1.8 pts |
+| MBPP+ | bf16 | 47.1% | 55.8% | +8.7 pts |
+| MBPP+ | GPTQ-W4 | 12.7% | 17.7% | +5.0 pts |
+
+Paired significance (`scripts/evalplus_significance.py`, same McNemar + bootstrap approach as Stage 5, over the "+" pass@1 flags, base + extra tests):
+
+| Comparison | McNemar p | Delta-pass [95% CI] |
+|---|---|---|
+| HumanEval+ bf16 gap | 0.39 (ns) | +6 [-5,+17] |
+| HumanEval+ W4 gap | 0.58 (ns) | +3 [-4,+10] |
+| MBPP+ bf16 gap | **0.0004** (\*\*\*) | +33 [+15,+51] |
+| MBPP+ W4 gap | **0.013** (\*) | +19 [+5,+33] |
+
+MBPP+ (378 problems, more statistical power) confirms both gaps: distillation lifts pass@1 significantly at bf16, and the advantage survives, only partially attenuated, at W4 -- the CI excludes 0 at both precisions. HumanEval+ (164 problems) shows the same direction but doesn't reach significance at this sample size; treat it as consistent with, not independently confirming, the MBPP+ result.
+
+**This reframes the generality claim.** The LeetCode headline is complete erasure: the KD gap goes from +16 solves at bf16 to a confirmed null under both real quantizers (B2/B3 in `notes/significance_tests.md`). On MBPP+ the gap only shrinks -- retaining roughly half its magnitude by point estimate (49% on HumanEval+, 57% on MBPP+) rather than collapsing, and that retained gap is itself statistically significant. **The erasure is strongest on LeetCode-style competitive programming and partial on shorter, simpler function-completion tasks.** That is a more precise and more defensible claim than "the erasure generalizes" -- it says something about *what kind* of quantization fragility this is, plausibly tied to task complexity or generation length rather than being a blanket property of distilled-then-quantized weights.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.

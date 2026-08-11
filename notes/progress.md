@@ -26,6 +26,9 @@ itself, with the QEAD ablation reported as the negative control that rules out t
 - **Neither calibrated PTQ nor quantization-aware training rescues it** — GPTQ (Stage 4) and
   QAT-KD (Stage 8) both fail to recover the W4 gap; QAT-KD additionally costs a large, statistically
   confirmed bf16 accuracy drop (negative result, Phase 4).
+- **The erasure is LeetCode-specific in its completeness, not a blanket property of W4** — on
+  HumanEval+/MBPP+ (Stage 7), the KD gap only partially attenuates under GPTQ-W4 rather than going
+  to zero, significant on MBPP+ at both precisions (378 problems).
 
 ### Method components (implemented, no longer claimed as the contribution)
 - **QEAD token weighting** — simulate INT8 quantization error on student logits per position,
@@ -260,9 +263,15 @@ no retraining) or the activation-side probe.
       bootstrap CI (`scripts/significance_tests.py`) now covers every bf16/INT4/INT8/RTN4/GPTQ4/QAT
       comparison in the grid; see `notes/significance_tests.md` and `history/methods.md`. Remaining
       gap: not yet re-run on the verified-116 subset specifically.
-- [ ] Second benchmark (EvalPlus) on existing checkpoints — the cheapest generality result, no
-      retraining. Contamination is answerable: the claim is relative degradation within one model,
-      so it inflates both precisions equally and cancels.
+- [x] **Second benchmark (EvalPlus) — DONE 2026-08-11, generality claim reframed, not simply
+      confirmed.** HumanEval+/MBPP+, pass@1 greedy, using this project's own reasoning protocol
+      (an EvalPlus-native run first showed a ≈0 gap at both precisions — a measurement artifact,
+      since EvalPlus's default prompt never invokes the model's trained think phase). Under the
+      matched protocol: KD gap is positive at bf16 on both benchmarks, and — unlike LeetCode's
+      complete erasure — only partially attenuates under GPTQ-W4 (retains ~49-57% by point
+      estimate). MBPP+'s gap is significant at both precisions (McNemar p=0.0004 bf16, p=0.013 W4,
+      378 problems); HumanEval+ trends the same direction but doesn't reach significance at 164
+      problems. See `history/methods.md` → "Stage 7 result: generality on EvalPlus".
 - ~~3B student~~ — cut per `notes/plan-phase4.md`. A bf16 full fine-tune of 3B does not fit the
   single 24 GB card alongside 32k-token traces, and any workaround (LoRA, shortened context,
   offload) makes the run protocol-mismatched to every 1.5B number in the paper. Declared as a
