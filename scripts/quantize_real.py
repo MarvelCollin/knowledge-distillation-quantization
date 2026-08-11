@@ -145,6 +145,15 @@ def main() -> None:
         print("saving dequantized (fake-quant) bf16 checkpoint...")
         model.save_pretrained(args.out, save_compressed=False)
     tokenizer.save_pretrained(args.out)
+    try:
+        AutoTokenizer.from_pretrained(
+            args.model, trust_remote_code=True, use_fast=False
+        ).save_vocabulary(str(args.out))
+        print("saved legacy vocab.json/merges.txt (needed by tools that force a slow "
+              "tokenizer, e.g. evalplus)")
+    except Exception as e:
+        print(f"WARNING: could not save legacy tokenizer vocab files ({e}); tools "
+              "requiring a slow tokenizer may fail")
 
     out = Path(args.out)
     template = getattr(tokenizer, "chat_template", None)
