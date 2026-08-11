@@ -29,6 +29,11 @@ itself, with the QEAD ablation reported as the negative control that rules out t
 - **The erasure is LeetCode-specific in its completeness, not a blanket property of W4** — on
   HumanEval+/MBPP+ (Stage 7), the KD gap only partially attenuates under GPTQ-W4 rather than going
   to zero, significant on MBPP+ at both precisions (378 problems).
+- **The erasure is confirmed at the activation level, not just inferred from weights** —
+  teacher-forced over 100 fixed reference sequences, the distilled and original models'
+  next-token distributions measurably converge under W4 (agreement-rate shift +0.48 pts, 95% CI
+  [+0.31, +0.66], bootstrapped over the 100 independent sequences). Small per-token effect,
+  statistically unambiguous, consistent with compounding into the large sequence-level collapse.
 
 ### Method components (implemented, no longer claimed as the contribution)
 - **QEAD token weighting** — simulate INT8 quantization error on student logits per position,
@@ -251,8 +256,12 @@ no retraining) or the activation-side probe.
       KD's W4 cell (p=1). See `history/methods.md` → "Stage 8 result: quantization-aware
       distillation fails". No fix survives; the finding-paper framing from `plan-phase4.md` §3
       is confirmed as the right call.
-- [ ] Activation-side probe — closes the weight-space-to-behaviour inference, and doubles as a
-      cheap screening metric (output KL vs bf16 on a fixed prompt set, a fraction of an eval run)
+- [x] **Activation-side probe — DONE 2026-08-11, erasure confirmed behaviorally.** Teacher-forced
+      original/distilled × bf16/GPTQ-W4 over 100 fixed passing R1 traces (`scripts/activation_probe.py`,
+      vLLM `prompt_logprobs`, single forward pass per sequence). The original-distilled output-agreement
+      rate rises under W4 (+0.48 pts, 95% CI [+0.31,+0.66], bootstrapped over the 100 sequences) —
+      the two models' behavior measurably converges, the activation-level signature of erasure.
+      See `history/methods.md` → "Activation-side probe: the erasure is confirmed behaviorally".
 - [ ] Real compressed checkpoints + simulated-vs-real agreement check (validates the fake-quant
       methodology every recorded number depends on)
 

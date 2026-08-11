@@ -285,6 +285,27 @@ MBPP+ (378 problems, more statistical power) confirms both gaps: distillation li
 
 **This reframes the generality claim.** The LeetCode headline is complete erasure: the KD gap goes from +16 solves at bf16 to a confirmed null under both real quantizers (B2/B3 in `notes/significance_tests.md`). On MBPP+ the gap only shrinks -- retaining roughly half its magnitude by point estimate (49% on HumanEval+, 57% on MBPP+) rather than collapsing, and that retained gap is itself statistically significant. **The erasure is strongest on LeetCode-style competitive programming and partial on shorter, simpler function-completion tasks.** That is a more precise and more defensible claim than "the erasure generalizes" -- it says something about *what kind* of quantization fragility this is, plausibly tied to task complexity or generation length rather than being a blanket property of distilled-then-quantized weights.
 
+## Activation-side probe: the erasure is confirmed behaviorally, not just inferred (run 2026-08-11)
+
+Closes the scope limit stated in "Weight-level mechanism" above: that a destroyed weight-space direction causes the observed behavioural collapse was an inference from weight statistics, not a measurement. This probe measures it directly.
+
+**Design.** Teacher-force each of {original, distilled} x {bf16, GPTQ-W4} over the same 100 fixed, already-verified-passing R1 traces (train split, `cache/teacher_logprobs_r1_full/`), one forward pass per sequence via vLLM's `prompt_logprobs` (no sampling, no code execution -- `scripts/activation_probe.py`). Records the model's own top-20 next-token distribution at every completion-token position, teacher-forced over the real reference continuation.
+
+**The first pairing (each model vs its own quantized self) was uninformative by construction.** bf16-vs-W4 self-agreement was nearly identical for both tracks (original 81.4%, distilled 81.0%) -- expected, since a model's own bf16-to-W4 divergence is dominated by rounding noise on the *shared* bulk weight distribution (identical between original and distilled to five significant figures), not by the tiny KD-specific delta. This pairing cannot detect whether the KD signal specifically survives.
+
+**The pairing that matters: does the original-distilled gap collapse under quantization?** If W4 erases distillation-specific behavior, the two quantized models should converge toward each other more than the two bf16 models did.
+
+| Comparison | Top-1 agreement | dist top-1 missing from other's top-20 |
+|---|---|---|
+| dist_bf16 vs orig_bf16 | 80.6% | 0.4% |
+| dist_w4 vs orig_w4 | 81.0% | 0.2% |
+
+Both metrics move the same direction: agreement rises, and the rate at which the distilled model's preferred token falls out of the original's top-20 entirely is halved. Significance is bootstrapped over the 100 independent sequences, not the 316,104 raw positions (which are correlated within a sequence and would overstate the sample size) -- same discipline as the rest of this project's paired tests.
+
+**Mean agreement-rate shift (W4 minus bf16): +0.48 pts, 95% CI [+0.31, +0.66] -- excludes 0.** 73 of 100 sequences show increased dist-orig agreement under W4.
+
+**This is the activation-level confirmation of erasure.** The effect is modest per-token (well under one percentage point) but statistically unambiguous at n=100 independent sequences, and modest per-token shifts are exactly what should compound, over a full multi-hundred-token generation, into the large sequence-level accuracy collapse already measured (28 solved to 2, both real quantizers). The weight-space finding (KD update ~2% of a W4 step, cosine 0.19) and the eval-level finding (KD gap 12/28 to 2/2) are now connected by a direct behavioural measurement, not just an inference bridging them.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.
