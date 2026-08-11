@@ -11,9 +11,9 @@ from transformers import AutoTokenizer
 from src.evaluation.generation import build_eval_prompts, budget_forced_generate
 from src.utils.reasoning import extract_code
 
-def _signature_line(prompt: str, entry_point: str) -> str:
+def _signature_from(source: str, entry_point: str) -> str:
     try:
-        tree = ast.parse(prompt)
+        tree = ast.parse(source)
     except SyntaxError:
         return ""
     for node in ast.walk(tree):
@@ -21,6 +21,14 @@ def _signature_line(prompt: str, entry_point: str) -> str:
             node.body = [ast.Pass()]
             return ast.unparse(node).split("\n")[0]
     return ""
+
+
+def _signature_line(task: dict) -> str:
+    # HumanEval+ prompts are function stubs (def line present); MBPP+ prompts are
+    # a plain instruction docstring with no def line, so fall back to the
+    # canonical solution, which is always a real function definition.
+    return (_signature_from(task["prompt"], task["entry_point"])
+            or _signature_from(task.get("canonical_solution", ""), task["entry_point"]))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -48,7 +56,8 @@ def main():
         {
             "text": tasks[tid]["prompt"],
             "entry_point": tasks[tid]["entry_point"],
-            "signature": _signature_line(tasks[tid]["prompt"], tasks[tid]["entry_point"]),
+            "signature": _signature_line(tasks[tid]),
+            "test_cases": [],  # unused when entry_point/signature are given; avoids a KeyError
         }
         for tid in task_ids
     ]
