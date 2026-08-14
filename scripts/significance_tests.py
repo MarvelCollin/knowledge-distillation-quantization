@@ -4,12 +4,29 @@ from math import comb
 random.seed(12345)
 D = os.environ.get("EVAL_DIR", "outputs/eval/intermediate")
 
+_SUBSET = None
+_subset_path = os.environ.get("SUBSET_FILE")
+if _subset_path:
+    _raw = json.load(open(_subset_path))
+    if isinstance(_raw, dict):
+        for _k in ("ids", "idx", "problems", "verified"):
+            if _k in _raw:
+                _raw = _raw[_k]
+                break
+    if isinstance(_raw, list) and _raw and isinstance(_raw[0], dict):
+        _raw = [e.get("idx", e.get("id")) for e in _raw]
+    _SUBSET = set(_raw)
+    print(f"restricting to {len(_SUBSET)} problems from {_subset_path}\n")
+
 def load(f):
     try:
         d = json.load(open(os.path.join(D, f)))
     except FileNotFoundError:
         return None
-    return {p["idx"]: bool(p["solved"]) for p in d["per_problem"]}
+    out = {p["idx"]: bool(p["solved"]) for p in d["per_problem"]}
+    if _SUBSET is not None:
+        out = {k: v for k, v in out.items() if k in _SUBSET}
+    return out
 
 def mcnemar_exact(A, B):
     keys = sorted(set(A) & set(B))
@@ -22,14 +39,12 @@ def mcnemar_exact(A, B):
     tail = sum(comb(n, i) for i in range(m + 1)) * (0.5 ** n)
     return b, c, min(1.0, 2 * tail)
 
-
 def boot_ci(A, B, iters=20000):
     keys = sorted(set(A) & set(B))
     diffs = [(1 if B[k] else 0) - (1 if A[k] else 0) for k in keys]
     n = len(diffs)
     sums = sorted(sum(diffs[random.randrange(n)] for _ in range(n)) for _ in range(iters))
     return sum(diffs), sums[int(0.025 * iters)], sums[int(0.975 * iters)]
-
 
 F = dict(
     oI="Student_original_Qwen2.5-Coder-1.5B-Instruct.json",
@@ -39,6 +54,7 @@ F = dict(
     dI_i4="Student_distilled_Qwen2.5-Coder-1.5B-Instruct_int4.json",
     dI_i4b="Student_distilled_Qwen2.5-Coder-1.5B-Instruct_int4_s42.json",
     oI_i4="Student_original_Qwen2.5-Coder-1.5B-Instruct_int4.json",
+    oI_i8="Student_original_Qwen2.5-Coder-1.5B-Instruct_int8.json",
     qoff_bf="Student_distilled_Qwen2.5-Coder-1.5B-Instruct_qead_off_bf16.json",
     qoff_bfb="Student_distilled_Qwen2.5-Coder-1.5B-Instruct_qead_off_bf16_s42.json",
     qoff_i4="Student_distilled_Qwen2.5-Coder-1.5B-Instruct_qead_off_int4.json",
@@ -49,6 +65,7 @@ F = dict(
     dB_i4b="Student_distilled_Qwen2.5-1.5B_base_distilled_int4_s42.json",
     dB_i8="Student_distilled_Qwen2.5-1.5B_int8.json",
     oB_i4="Student_original_Qwen2.5-1.5B_int4.json",
+    oB_i8="Student_original_Qwen2.5-1.5B_int8.json",
     dB_g4="Student_distilled_Qwen2.5-1.5B_gptq4fq.json",
     oB_g4="Student_original_Qwen2.5-1.5B_gptq4fq.json",
     dB_rtn4fq="Student_distilled_Qwen2.5-1.5B_rtn4fq.json",
@@ -74,6 +91,8 @@ TESTS = [
     ("B3 RTN4 gap (base, real)  : orig RTN4(2) vs distilled RTN4(2)", "oB_rtn4fq", ["dB_rtn4fq"]),
     ("Q1 QAT bf16 vs standard KD bf16  : dB(28) vs QAT-KD bf16(10/11)", "dB", ["qat_bf", "qat_bfb"]),
     ("Q2 QAT RTN4 vs standard KD RTN4  : rtn4fq(2) vs QAT-KD RTN4(3/1)", "dB_rtn4fq", ["qat_rtn4", "qat_rtn4b"]),
+    ("10 Instruct gap @INT8     : orig INT8(24) vs distilled INT8(30/35)", "oI_i8", ["dI_i8", "dI_i8b"]),
+    ("11 Base gap @INT8         : orig INT8(11) vs distilled INT8(31)", "oB_i8", ["dB_i8"]),
 ]
 
 def main():
