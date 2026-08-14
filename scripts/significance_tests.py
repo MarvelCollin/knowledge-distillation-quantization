@@ -5,6 +5,11 @@ random.seed(12345)
 D = os.environ.get("EVAL_DIR", "outputs/eval/intermediate")
 
 def _id_set(path):
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"id-list file not found: {path}\n"
+            "For the verified-116 subset this should be outputs/eval/broken_tests.json,\n"
+            "written by: python scripts/verify_tests.py")
     raw = json.load(open(path))
     if isinstance(raw, dict):
         for k in ("ids", "idx", "problems", "verified", "broken"):
