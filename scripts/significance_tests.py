@@ -4,19 +4,23 @@ from math import comb
 random.seed(12345)
 D = os.environ.get("EVAL_DIR", "outputs/eval/intermediate")
 
-_SUBSET = None
-_subset_path = os.environ.get("SUBSET_FILE")
-if _subset_path:
-    _raw = json.load(open(_subset_path))
-    if isinstance(_raw, dict):
-        for _k in ("ids", "idx", "problems", "verified"):
-            if _k in _raw:
-                _raw = _raw[_k]
+def _id_set(path):
+    raw = json.load(open(path))
+    if isinstance(raw, dict):
+        for k in ("ids", "idx", "problems", "verified", "broken"):
+            if k in raw:
+                raw = raw[k]
                 break
-    if isinstance(_raw, list) and _raw and isinstance(_raw[0], dict):
-        _raw = [e.get("idx", e.get("id")) for e in _raw]
-    _SUBSET = set(_raw)
-    print(f"restricting to {len(_SUBSET)} problems from {_subset_path}\n")
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        raw = [e.get("idx", e.get("id")) for e in raw]
+    return set(raw)
+
+_SUBSET = _id_set(os.environ["SUBSET_FILE"]) if os.environ.get("SUBSET_FILE") else None
+_EXCLUDE = _id_set(os.environ["EXCLUDE_FILE"]) if os.environ.get("EXCLUDE_FILE") else None
+if _SUBSET is not None:
+    print(f"keeping only {len(_SUBSET)} listed problems\n")
+if _EXCLUDE is not None:
+    print(f"excluding {len(_EXCLUDE)} listed problems\n")
 
 def load(f):
     try:
@@ -26,6 +30,8 @@ def load(f):
     out = {p["idx"]: bool(p["solved"]) for p in d["per_problem"]}
     if _SUBSET is not None:
         out = {k: v for k, v in out.items() if k in _SUBSET}
+    if _EXCLUDE is not None:
+        out = {k: v for k, v in out.items() if k not in _EXCLUDE}
     return out
 
 def mcnemar_exact(A, B):
