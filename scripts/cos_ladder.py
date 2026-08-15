@@ -15,7 +15,7 @@ def mean(v: list) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Cosine transmission of the KD update across a bit-width / group-size "
-                    "ladder. Stage 10 second prediction: the behavioural crossover should "
+                    "ladder. Dose-response second prediction: the behavioural crossover should "
                     "coincide with kd_cos crossing roughly 0.4-0.5.")
     ap.add_argument("--original", required=True)
     ap.add_argument("--distilled", required=True)
