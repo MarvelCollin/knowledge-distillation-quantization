@@ -62,7 +62,9 @@ def main() -> int:
 
     pc8 = step(w, 8, 0)
     print(f"\nW4-g128 step / W8-per-channel step: {steps[4] / pc8:.1f}x")
-    print(f"W4-g128 step / W8-g128 step:        {steps[4] / steps[8]:.1f}x (pure bit-width would be 16x)")
+    qmax_ratio = (2 ** 7 - 1) / (2 ** 3 - 1)
+    print(f"W4-g128 step / W8-g128 step:        {steps[4] / steps[8]:.1f}x "
+          f"(qmax ratio 127/7 = {qmax_ratio:.1f}x)")
 
     if failures:
         print("\nFAILED:")
