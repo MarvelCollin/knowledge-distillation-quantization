@@ -342,30 +342,43 @@ a prediction: if erasure is caused by the KD update being small relative to the 
 then sweeping the step must move the gain back, at a location the existing measurements already fix
 in advance.
 
+**Amendment, same day, still before any eval run.** The first draft of this entry assumed the step halves
+per added bit and predicted 2/4/8/16/32%. That is wrong: symmetric quantization uses qmax = 2^(bits-1) - 1,
+so the step scales as 1/qmax and the W4-to-W8 ratio is 127/7 = 18.1x, not 16x. `scripts/smoke_quantgrid.py`
+measured the quantizer directly and the per-bit ratios match the qmax ratios exactly, so the corrected
+figures below are 2.0/4.3/8.9/18.0/36.3%. The declared crossover of W6-W7 is unchanged -- the bracket moves
+by well under one bit. Recorded as an amendment rather than a silent rewrite; zero eval cells existed at
+the time of the correction, and the git history shows both versions.
+
 **A confound this stage also fixes.** The recorded grid pairs W8 at per-output-channel granularity
 with W4 at group-128 (`quantize_int8.py`, original `int_roundtrip_`), so the headline INT8-preserves /
 INT4-erases contrast varies bit-width and granularity together, and the 26% / 2.0% step fractions
-inherit that. Evidence it matters: 26/2.0 = 13x, where four bits at fixed granularity would give 16x.
-The missing 3x is the granularity effect. Stage 10 sweeps at **fixed group-128 throughout**, so the
+inherit that. Evidence it matters: 26/2.0 = 13.0x, where four bits at fixed granularity gives 18.1x
+(measured, `smoke_quantgrid.py`). Granularity therefore accounts for 18.1/13.0 = 1.40x on its own --
+per-channel scales off the row max, group-128 off the group max, so the per-channel step is the larger
+of the two. Stage 10 sweeps at **fixed group-128 throughout**, so the
 new ladder is single-variable and the old contrast can be restated cleanly.
 
 **Intervention.** No training. `scripts/quantize_int8.py` with bit-width and granularity as
 independent axes (`--bits 3-8`, `--group-size`, defaults reproducing the old pairing). Base track
 first, both checkpoints, same eval harness as every other cell.
 
-**Prediction.** At fixed granularity the step halves per added bit. Anchoring on the measured base-track
-W4-g128 figure of 2.0%:
+**Prediction.** At fixed granularity the step scales as 1/qmax with qmax = 2^(bits-1) - 1, not as a clean
+halving per bit -- the -1 matters at low bit-width. Verified against the quantizer itself: measured
+per-bit ratios 2.14 / 2.07 / 2.03 / 2.02 match 15/7, 31/15, 63/31, 127/63 exactly. Anchoring on the
+measured base-track W4-g128 figure of 2.0%:
 
-| Bits (g128) | KD update as % of step | Predicted gain | cos (transmission) |
-|---|---|---|---|
-| W4 | 2.0% (measured) | absent (measured: 6 vs 6, test rate 1.3% vs 1.1%) | 0.194 (measured) |
-| W5 | 4.0% | absent or trace | |
-| W6 | 8.0% | partial | |
-| W7 | 16% | mostly present | |
-| W8 | 32% | present | 0.718 at per-channel (measured) |
+| Bits (g128) | qmax | KD update as % of step | Predicted gain | cos (transmission) |
+|---|---|---|---|---|
+| W4 | 7 | 2.0% (measured) | absent (measured: 6 vs 6, test rate 1.3% vs 1.1%) | 0.194 (measured) |
+| W5 | 15 | 4.3% | absent or trace | |
+| W6 | 31 | 8.9% | partial | |
+| W7 | 63 | 18.0% | mostly present | |
+| W8 | 127 | 36.3% | present | 0.718 at per-channel (measured) |
 
-The W8-g128 cell predicts 32% against the 26% measured at per-channel, in the right direction: group-128
-gives a smaller step, so the same update is a larger fraction of it.
+The W8-g128 cell predicts 36.3% against the 26% measured at per-channel, in the right direction:
+group-128 gives the smaller step, so the same update is a larger fraction of it. That 36.3/26 = 1.40x
+is the same granularity factor measured independently above, which is the internal consistency check.
 
 **Pre-declared crossover: W6 or W7.** Defined as the lowest bit-width at which the paired bootstrap 95%
 CI on the distilled-minus-original difference excludes zero, same paired bootstrap and same 228 problems
@@ -380,10 +393,13 @@ crossing roughly 0.4 to 0.5, interpolating monotonically between the measured 0.
 Run `analyze_weight_quant.py` at every bit-width so weight-space and eval land on one axis. This is a
 separate falsifiable claim from the solve-count one and should be judged separately.
 
-**Third prediction, the group-size axis.** At fixed W4, granularity 128 -> 64 -> 32 shrinks the step, but
-by much less than one bit does, because finer scales buy less than a halved grid. Predict the gain moves
-in the same direction and materially less far. If group-size moves the gain as much as bit-width, step
-size alone is not the operative variable.
+**Third prediction, the group-size axis -- a negative control.** Measured (`smoke_quantgrid.py`): at fixed
+W4, granularity 128 -> 64 -> 32 shrinks the step by only 1.21x in total, against 2.14x for a single added
+bit. So W4-g32 puts the KD update at 2.42% of a step, against 2.0% at g128 -- still deep in the erasure
+regime. **Predict no recovery anywhere on this axis**, while the bit-width axis recovers over the same
+runs. This is the sharper form of the claim: three cells nominally at "4-bit" that all stay erased, next
+to a ladder at fixed granularity that does not, isolates step size from bit-width as the operative
+variable. Recovery at g32 would falsify the account as stated.
 
 **Pre-declared falsification.** The step-size account is wrong, and must be rewritten rather than
 softened, if any of the following holds:
