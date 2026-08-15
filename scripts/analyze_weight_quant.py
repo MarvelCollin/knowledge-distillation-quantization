@@ -73,20 +73,22 @@ def shape_stats(w: torch.Tensor, sigma_k: float) -> dict:
         "outlier_ratio": outlier.item(),
     }
 
-def quant_error(w: torch.Tensor, bits: int) -> float:
+def quant_error(w: torch.Tensor, bits: int, group_size: int = None) -> float:
+    g = (128 if bits == 4 else 0) if group_size is None else group_size
     w32 = w.float()
     if w32.ndim != 2:
         return float("nan")
-    if bits == 4 and w32.shape[1] % 128 != 0:
+    if g and w32.shape[1] % g != 0:
         return float("nan")
-    q = int_roundtrip_(w32, bits)
+    q = int_roundtrip_(w32, bits, g)
     denom = w32.pow(2).sum()
     return (w32 - q).pow(2).sum().item() / denom.item() if denom > 0 else float("nan")
 
-def quant_survival(wo: torch.Tensor, wd: torch.Tensor, bits: int) -> dict:
-    if wo.ndim != 2 or (bits == 4 and wo.shape[1] % 128 != 0):
+def quant_survival(wo: torch.Tensor, wd: torch.Tensor, bits: int, group_size: int = None) -> dict:
+    g = (128 if bits == 4 else 0) if group_size is None else group_size
+    if wo.ndim != 2 or (g and wo.shape[1] % g != 0):
         return {"noise_rel": float("nan"), "kd_cos": float("nan"), "kd_rel_after": float("nan")}
-    qo, qd = int_roundtrip_(wo, bits), int_roundtrip_(wd, bits)
+    qo, qd = int_roundtrip_(wo, bits, g), int_roundtrip_(wd, bits, g)
     kd, kdq = wd - wo, qd - qo
     kd_n, kdq_n = kd.pow(2).sum().sqrt(), kdq.pow(2).sum().sqrt()
     denom = (kd_n * kdq_n).item()
