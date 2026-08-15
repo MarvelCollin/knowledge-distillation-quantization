@@ -334,6 +334,80 @@ model tested, the finding this table exists to support) -- the distilled student
 footprint is ~9.9x smaller than the teacher's bf16 footprint. This is the practical form of the
 paper's deployment recommendation: distill to 1.5B, serve at INT8, skip W4.
 
+## Stage 10 pre-registration: precision dose-response (written 2026-08-15, before any run)
+
+Recorded before running. Every result so far is consistent with the step-size account but none of it
+*tests* the account, because the grid only has its two endpoints. This stage turns the mechanism into
+a prediction: if erasure is caused by the KD update being small relative to the quantization step,
+then sweeping the step must move the gain back, at a location the existing measurements already fix
+in advance.
+
+**A confound this stage also fixes.** The recorded grid pairs W8 at per-output-channel granularity
+with W4 at group-128 (`quantize_int8.py`, original `int_roundtrip_`), so the headline INT8-preserves /
+INT4-erases contrast varies bit-width and granularity together, and the 26% / 2.0% step fractions
+inherit that. Evidence it matters: 26/2.0 = 13x, where four bits at fixed granularity would give 16x.
+The missing 3x is the granularity effect. Stage 10 sweeps at **fixed group-128 throughout**, so the
+new ladder is single-variable and the old contrast can be restated cleanly.
+
+**Intervention.** No training. `scripts/quantize_int8.py` with bit-width and granularity as
+independent axes (`--bits 3-8`, `--group-size`, defaults reproducing the old pairing). Base track
+first, both checkpoints, same eval harness as every other cell.
+
+**Prediction.** At fixed granularity the step halves per added bit. Anchoring on the measured base-track
+W4-g128 figure of 2.0%:
+
+| Bits (g128) | KD update as % of step | Predicted gain | cos (transmission) |
+|---|---|---|---|
+| W4 | 2.0% (measured) | absent (measured: 6 vs 6, test rate 1.3% vs 1.1%) | 0.194 (measured) |
+| W5 | 4.0% | absent or trace | |
+| W6 | 8.0% | partial | |
+| W7 | 16% | mostly present | |
+| W8 | 32% | present | 0.718 at per-channel (measured) |
+
+The W8-g128 cell predicts 32% against the 26% measured at per-channel, in the right direction: group-128
+gives a smaller step, so the same update is a larger fraction of it.
+
+**Pre-declared crossover: W6 or W7.** Defined as the lowest bit-width at which the paired bootstrap 95%
+CI on the distilled-minus-original difference excludes zero, same paired bootstrap and same 228 problems
+as every other significance row in this project (`scripts/significance_tests.py`).
+
+**Primary metric is test-case pass rate, not solve count** — same reasoning as Stage 8, since the base
+track's low cells sit near the floor where solve counts have no resolution. Solve count secondary.
+Declared noise floors, from this project's own scatter: ~3% test rate, ±4 to 6 solves single-draw.
+
+**Second, independent prediction.** The behavioural crossover should coincide with cosine transmission
+crossing roughly 0.4 to 0.5, interpolating monotonically between the measured 0.194 (W4) and 0.718 (W8).
+Run `analyze_weight_quant.py` at every bit-width so weight-space and eval land on one axis. This is a
+separate falsifiable claim from the solve-count one and should be judged separately.
+
+**Third prediction, the group-size axis.** At fixed W4, granularity 128 -> 64 -> 32 shrinks the step, but
+by much less than one bit does, because finer scales buy less than a halved grid. Predict the gain moves
+in the same direction and materially less far. If group-size moves the gain as much as bit-width, step
+size alone is not the operative variable.
+
+**Pre-declared falsification.** The step-size account is wrong, and must be rewritten rather than
+softened, if any of the following holds:
+
+- The curve is non-monotone in bit-width beyond the declared noise floor — e.g. a gain at W5 or W6
+  larger than at W8.
+- **W8 at g128 fails to preserve the gain.** The recorded W8 preservation was measured at per-channel;
+  if it does not reproduce at group-128 then granularity, not bit-width, was doing the work, and the
+  paper's central contrast is misattributed. This is the outcome that would cost the most, which is
+  exactly why it is written down first.
+- The gain is fully present already at W5 (4% of a step). Directionally consistent, but it would put the
+  threshold far below what the 2%-vs-26% bracket implies, and the quantitative form of the account would
+  not survive.
+
+**Draw discipline, declared in advance.** The ladder runs single-draw to locate the crossover; the two
+cells bracketing it are then double-drawn (seeds 1234 and 42) before any conclusion is recorded. Fixing
+this now so draws cannot be added after seeing which cell is inconvenient — the failure mode the QEAD
+ablation demonstrated, where a first draw of 30 read as a real +6 until the second returned 35.
+
+**Back-compatibility check, to run before anything else.** Re-quantize one existing base checkpoint at
+`--bits 4 --group-size 128` and confirm byte-identity against the W4 checkpoint already on the server.
+If that fails, no Stage 10 number is comparable to any recorded number and the generalized quantizer is
+wrong.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.
