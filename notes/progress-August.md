@@ -106,3 +106,31 @@ The paired tests currently cover the full 228. The paper's headline metric is ve
 Assemble the notes into IEEE format: defined notation, every claim tied to a numbered table/figure, a reproducibility statement (you are well-positioned — fixed caches, seeds, released configs). This venue desk-rejects on presentation, so budget real time here.
 
 **Order:** start #1 (it needs GPU time and is the biggest scientific win), do #3 and #5 in parallel while it runs (writing only), then #2 and #4, then #6 once the numbers are frozen.
+
+---
+
+## References for the precision sweep (Stage 10) and quantization mechanism
+
+Real, arXiv-verified (Aug 2026). The first three are the ones to cite for the bit-by-bit sweep itself; the rest support the quantizer and the QAT-KD comparison. Double-check exact bibliographic fields and preferred venue against the arXiv/DOI page before final submission.
+
+**Primary — precision-sweep methodology and the "why":**
+
+1. Kumar, Ankner, Spector, Bordelon, Muennighoff, Paul, Pehlevan, Ré, Raghunathan (2024). *Scaling Laws for Precision.* arXiv:2411.04330.
+   → Establishes that quantization degradation is *predictable across bit-widths* and that lower precision effectively reduces usable parameter count. This is the methodological warrant for treating precision as a continuous axis and sweeping it — i.e. the justification for Stage 10 existing at all.
+
+2. Ouyang, Ge, Hartvigsen, Zhang, Mi, Yu (2024). *Low-Bit Quantization Favors Undertrained LLMs: Scaling Laws for Quantized LLMs with 100T Training Tokens.* arXiv:2411.17691.
+   → Models trained on **more** tokens suffer **more** low-bit degradation. This is the closest external result to our headline: the distilled knowledge is *additional training*, and it is exactly what 4-bit erases while the pretrained backbone survives. Strong support for the mechanism; cite prominently.
+
+3. Zhou, Cao, Ye, Yu, Yu, Li, Zhao, Liu (2026). *Quantization Degradation in Large Language Models: A Signal–Noise Perspective.* arXiv:2608.08188.
+   → Frames quantization degradation as signal-to-noise: rounding is noise, the learned weight structure is signal. This is the same framing as our step-size finding (KD update = signal ≈ 2% of a W4 step; the rounding step = noise), stated in independent language. Useful for positioning the mechanism section.
+
+**Supporting — quantizer used and QAT-KD context:**
+
+4. Frantar, Ashkboos, Hoefler, Alistarh (2023). *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers.* ICLR 2023. arXiv:2210.17323.
+   → The calibrated, error-compensating PTQ method we ran against RTN to show the erasure is not an artifact of naive rounding.
+
+5. Kim, Shim, Park, Sung, Choi (2023). *Teacher Intervention: Improving Convergence of Quantization-Aware Training for Ultra-Low Precision Transformers.* EACL 2023. arXiv:2302.11812.
+   → Prior art on combining distillation with QAT. Context (and contrast) for our Stage 8 QAT-KD, which failed at this scale/budget.
+
+6. Liu, Oguz, Zhao, Chang, Stock, Mehdad, Shi, Krishnamoorthi, Chandra (2023). *LLM-QAT: Data-Free Quantization-Aware Training for Large Language Models.* arXiv:2305.17888.
+   → QAT-for-LLMs baseline; the standard our straight-through W4 QAT-KD is measured against.
