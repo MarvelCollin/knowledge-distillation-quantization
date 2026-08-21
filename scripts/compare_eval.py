@@ -43,6 +43,12 @@ MEM_CEILING_GB = 22.0
 
 EVAL_DTYPE = "bfloat16"
 
+# vLLM 0.6.6 asserts in _schedule_running when its async output processor and
+# chunked prefill race during preemption. Degenerate low-bit generations feed
+# huge phase-2 prompts back in and reliably trigger it; --sync-output disables
+# async output processing to take that path out of play.
+SYNC_OUTPUT = False
+
 COLORS = {
     "Student original":  "#4e79a7",
     "Teacher":           "#f28e2b",
@@ -323,6 +329,7 @@ def evaluate_model(label: str, model_path: str, problems: list,
                 enable_chunked_prefill=True,
                 max_num_batched_tokens=2048,
                 swap_space=16,
+                disable_async_output_proc=SYNC_OUTPUT,
             )
 
             formatted_prompts, signatures = build_eval_prompts(
@@ -777,10 +784,15 @@ def main() -> None:
                         help="vLLM activation dtype. Keep bfloat16 to reproduce the recorded grid. "
                              "Use auto (or float16) for real compressed checkpoints, where forcing "
                              "bf16 can dequantize wrongly.")
+    parser.add_argument("--sync-output", action="store_true",
+                        help="Disable vLLM async output processing. Works around the 0.6.6 "
+                             "_schedule_running assertion that degenerate low-bit generations "
+                             "trigger via preemption under chunked prefill.")
     args = parser.parse_args()
 
-    global EVAL_DTYPE
+    global EVAL_DTYPE, SYNC_OUTPUT
     EVAL_DTYPE = args.dtype
+    SYNC_OUTPUT = args.sync_output
 
     for flag, p in (("--original", args.original), ("--distilled", args.distilled)):
         if p and not Path(p).is_dir() and (Path(p).exists() or Path(p).parent.is_dir()):
