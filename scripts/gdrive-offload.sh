@@ -14,17 +14,24 @@ RC="rclone --log-level ERROR --stats 30s --stats-one-line --stats-log-level NOTI
 
 # Archived to Drive AND deleted locally (reclaims space)
 OFFLOAD=(
-  "history"
-  "outputs_rtn4"
-  "outputs_gptq"
+  "outputs/final_last"
+  "outputs/train_details"
+  "outputs_3b"
+  "outputs_activation_probe"
+  "outputs_evalplus"
+  "outputs_evalplus_reasoning"
+  "outputs_evalplus_reasoning_smoke"
+  "outputs_evalplus_smoke"
+  "outputs_fq"
   "outputs_general_v2"
-  "outputs_int4"
-  "outputs"
-  "outputs_qead_off"
-  "outputs_general_qead_off"
+  "outputs_qat_base"
 )
-# Backed up to Drive but KEPT locally (tiny + useful)
-BACKUP=( "logs" "sparse_logs" )
+# Backed up to Drive but KEPT locally.
+# outputs/eval holds every per-problem eval record (~3.5G). It is not a regenerable artifact:
+# rebuilding it means re-running every eval in the project, and every significance number in
+# notes/significance_tests.md is computed from it. Offloading it on 2026-08-02 silently broke
+# the verified-116 re-run on 2026-08-22 until it was pulled back. Keep it local.
+BACKUP=( "logs" "sparse_logs" "outputs/eval" )
 
 free_now(){ df -h / | awk 'NR==2{print $4" free ("$5" used)"}'; }
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
