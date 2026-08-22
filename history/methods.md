@@ -424,6 +424,97 @@ ablation demonstrated, where a first draw of 30 read as a real +6 until the seco
 If that fails, no Stage 10 number is comparable to any recorded number and the generalized quantizer is
 wrong.
 
+## Stage 10 result: the precision dose-response, all three predictions hold (run 2026-08-20 to 2026-08-22)
+
+Run as pre-registered above: base track, both checkpoints, bit-width swept at **fixed group-128** so the ladder is single-variable, same eval harness and 228 problems as every other cell, primary metric test-case pass rate with solve count secondary.
+
+**Back-compatibility gate, run before anything else as declared.** `scripts/smoke_quantgrid.py` reports legacy equivalence 8/8 exact, and the measured per-bit step ratios (2.14 / 2.07 / 2.03 / 2.02) match the qmax ratios 15/7, 31/15, 63/31, 127/63 exactly. The behavioural check agrees: W4-g128 scores 6 (original) and 7 (distilled), reproducing the recorded simulated W4 grid cell for cell. Every Stage 10 number is therefore comparable to the recorded grid.
+
+### The ladder (single draw, seed 1234)
+
+| Bits | Original | Distilled | Gap solved [95% CI] | McNemar p | Gap test rate |
+|---|---|---|---|---|---|
+| W4 | 6 / 7.5% | 7 / 4.8% | +1 [-3, +5] | 1.0 | -2.7 pts |
+| W5 | 12 / 9.5% | 22 / 15.2% | +10 [+3, +17] | 0.013 | +5.7 pts |
+| W6 | 8 / 12.7% | 22 / 19.2% | +14 [+6, +22] | 0.0013 | +6.5 pts |
+| W7 | 14 / 13.4% | 29 / 23.0% | +15 [+6, +24] | 0.0015 | +9.6 pts |
+| W8 | 15 / 10.0% | 25 / 23.1% | +10 [+1, +19] | 0.052 | +13.1 pts |
+
+The distilled model's own recovery is a clean monotone saturation toward its bf16 value (test rate 4.8, 15.2, 19.2, 23.0, 23.1 percent against 22.0 at bf16), and the gap on the primary metric is monotone across the whole ladder.
+
+### Double draw on the bracketing cells, and why the crossover is W6 rather than W5
+
+The single-draw ladder put the lowest CI-excludes-zero cell at W5, which would have placed the crossover one bit below the pre-registered W6-to-W7 bracket. The declared draw discipline settled it.
+
+| Cell | Draw | Original | Distilled | Gap solved [95% CI] | McNemar p |
+|---|---|---|---|---|---|
+| W4 | seed 1234 | 6 / 7.5% | 7 / 4.8% | +1 [-3, +5] | 1.0 |
+| W4 | seed 42 | 8 / 8.1% | 5 / 4.5% | -3 [-8, +2] | 0.45 |
+| W5 | seed 1234 | 12 / 9.5% | 22 / 15.2% | +10 [+3, +17] | 0.013 |
+| W5 | seed 42 | 14 / 6.9% | 20 / 16.2% | +6 [-3, +15] | 0.29 |
+
+W4 is unambiguous: both draws non-significant, mean gap -1, erasure confirmed. W5 does not replicate: the first draw excludes zero and the second does not, mean gap +8 solved. This is the same shape as the QEAD ablation, where a first draw of 30 read as a real +6 until the second returned 35, and it is exactly what the draw discipline was declared in advance to catch. **The lowest bit-width at which the gap replicates is W6, inside the pre-registered W6-to-W7 bracket.**
+
+An internal inconsistency in the pre-registration surfaces here and is recorded rather than resolved after the fact. Test-case pass rate was declared the primary metric, but the crossover was defined through the paired bootstrap CI, which `significance_tests.py` computes on solve flags. The two disagree at W5: on solve count W5 is unconfirmed, while on test rate both draws show a solid positive gap (+5.7 and +9.3 points, against a declared noise floor near 3 percent). The defensible statement is therefore bracketed rather than pointwise: **erased through W4, in transition at W5 to W6, fully recovered by W7 to W8.**
+
+No third draw was added at W5. The pre-registration forbids adding draws after seeing which cell is inconvenient, and a tiebreak run chosen because the first two disagreed is precisely that. The ambiguity is reported as the result.
+
+### Falsification checks, all three declared in advance
+
+- **W8 at g128 fails to preserve the gain.** Not triggered, and this was the outcome written down first because it would have cost the most. W8-g128 preserves (+10 solved, CI [+1, +19], test rate +13.1 points), so the headline INT8-preserves and INT4-erases contrast is not an artifact of the recorded grid pairing per-channel W8 with group-128 W4. The granularity confound is closed.
+- **Non-monotone in bit-width beyond the noise floor.** Not triggered on the primary metric: the test-rate gap climbs -2.7, +5.7, +6.5, +9.6, +13.1. On solve count W7 (+15) exceeds W8 (+10) by 5, which sits inside the declared single-draw floor of 4 to 6 solves, and the choice of test rate as primary is what keeps this clean.
+- **Gain fully present already at W5.** Not triggered. W5 recovers roughly half the bf16 gap (+8 solved of +16, +7.5 points of +11.7 on test rate), which is the "partial" regime, not full presence.
+
+### The second prediction: cosine transmission (`scripts/cos_ladder.py`, 196 Linear weights, no GPU)
+
+| Bits | kd_cos | noise_rel | frac_erased |
+|---|---|---|---|
+| W4 | 0.194 | 0.127 | 0.458 |
+| W5 | 0.307 | 0.059 | 0.443 |
+| W6 | 0.438 | 0.029 | 0.414 |
+| W7 | 0.617 | 0.014 | 0.360 |
+| W8 | 0.807 | 0.007 | 0.276 |
+
+The prediction was that the behavioural crossover should coincide with cosine transmission crossing roughly 0.4 to 0.5. It crosses that band at W6 (0.438). **Two independent pre-registered predictions, one behavioural and one in weight space, both land on W6.** Weight-space anchors reproduce the earlier measurement exactly (`noise_rel` 0.127 at W4 against the recorded 12.67 percent W4 perturbation; `kd_cos` 0.194 at W4 against the recorded 0.194), and W8 at g128 gives 0.807 against 0.718 at per-channel, higher at the finer granularity as the independently measured 1.40x step-size factor requires.
+
+### The third prediction: the group-size negative control (run 2026-08-22)
+
+The sharpest form of the claim. Granularity is a second way to shrink the quantization step, but a far weaker one: measured on the quantizer itself, g128 to g32 shrinks the step by only 1.21x in total, against 2.14x for a single added bit. The prediction was therefore no recovery anywhere on the granularity axis, while the bit-width axis recovers over the same runs, and recovery at g32 would falsify the account as stated.
+
+| Cell | Original | Distilled | Gap solved [95% CI] | McNemar p | Gap test rate | Trunc |
+|---|---|---|---|---|---|---|
+| W4 g128 | 6 / 7.5% | 7 / 4.8% | +1 [-3, +5] | 1.0 | -2.7 pts | 157 |
+| W4 g64 | 8 / 9.5% | 8 / 7.5% | 0 [-5, +5] | 1.0 | -2.1 pts | 121 |
+| W4 g32 | 9 / 10.5% | 6 / 11.6% | -3 [-8, +2] | 0.45 | +1.1 pts | 30 |
+
+Every interval on the granularity axis contains zero, against W5 at +10 [+3, +17] and W6 at +14 [+6, +22] on the bit axis. **Prediction confirmed: three cells all nominally 4-bit stay erased while the bit ladder recovers, which isolates step size rather than the nominal bit-width label as the operative variable.**
+
+### The quantitative form of the account
+
+Combining both axes gives the threshold the two-endpoint bracket could not. Expressing every configuration as the KD update's size relative to one quantization step:
+
+| Configuration | KD update as % of step | KD gap | Distilled trunc |
+|---|---|---|---|
+| W4 g128 | 2.0% | absent | 157 |
+| W4 g64 | 2.2% | absent | 121 |
+| W4 g32 | 2.4% | absent | 30 |
+| W5 g128 | 4.3% | unconfirmed (draws disagree) | 1 |
+| W6 g128 | 8.9% | present | 0 |
+| W7 g128 | 18.0% | present | 0 |
+| W8 g128 | 36.3% | present | 2 |
+
+The gap recovers somewhere between roughly 4 and 9 percent of a step. The granularity axis tops out at 2.4 percent, well short of that, which is why no amount of group tightening recovers the gain at 4 bits. This supersedes the original 2-percent-versus-26-percent bracket with a bounded threshold, and it retroactively explains the Stage 8 QAT-KD failure: that run trained through a group-128 W4 fake-quantizer, a step fraction of 2.0 percent, squarely inside the erasure regime, so the optimiser was searching against a grid too coarse for the update to survive.
+
+### Coherence and gap recovery are the same variable at different thresholds
+
+An earlier draft of this entry claimed generation coherence was a cliff confined to W4 that vanished in a single bit, on the basis of the ladder truncation counts alone (157, 1, 0, 0, 2 for W4 through W8). The group-size control corrects that. Truncation also falls sharply *within* W4 as granularity tightens, 157 to 121 to 30, so coherence is not bound to bit-width either: it responds to step size like the gap does, but recovers at a materially lower threshold, largely repaired by about 2.4 percent of a step where the gap needs roughly 9 percent. Both effects therefore reduce to the single step-size variable with two different thresholds, which is a simpler account than two unrelated phenomena. Note the dissociation this produces at W4 g32: coherent output (truncation 30, test rate 11.6 percent, the highest of any 4-bit cell) with the distillation gain still entirely absent. A model can be repaired enough to stop degenerating while remaining unable to express what distillation taught it.
+
+### Deviations and infrastructure notes
+
+W5 could not be evaluated under the stock engine configuration. vLLM 0.6.6 asserts in `scheduler.py::_schedule_running` (`assert len(self._async_stopped) == 0`) when its async output processor races chunked prefill during preemption, and the enormous phase-2 prompts produced by W5's degenerate think traces trigger that path reliably. A `--sync-output` flag was added to `compare_eval.py` (disables async output processing, default off, no other cell affected) and W5 was run with it. The flag changes when output tokens are processed rather than what is sampled, and the load-bearing quantity here, the distilled-minus-original gap, is measured within a single invocation under identical settings, so the within-rung comparison is unaffected. Recorded as a deviation because the cross-rung curve carries it. The crash is itself corroborating evidence that the W4-to-W5 degeneration regime is severe enough to destabilise the serving stack.
+
+Scope note on the negative control: the granularity sweep runs entirely inside the simulated quantizer of `quantize_int8.py`, which is the same quantizer that produced the main INT8/INT4 grid and the whole W4 to W8 ladder, so it is the correct control for those numbers. It says nothing independently about how `llm-compressor`'s GPTQ and RTN behave under changed granularity; `quantize_real.py` accepts a `--group-size` argument but warns that the recipe does not apply it, so the real-toolchain cells of Section "Calibrated PTQ" were all run at that toolchain's own default and granularity was never swept there.
+
 ## What this shows
 
 1. Every knowledge distillation method lands in the same 35 to 39 solve band. Five plus independent methods agree, so this is a real ceiling, not a tuning failure.

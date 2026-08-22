@@ -1,14 +1,16 @@
 # Significance tests (paired, per-problem)
 
 Computed 2026-08-03, updated 2026-08-10 (corrected a stale GPTQ file reference, added Stage 8
-QAT-KD and real-RTN-gap comparisons) from the saved per-problem eval records
+QAT-KD and real-RTN-gap comparisons), updated 2026-08-22 (**re-run on the verified-116 subset;
+every conclusion replicates**) from the saved per-problem eval records
 (`outputs/eval/intermediate/*.json`). No GPU: pure post-processing of the `per_problem[].solved`
 flags. All cells are pass@5 on the same 228 LeetCode problems, so every comparison is paired.
 
 - **Test:** two-sided exact McNemar (binomial on discordant pairs b, c).
 - **CI:** 20,000-sample paired bootstrap on Δsolved (B − A) over the 228 problems.
 - b = A solves & B doesn't; c = B solves & A doesn't.
-- Reproduce: `EVAL_DIR=outputs/eval/intermediate python scripts/significance_tests.py`.
+- Reproduce (full 228): `EVAL_DIR=outputs/eval/intermediate python scripts/significance_tests.py`.
+- Reproduce (verified-116): add `EXCLUDE_FILE=outputs/eval/broken_tests.json`.
 
 | # | Comparison (A → B) | solved | b | c | McNemar p | Δsolved [95% CI] | verdict |
 |---|---|---|---|---|---|---|---|
@@ -26,6 +28,36 @@ flags. All cells are pass@5 on the same 228 LeetCode problems, so every comparis
 | B3 | Base gap @RTN-W4 (real): orig → distilled | 2→2 | 2 | 2 | 1.0 | 0 [−4,+4] | **gap gone (ns)** |
 | Q1 | Stage 8: QAT-KD bf16 vs standard KD bf16 (d1/2) | 28→10/11 | 24/24 | 6/7 | **0.0014 / 0.0033** | −18 [−29,−8] / −17 [−28,−7] | QAT hurts bf16 (sig.) |
 | Q2 | Stage 8: QAT-KD real-RTN4 vs standard KD real-RTN4 (d1/2) | 2→3/1 | 2/2 | 3/1 | 1.0 / 1.0 | +1 [−3,+5] / −1 [−5,+2] | **gain unconfirmed (ns)** |
+
+## Verified-116 replication (run 2026-08-22)
+
+The paper's headline metric is the verified-116 subset (the 112 problems with broken reference
+solutions excluded), but every row above is computed on the full 228. Re-running with
+`EXCLUDE_FILE=outputs/eval/broken_tests.json` closes that gap. **Nothing flips**: every significant
+result stays significant, every null stays null, and point estimates move by at most 2 solves.
+
+| Comparison | Full-228 Δ [95% CI] | Verified-116 Δ [95% CI] | Verdict |
+|---|---|---|---|
+| 1 Instruct KD @bf16 | +14 [+6,+23] ** | +13 [+5,+21] ** | KD helps |
+| 2 Base KD @bf16 | +16 [+6,+26] ** | +15 [+6,+25] ** | KD helps |
+| 3 Instruct INT4 erasure (d1/d2) | −19 *** / −13 * | −17 *** / −11 * | drop real |
+| 4 Base INT4 erasure (d1/d2) | −21 / −23 *** | −19 / −21 *** | drop real |
+| 5 Instruct gap @INT4 (d1/d2) | −4 / +2 ns | −3 / +3 ns | **gap gone** |
+| 6 Base gap @INT4 (d1/d2) | +1 / −1 ns | +2 / 0 ns | **gap gone** |
+| 7 Instruct INT8 preserve (d1/d2) | −6 / −1 ns | −6 / −1 ns | preserved |
+| 8 QEAD bf16 (d1/d2) | −6 / −1 ns | −6 / −2 ns | **null** |
+| 9 QEAD INT4 (d1/d2) | −1 / +3 ns | 0 / +3 ns | **null** |
+| B1 Real GPTQ4 collapse | −26 *** | −24 *** | collapse real |
+| B2 GPTQ4 gap | −1 ns | −1 ns | **gap gone** |
+| B3 RTN4 gap | 0 ns | +1 ns | **gap gone** |
+| Q1 QAT bf16 cost (d1/d2) | −18 / −17 ** | −16 / −15 ** | QAT hurts bf16 |
+| Q2 QAT W4 gain (d1/d2) | +1 / −1 ns | +1 / −1 ns | unconfirmed |
+| 10 Instruct gap @INT8 (d1/d2) | +6 ns / +11 * | +4 ns / +9 * | **preserved** |
+| 11 Base gap @INT8 | +20 [+12,+29] *** | +18 [+10,+26] *** | **preserved** |
+
+The load-bearing contrast on the headline metric is rows 10-11 against 5-6: on verified-116 the base
+track's KD gap is **+18 [+10,+26] at INT8** and **+2 / 0 (ns) at INT4**. Preserved at 8 bits, gone at
+4, measured on the subset the paper actually reports.
 
 ## How to state it in the paper
 

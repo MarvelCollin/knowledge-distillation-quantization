@@ -166,10 +166,15 @@ and the instruct cells show single INT4 draws scatter by 4-6 solves ({17,23} and
   quantization-aware distillation fails".
 
 ### Active run
-None. Phase 3 closed 2026-07-30. Phase 4 mechanism analysis closed 2026-08-02, calibrated PTQ
-grid closed 2026-08-04, statistics + Stage 8 (QAT-KD, failed) closed 2026-08-10 (all CPU/single
-training run, no active GPU work). Next GPU work: second benchmark (EvalPlus, Stage 7,
-no retraining) or the activation-side probe.
+None. **Stage 10 (precision dose-response) closed 2026-08-22 with all three pre-registered
+predictions holding.** Prior closures: Phase 3 2026-07-30, mechanism analysis 2026-08-02,
+calibrated PTQ 2026-08-04, Stage 8 QAT-KD (failed) 2026-08-10, EvalPlus + activation probe +
+efficiency table 2026-08-11.
+
+**All planned experiments are now complete.** Remaining work is writing, not measurement:
+Stage 10 is not yet in the paper (no dose-response content exists in the Overleaf draft), and
+three optional gap-fillers remain (instruct-track GPTQ, verified-116 significance, the
+`final_last_seed7` checkpoint caveat). None of the three gate submission.
 
 ---
 
@@ -238,7 +243,21 @@ no retraining) or the activation-side probe.
   not support that. Something closer to *"Quantization Erases Knowledge Distillation Gains in Small
   Code Models"* fits what was actually shown.
 
-### Phase 4: Mechanism, real PTQ, rigor — in progress (plan: `notes/plan-phase4.md`)
+### Phase 4: Mechanism, real PTQ, rigor — COMPLETE 2026-08-22 (plan: `notes/plan-phase4.md`)
+- [x] **Stage 10 precision dose-response — DONE 2026-08-22, ALL THREE PREDICTIONS HOLD.**
+      Bit ladder W4-W8 at fixed g128, double-draw on the bracketing cells, cosine ladder, and the
+      group-size negative control. (1) Behavioural crossover replicates at **W6**, inside the
+      pre-registered W6-W7 bracket — W5 was significant on one draw and not the other, so it is
+      reported as unconfirmed and no tiebreak draw was added. (2) Cosine transmission crosses the
+      predicted 0.4-0.5 band at **W6** (0.438), so behaviour and weight geometry agree on the same
+      bit-width from independent measurements. (3) Negative control: W4 at g128/g64/g32 all stay
+      erased (every CI contains 0) while the bit axis recovers — step size, not the nominal "4-bit"
+      label, is the operative variable. **Yields a bounded threshold: the gap recovers between ~4%
+      and ~9% of a quantization step**, superseding the old 2%-vs-26% bracket, and retroactively
+      explains the Stage 8 QAT failure (it trained at a 2.0% step fraction, inside the erasure
+      regime). Also corrects the earlier "coherence is a W4 cliff" claim: truncation falls 157→121→30
+      *within* W4 as granularity tightens, so coherence and gap recovery are the same variable at
+      different thresholds. See `history/methods.md` → "Stage 10 result".
 - [x] **Weight-level mechanism analysis** (`scripts/analyze_weight_quant.py`, 2026-08-02, 0 eval
       runs). Four pairs × 196 Linear weights. Falsified the sharpness hypothesis; established the
       step-size mechanism and the quantitative explanation of the QEAD null. See
@@ -272,10 +291,13 @@ no retraining) or the activation-side probe.
       only — real compressed-checkpoint throughput is blocked by the Marlin defect, same limitation
       as Stage 6) is ~9.9x smaller than the teacher's bf16 size. See `history/methods.md` →
       "Efficiency table: teacher vs distilled student".
-- [x] **Statistical rigor on the full-228 headline cells — DONE 2026-08-10.** Paired exact McNemar +
-      bootstrap CI (`scripts/significance_tests.py`) now covers every bf16/INT4/INT8/RTN4/GPTQ4/QAT
-      comparison in the grid; see `notes/significance_tests.md` and `history/methods.md`. Remaining
-      gap: not yet re-run on the verified-116 subset specifically.
+- [x] **Statistical rigor — DONE 2026-08-10, extended to verified-116 on 2026-08-22.** Paired exact
+      McNemar + bootstrap CI (`scripts/significance_tests.py`) covers every
+      bf16/INT4/INT8/RTN4/GPTQ4/QAT comparison in the grid. **Re-run on the verified-116 subset
+      (the paper's headline metric) and every conclusion replicates**: significant stays significant,
+      null stays null, point estimates move by at most 2 solves. Load-bearing contrast on
+      verified-116: base KD gap **+18 [+10,+26] at INT8** vs **+2 / 0 (ns) at INT4**. Side-by-side
+      table in `notes/significance_tests.md`.
 - [x] **Second benchmark (EvalPlus) — DONE 2026-08-11, generality claim reframed, not simply
       confirmed.** HumanEval+/MBPP+, pass@1 greedy, using this project's own reasoning protocol
       (an EvalPlus-native run first showed a ≈0 gap at both precisions — a measurement artifact,
