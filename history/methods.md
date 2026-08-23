@@ -512,7 +512,9 @@ The single-draw ladder put the lowest CI-excludes-zero cell at W5, which would h
 | W5 | seed 1234 | 12 / 9.5% | 22 / 15.2% | +10 [+3, +17] | 0.013 |
 | W5 | seed 42 | 14 / 6.9% | 20 / 16.2% | +6 [-3, +15] | 0.29 |
 
-W4 is unambiguous: both draws non-significant, mean gap -1, erasure confirmed. W5 does not replicate: the first draw excludes zero and the second does not, mean gap +8 solved. This is the same shape as the QEAD ablation, where a first draw of 30 read as a real +6 until the second returned 35, and it is exactly what the draw discipline was declared in advance to catch. **The lowest bit-width at which the gap replicates is W6, inside the pre-registered W6-to-W7 bracket.**
+W4 is unambiguous: both draws non-significant, mean gap -1, erasure confirmed. W5 does not replicate: the first draw excludes zero and the second does not, mean gap +8 solved. This is the same shape as the QEAD ablation, where a first draw of 30 read as a real +6 until the second returned 35, and it is exactly what the draw discipline was declared in advance to catch. **The lowest bit-width whose single draw excludes zero and is not contradicted by a second draw is W6, inside the pre-registered W6-to-W7 bracket.**
+
+**Correction (2026-08-23).** An earlier version of the sentence above said the gap "replicates" at W6. That is wrong and is retracted: W6, W7 and W8 are all single-draw on this track, because the declared discipline sent the double-draws to the two cells bracketing the apparent crossover, which were W4 and W5. W6 has therefore never been replicated, and the base crossover rests on one draw. This matters for the cross-track comparison with Stage 11 below, where the instruct cells were double-drawn and did not replicate: the base result looks cleaner in part because it was tested less. Stated honestly, the base transition is bracketed at W5 to W6 rather than located at W6.
 
 An internal inconsistency in the pre-registration surfaces here and is recorded rather than resolved after the fact. Test-case pass rate was declared the primary metric, but the crossover was defined through the paired bootstrap CI, which `significance_tests.py` computes on solve flags. The two disagree at W5: on solve count W5 is unconfirmed, while on test rate both draws show a solid positive gap (+5.7 and +9.3 points, against a declared noise floor near 3 percent). The defensible statement is therefore bracketed rather than pointwise: **erased through W4, in transition at W5 to W6, fully recovered by W7 to W8.**
 
@@ -595,6 +597,29 @@ Step-fraction route: the instruct KD update is 0.459 percent of weight norm agai
 **Pre-declared falsification.** The cross-track transfer fails, and must be rewritten rather than softened, if the gap is already present at W5 or below, if it is still absent at W8, or if the curve is non-monotone in bit-width beyond the declared noise floor.
 
 **What a confirmation would and would not show.** It would show that a threshold fitted on one student predicts, quantitatively and one bit out, where a second student with a differently sized update recovers. It would not extend the account to activation-aware quantizers, which the GPTQ measurement above places outside its scope regardless of this outcome.
+
+## Stage 11 result: the instruct crossover is not located, and the transition is bracketed (run 2026-08-23)
+
+Run exactly as pre-registered: instruct original and instruct distilled at W6 and W7, group-128, same harness and 228 problems, single draw to locate and then both cells double-drawn at seeds 1234 and 42 before recording.
+
+| Cell | Draw | Original | Distilled | Gap solved [95% CI] | McNemar p |
+|---|---|---|---|---|---|
+| W6 | 1234 | 20 / 19.3% | 28 / 23.5% | +8 [-2, +17] | 0.15 |
+| W6 | 42 | 24 / 19.2% | 30 / 23.6% | +6 [-2, +14] | 0.24 |
+| W7 | 1234 | 22 / 18.8% | 36 / 23.4% | **+14 [+4, +24]** | **0.013** |
+| W7 | 42 | 22 / 18.9% | 30 / 26.7% | +8 [+0, +16] | 0.096 |
+
+**The prediction is not confirmed.** On the single draws the result matched the pre-registration exactly, W6 non-significant and W7 significant, which is a crossover at W7 and the predicted one-bit offset from the base track. The second draw at W7 returned +8 with a CI whose lower bound falls on zero, so W7 does not replicate. Under the declared criterion, applied with the declared draw discipline, neither W6 nor W7 certifies and the instruct crossover is not located.
+
+What the data does support is a real and graded transition. Every one of the four cells is positive, and the means rise monotonically toward the bf16 gap of +14: W6 gives +7 (draws +8, +6) and W7 gives +11 (draws +14, +8). On test-case rate the same ordering holds, W6 at +4.2 and +4.4 points and W7 at +4.6 and +7.9 against a bf16 gap of +9.0. The recovery is not in doubt; its location within one bit is.
+
+**The honest cross-track statement, with both tracks treated equally:** the base transition is bracketed at W5 to W6 and the instruct transition at W6 to W7. The direction of the offset is consistent with the prediction derived from update size, and the magnitude is consistent with one bit, but neither track has a crossover certified under replication, so the offset is suggestive rather than established.
+
+Two things follow that are worth stating plainly rather than discovering later.
+
+First, the asymmetry noted in the correction above. Base W6 was never double-drawn while instruct W6 and W7 were, so the base crossover survived only because it faced less scrutiny. Any comparison between the tracks should either double-draw base W6 and W7 to equalise treatment, or report both as brackets. It should not present a single-draw base crossover next to a double-drawn instruct non-replication as though the two were measured the same way.
+
+Second, a power limit that applies to the whole ladder and is now visible twice. At 228 problems with gaps of roughly +6 to +14 solves and 18 to 28 discordant problems per comparison, the paired bootstrap CI is about plus or minus 9 solves wide. That is wider than the difference between adjacent bit-widths in the transition region, so this design can establish that recovery happens across a two-bit window but cannot resolve which single bit it happens at. Locating a crossover to one bit would need either more problems or more samples per problem, not more bit-widths. The pre-registration's crossover definition was therefore sharper than the measurement could deliver, which is a design lesson rather than a result.
 
 ## What this shows
 
