@@ -1,0 +1,16 @@
+{
+  "original_bf16": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "distilled_bf16": "outputs/final_last",
+  "original_quant": "outputs_gptq/instruct_orig",
+  "distilled_quant": "outputs_gptq/instruct_dist",
+  "n_layers": 196,
+  "skipped": 0,
+  "means": {
+    "noise_rel": 0.15738067935620034,
+    "kd_cos": 0.022422957066692742,
+    "kd_rel_after": 0.16650437768928858,
+    "kd_rel_before": 0.0045864918377316955,
+    "frac_erased": 0.16595938194134024,
+    "frac_amplified": 0.6225289299374533
+  }
+}

@@ -442,6 +442,37 @@ This is consistent in direction with the EvalPlus result, where the erasure was 
 
 A second discrepancy sits underneath it. On the instruct track the simulated quantizer puts the distilled model at 17 and 23, while real GPTQ puts it at 29 and 31. The simulated quantizer is markedly more destructive here, which is the opposite direction from the base track, where real GPTQ (2) was more destructive than simulated (7). Since the headline grid of `quantize_int8.py` is simulated throughout, this is a live methodological caveat and not a footnote: the two toolchains do not agree on how much the instruct distilled model loses at 4 bits.
 
+### Weight-space follow-up: the mechanism is scoped to weight-error-minimising quantizers
+
+Two measurements were run to test whether the Stage 10 step-size account explains the instruct GPTQ behaviour. It does not, and the reason is instructive.
+
+First, the matched instruct cosine ladder (`scripts/cos_ladder.py`, 196 Linear weights, g128), against the base ladder already recorded:
+
+| Bits | Instruct kd_cos | Base kd_cos | Instruct noise_rel | Base noise_rel |
+|---|---|---|---|---|
+| W4 | 0.110 | 0.194 | 0.1280 | 0.1267 |
+| W5 | 0.226 | 0.307 | 0.0598 | 0.0592 |
+| W6 | 0.351 | 0.438 | 0.0290 | 0.0287 |
+| W7 | 0.501 | 0.617 | 0.0142 | 0.0141 |
+| W8 | 0.687 | 0.807 | 0.0071 | 0.0070 |
+
+`noise_rel` agrees between tracks to three decimals at every bit-width, as it must: same quantizer, same grid, so the perturbation is a property of the precision and not of the checkpoint. Transmission is uniformly lower on the instruct track for the only remaining reason, that its KD update is about half the size (0.459 percent of weight norm against 0.892 percent). The independent GPTQ measurement returns `kd_rel_before` = 0.0046, confirming the instruct update size from a different code path.
+
+Second, transmission through the real GPTQ checkpoints (`scripts/gptq_transmission.py`, which reads four checkpoints off disk and quantizes nothing, so the number is whatever the toolchain produced). Compared against the matched simulated cell above, same checkpoint pair:
+
+| Quantizer | kd_cos | noise_rel | kd_rel_after | frac_amplified | Behavioural gap |
+|---|---|---|---|---|---|
+| Simulated W4 g128 | 0.110 | 0.128 | n/a | n/a | erased (-4, +2) |
+| Real GPTQ W4 | 0.022 | 0.157 | 0.167 | 0.62 | retained (+6, +12) |
+
+**GPTQ is five times worse on transmission and 23 percent worse on weight perturbation, and preserves the distillation gain where round-to-nearest destroys it.** It also replaces a 0.46 percent update with a 16.7 percent difference pointing elsewhere, amplifying 62 percent of per-weight changes beyond 2x.
+
+This is coherent once the objective is taken seriously. GPTQ does not minimise weight error; it minimises layer output error under the Hessian of each layer's inputs, and deliberately accepts larger weight displacement along directions the activations do not excite. Large weight-space perturbation with small functional perturbation is the method working as designed.
+
+The consequence is a scope limit and it should be stated as one: **the step-size and cosine-transmission account explains weight-error-minimising quantization, which covers the entire simulated grid, the W4-to-W8 ladder, the group-size negative control and the Stage 8 QAT failure, and it does not transfer to activation-aware quantizers.** Everything the ladder established stands; GPTQ marks the boundary rather than contradicting the interior.
+
+One interpretive caution belongs with the number. `kd_cos` = 0.022 should not be read as "GPTQ destroys the KD direction". For two models quantized independently by a calibration-dependent method, the weight-space difference is dominated by each model's own Hessian-driven decisions rather than by the update separating them. Round-to-nearest per-group scales partially cancel between similar checkpoints; GPTQ's sequential compensation does not. The honest statement is that `kd_cos` loses meaning for calibration-dependent quantizers, not that it measured destruction.
+
 ### A silent failure that nearly entered the record
 
 The matching real-RTN cell for the instruct track was run and produced original 24 and distilled 35, a gap of +11 with p=0.035, apparently supporting retention. **Those numbers are invalid and are discarded.** `scripts/probe_quant_grid.py` counts distinct values inside one quantization group, where a group-128 W4 checkpoint admits at most 16; the RTN checkpoints returned 119 to 125, byte-identical to the unquantized bf16 reference. The weights were never rounded, so the cell measured a bf16 model, which is why the distilled score of 35 sat one solve below bf16's 36.
@@ -542,6 +573,28 @@ An earlier draft of this entry claimed generation coherence was a cliff confined
 W5 could not be evaluated under the stock engine configuration. vLLM 0.6.6 asserts in `scheduler.py::_schedule_running` (`assert len(self._async_stopped) == 0`) when its async output processor races chunked prefill during preemption, and the enormous phase-2 prompts produced by W5's degenerate think traces trigger that path reliably. A `--sync-output` flag was added to `compare_eval.py` (disables async output processing, default off, no other cell affected) and W5 was run with it. The flag changes when output tokens are processed rather than what is sampled, and the load-bearing quantity here, the distilled-minus-original gap, is measured within a single invocation under identical settings, so the within-rung comparison is unaffected. Recorded as a deviation because the cross-rung curve carries it. The crash is itself corroborating evidence that the W4-to-W5 degeneration regime is severe enough to destabilise the serving stack.
 
 Scope note on the negative control: the granularity sweep runs entirely inside the simulated quantizer of `quantize_int8.py`, which is the same quantizer that produced the main INT8/INT4 grid and the whole W4 to W8 ladder, so it is the correct control for those numbers. It says nothing independently about how `llm-compressor`'s GPTQ and RTN behave under changed granularity; `quantize_real.py` accepts a `--group-size` argument but warns that the recipe does not apply it, so the real-toolchain cells of Section "Calibrated PTQ" were all run at that toolchain's own default and granularity was never swept there.
+
+## Stage 11 pre-registration: the instruct crossover sits one bit higher (written 2026-08-23, before any run)
+
+Recorded before running. Stage 10 located the base-track crossover at W6 and fitted a threshold on that track alone. The instruct weight-space measurements above fix a prediction for a second student in advance, derived quantitatively rather than chosen after seeing an eval.
+
+**Two independent routes, both from already-measured quantities, both giving the same answer.**
+
+Cosine route: the 0.4-to-0.5 transmission band that coincided with the base behavioural crossover at W6 (0.438) is not reached on the instruct track until W7 (0.501); instruct W6 is only 0.351.
+
+Step-fraction route: the instruct KD update is 0.459 percent of weight norm against the base 0.892 percent, a factor of 0.515, so it sits at about 1.03 percent of a W4 step where the base sits at 2.0 percent. Applying the step ratios measured in `smoke_quantgrid.py` (W4 to W6 divides the step by 4.43, W4 to W7 by 9.00), the instruct update reaches 4.6 percent of a step at W6 and 9.3 percent at W7. Stage 10's recovery band is 4 to 9 percent, so instruct enters it at W6 and clears it at W7.
+
+**Prediction: the instruct behavioural crossover is W7, marginally W6.** Recovery below W6 or absence at W8 both falsify the account's transfer across students.
+
+**Intervention.** No training. `quantize_int8.py --bits {6,7} --group-size 128` on the instruct original and the instruct distilled checkpoint, evaluated with the same harness, 228 problems, `--num-samples 5`, as every other cell. Only the decisive pair is run: Stage 10 already establishes that W4 is erased and W8 preserved, and the full ladder is not needed to locate a crossover that is bracketed in advance.
+
+**Crossover definition and metrics, unchanged from Stage 10.** Lowest bit-width whose paired bootstrap 95 percent CI on distilled-minus-original excludes zero. Primary metric test-case pass rate, solve count secondary. Declared noise floors: about 3 percent test rate, plus or minus 4 to 6 solves single-draw.
+
+**Draw discipline, declared in advance.** Single draw at each of W6 and W7 to locate; whichever cell the crossover lands on is then double-drawn (seeds 1234 and 42) together with the cell below it, before any conclusion is recorded. No tiebreak draw is added after seeing a disagreement, per the Stage 10 W5 precedent.
+
+**Pre-declared falsification.** The cross-track transfer fails, and must be rewritten rather than softened, if the gap is already present at W5 or below, if it is still absent at W8, or if the curve is non-monotone in bit-width beyond the declared noise floor.
+
+**What a confirmation would and would not show.** It would show that a threshold fitted on one student predicts, quantitatively and one bit out, where a second student with a differently sized update recovers. It would not extend the account to activation-aware quantizers, which the GPTQ measurement above places outside its scope regardless of this outcome.
 
 ## What this shows
 

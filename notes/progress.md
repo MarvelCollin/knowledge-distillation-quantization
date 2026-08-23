@@ -274,6 +274,24 @@ three optional gap-fillers remain (instruct-track GPTQ, verified-116 significanc
       The matching real-RTN cell was **discarded as invalid** (checkpoint was never quantized;
       `--method rtn` + `--save-mode fake` is a silent no-op on current llm-compressor). See
       `history/methods.md` → "Calibrated PTQ on the instruct track".
+- [x] **Weight-space follow-up on GPTQ — DONE 2026-08-23, mechanism is RTN-scoped.** Matched instruct
+      cosine ladder (`cos_ladder.py`) plus real-checkpoint transmission (`gptq_transmission.py`, new).
+      On the same instruct pair: simulated W4 gives kd_cos 0.110 / noise_rel 0.128 and erases the gap;
+      real GPTQ-W4 gives kd_cos **0.022** / noise_rel **0.157** and *retains* it. **GPTQ is worse on
+      both weight metrics yet better behaviorally**, because it minimizes layer-output error, not
+      weight error. Scope statement: the step-size/cosine account explains weight-error-minimizing
+      quantization (the whole simulated grid, the ladder, the g-control, the QAT failure) and does
+      **not** transfer to activation-aware quantizers. Caveat recorded: kd_cos loses meaning for
+      calibration-dependent quantizers (independent Hessian decisions dominate the weight delta),
+      so 0.022 is not evidence of "destruction". Instruct ladder also confirms noise_rel matches the
+      base track to 3 decimals at every bit; transmission is lower only because the instruct KD
+      update is ~half the size (0.459% vs 0.892%).
+- [ ] **Stage 11: instruct crossover at W6/W7 — PRE-REGISTERED 2026-08-23, not yet run.**
+      Two independent routes (cosine 0.4-0.5 band reached at W7 not W6; step fraction 4.6% at W6,
+      9.3% at W7 against the 4-9% recovery band) both predict **the instruct crossover is one bit
+      higher than base: W7, marginally W6**. Decisive pair only (W6, W7), same harness/metrics/draw
+      discipline as Stage 10. Falsified by recovery at W5 or below, absence at W8, or non-monotonicity.
+      See `history/methods.md` → "Stage 11 pre-registration".
 - [x] **Quantization grid gate** (`scripts/probe_quant_grid.py`, 2026-08-23). Counts distinct values
       per quantization group directly from the safetensors header; group-128 W4 admits at most 16,
       unquantized bf16 shows ~120. Now runs automatically inside `quantize_real.py` after any
