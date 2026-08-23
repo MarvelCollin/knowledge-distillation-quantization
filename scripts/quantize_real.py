@@ -4,7 +4,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
+from probe_quant_grid import probe as probe_quant_grid
 from src.config import load_config
 from src.data.problems import build_user_content, load_problems
 from src.data.teacher_cache import load_passing_responses
@@ -118,9 +120,12 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     texts = build_calibration(config, tokenizer, args.calib_samples, args.calib_max_len)
+    # attention_mask is required: llm-compressor's run_calibration_forward calls
+    # apply_pad_mask_to_batch, which zeroes padded positions via input_ids * attention_mask
+    # and raises KeyError without it.
     ds = Dataset.from_list([
-        {"input_ids": tokenizer(t, max_length=args.calib_max_len, truncation=True)["input_ids"]}
-        for t in texts
+        {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
+        for enc in (tokenizer(t, max_length=args.calib_max_len, truncation=True) for t in texts)
     ])
 
     print(f"loading {args.model}...")
@@ -198,6 +203,30 @@ def main() -> None:
     if qcfg:
         print(f"  format          {qcfg.get('format')}")
         print(f"  quant_method    {qcfg.get('quant_method')}")
+
+    # A fake-quant checkpoint is stored as bf16, so nothing about its dtype or config proves
+    # the weights were actually rounded. Count distinct values inside one quantization group
+    # and fail loudly if they are not on the expected grid. QuantizationModifier (--method rtn)
+    # only attaches scales and defers rounding to save_compressed=True, so under --save-mode
+    # fake it silently emits the unquantized input; that produced a plausible-looking but
+    # invalid eval on 2026-08-23 before this gate existed.
+    if args.save_mode == "fake":
+        grid_group = 128
+        max_expected = 2 ** args.bits
+        if max_expected < grid_group:
+            _, _, counts = probe_quant_grid(str(out), rows=6, group=grid_group)
+            print(f"grid check        uniq/group={counts} (expected <= {max_expected})")
+            if max(counts) > max_expected:
+                raise SystemExit(
+                    f"\nFAILED: {out} is not on a W{args.bits} group-{grid_group} grid.\n"
+                    f"Found up to {max(counts)} distinct values per group, expected at most "
+                    f"{max_expected}.\nThe weights were never quantized, so any evaluation of "
+                    f"this checkpoint is invalid.\n"
+                    f"Known cause: --method rtn with --save-mode fake is a no-op on current "
+                    f"llm-compressor.\nUse scripts/quantize_int8.py --bits 4 --group-size 128 "
+                    f"for a simulated RTN checkpoint instead.")
+            print("grid check        PASS (weights really are on the low-bit grid)")
+
     print("\nNext: gate this checkpoint before evaluating it.")
     print(f"  docker compose run --rm compare_eval \\")
     print(f"    python scripts/sanity_generate.py --model {out} \\")

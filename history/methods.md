@@ -222,6 +222,8 @@ Methodological caveats, all of which belong in the paper:
 
 **Significance (added 2026-08-10, `scripts/significance_tests.py`):** the KD gap at both real quantizers is now a confirmed null, not an eyeballed one. RTN-W4 gap (orig 2 vs distilled 2): McNemar p=1, Δsolved 0, 95% CI [−4,+4]. GPTQ-W4 gap (orig 3 vs distilled 2): McNemar p=1, Δsolved −1, 95% CI [−4,+2]. Both bracket zero comfortably, consistent with the bf16 gap's CI ([+6,+26]) being nowhere near either.
 
+**Scope correction (2026-08-23): this section is base-track only, and it does not generalise.** Running the same calibrated GPTQ on the instruct track gives a gap of +6 and +12 across two draws, the second significant, with neither draw able to exclude the bf16 gap of +14. The claim that calibration does not rescue distilled knowledge is therefore demonstrated here and contradicted there. See "Calibrated PTQ on the instruct track" below before quoting the sentence above about this being the strongest form of the headline; on the evidence now available that sentence holds for the general-base student and not as a general statement.
+
 ## Stage 8 pre-registration: quantization-aware distillation (written 2026-08-04, before any run)
 
 Recorded before running so the success criterion cannot be chosen after seeing the numbers. The QEAD ablation cost weeks partly because a first draw of 30 looked like a real +6 until the second draw returned 35; the criterion below is fixed in advance and both cells are double-drawn from the start.
@@ -423,6 +425,32 @@ ablation demonstrated, where a first draw of 30 read as a real +6 until the seco
 `--bits 4 --group-size 128` and confirm byte-identity against the W4 checkpoint already on the server.
 If that fails, no Stage 10 number is comparable to any recorded number and the generalized quantizer is
 wrong.
+
+## Calibrated PTQ on the instruct track: the erasure does NOT replicate (run 2026-08-22 to 2026-08-23)
+
+The calibrated-PTQ section above was measured on the base track only. Repeating it on the instruct track was intended as a routine two-track confirmation. It is not one, and the honest reading is that the real-quantizer erasure claim holds on the base track and fails on the instruct track.
+
+| Track | bf16 gap | Real GPTQ-W4 gap [95% CI] | McNemar p | CI excludes own bf16 gap? |
+|---|---|---|---|---|
+| Base | +16 | -1 [-5, +2] | 1.0 | **yes**, erasure demonstrated |
+| Instruct, draw 1 | +14 | +6 [-2, +14] | 0.24 | no |
+| Instruct, draw 2 | +14 | **+12 [+4, +21]** | **0.012** | no |
+
+On the instruct track the distilled model holds 29 and 31 solved against 36 at bf16, while its original stays flat (22 at bf16, 23 and 19 under GPTQ). The gap attenuates from +14 to roughly +9, about 64 percent retained, and the second draw is significantly positive. Neither instruct draw can exclude the full bf16 gap, so nothing here supports erasure; the first draw is simply underpowered (18 discordant problems, CI spanning -2 to +14, which contains both zero and the whole bf16 effect).
+
+This is consistent in direction with the EvalPlus result, where the erasure was also partial rather than complete, and it should be stated the same way: **complete erasure is demonstrated on the general-base track under both real quantizers, and is not demonstrated on the instruct track under calibrated GPTQ.**
+
+A second discrepancy sits underneath it. On the instruct track the simulated quantizer puts the distilled model at 17 and 23, while real GPTQ puts it at 29 and 31. The simulated quantizer is markedly more destructive here, which is the opposite direction from the base track, where real GPTQ (2) was more destructive than simulated (7). Since the headline grid of `quantize_int8.py` is simulated throughout, this is a live methodological caveat and not a footnote: the two toolchains do not agree on how much the instruct distilled model loses at 4 bits.
+
+### A silent failure that nearly entered the record
+
+The matching real-RTN cell for the instruct track was run and produced original 24 and distilled 35, a gap of +11 with p=0.035, apparently supporting retention. **Those numbers are invalid and are discarded.** `scripts/probe_quant_grid.py` counts distinct values inside one quantization group, where a group-128 W4 checkpoint admits at most 16; the RTN checkpoints returned 119 to 125, byte-identical to the unquantized bf16 reference. The weights were never rounded, so the cell measured a bf16 model, which is why the distilled score of 35 sat one solve below bf16's 36.
+
+Cause: `build_recipe` maps `--method rtn` to `QuantizationModifier`, which only attaches scales and zero points and defers the rounding to `save_compressed=True`. Under `--save-mode fake` the rounding therefore never happens, and `strip_quant_params` then removes the attached parameters, leaving a plain copy of the input. `GPTQModifier` is unaffected because it rewrites weights in place during calibration, which the grid probe confirms (13 to 15 distinct values per group). The recorded base-track RTN cell from 2026-08-04 is sound: it scored 2 against 28 at bf16, which an unquantized checkpoint cannot do, so the behaviour changed with the llm-compressor version pulled in when `evalplus` was added on 2026-08-10. The same upgrade caused the `attention_mask` KeyError fixed in `quantize_real.py` on 2026-08-23.
+
+Two mitigations are in place. `quantize_real.py` now runs the grid probe automatically after any `--save-mode fake` build and exits non-zero rather than emitting a checkpoint that is not on the expected grid. Real-toolchain RTN is not available on the instruct track under the current library, and is not pursued: `quantize_int8.py --bits 4 --group-size 128` already is group-128 RTN, and the real-RTN cell existed only to match GPTQ's toolchain.
+
+The general lesson is worth keeping. This failure produced no error, a correctly sized checkpoint, a loadable model, and a plausible eval number in the direction the run was testing. Nothing except a direct check of the weight values would have caught it, and every fake-quant checkpoint in this project is stored as bf16, so dtype and config inspection prove nothing.
 
 ## Stage 10 result: the precision dose-response, all three predictions hold (run 2026-08-20 to 2026-08-22)
 

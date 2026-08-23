@@ -141,8 +141,12 @@ and the instruct cells show single INT4 draws scatter by 4-6 solves ({17,23} and
   with zero syntax errors — capacity-bound, not recipe-bound.
 - **INT8 is free at 1.5B** for every model tested; the apparent ±3-6 solve swings have no mechanism
   behind them (failure mixture is identical to bf16 in every category).
-- **INT4 erases the KD gain on both tracks.** Note the backbone-survival half holds only on the
-  instruct track (22 → 21); the base original halved (12 → 6). State it as an instruct result.
+- **INT4 erases the KD gain on both tracks — under the *simulated* quantizer.** Note the
+  backbone-survival half holds only on the instruct track (22 → 21); the base original halved
+  (12 → 6). State it as an instruct result. **Qualified 2026-08-23:** under *real* calibrated
+  GPTQ the erasure replicates on the base track but not on the instruct track (gap +6 / +12,
+  neither draw excluding the bf16 +14). The two quantizers disagree on the instruct track, so
+  "both tracks" is accurate only for the simulated grid and must be said that way.
 - **Mechanism, measured (2026-08-02):** the distillation update is ~0.9% (base) / ~0.5% (instruct)
   of weight norm — **2% of one W4 quantization step, but 26% of a W8 step**. At W8 the update
   crosses bin boundaries often and survives (direction cosine 0.72 / 0.59); at W4 it is below the
@@ -258,6 +262,23 @@ three optional gap-fillers remain (instruct-track GPTQ, verified-116 significanc
       regime). Also corrects the earlier "coherence is a W4 cliff" claim: truncation falls 157→121→30
       *within* W4 as granularity tightens, so coherence and gap recovery are the same variable at
       different thresholds. See `history/methods.md` → "Stage 10 result".
+- [x] **Instruct-track calibrated PTQ — DONE 2026-08-23, the erasure does NOT replicate.**
+      Real GPTQ-W4 on the instruct track gives gap **+6 [−2,+14] ns** and **+12 [+4,+21] p=0.012**
+      across two draws; distilled holds 29/31 solved against 36 at bf16 while the original stays
+      flat. **Neither draw can exclude the bf16 gap of +14**, so erasure is unsupported here,
+      whereas the base track's CI [−5,+2] does exclude its +16. Revised claim: **complete erasure
+      is demonstrated on the general-base track under both real quantizers and NOT on the instruct
+      track under calibrated GPTQ.** Also exposes a live methodological caveat: on instruct the
+      simulated quantizer puts distilled at 17/23 while real GPTQ puts it at 29/31, the opposite
+      direction from the base track's discrepancy. The headline grid is simulated throughout.
+      The matching real-RTN cell was **discarded as invalid** (checkpoint was never quantized;
+      `--method rtn` + `--save-mode fake` is a silent no-op on current llm-compressor). See
+      `history/methods.md` → "Calibrated PTQ on the instruct track".
+- [x] **Quantization grid gate** (`scripts/probe_quant_grid.py`, 2026-08-23). Counts distinct values
+      per quantization group directly from the safetensors header; group-128 W4 admits at most 16,
+      unquantized bf16 shows ~120. Now runs automatically inside `quantize_real.py` after any
+      `--save-mode fake` build and exits non-zero on failure. Added because the RTN no-op above
+      produced no error, a correct-size loadable checkpoint, and a plausible eval number.
 - [x] **Weight-level mechanism analysis** (`scripts/analyze_weight_quant.py`, 2026-08-02, 0 eval
       runs). Four pairs × 196 Linear weights. Falsified the sharpness hypothesis; established the
       step-size mechanism and the quantitative explanation of the QEAD null. See
