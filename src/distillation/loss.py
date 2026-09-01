@@ -25,7 +25,7 @@ def build_teacher_topk(
                     acc[tok_id] = acc.get(tok_id, 0.0) + p
         if not acc:
             continue
-        items = list(acc.items())[:k]
+        items = sorted(acc.items(), key=lambda kv: -kv[1])[:k]
         total = sum(p for _, p in items)
         id_row = ids_rows[t]
         prob_row = probs_rows[t]
