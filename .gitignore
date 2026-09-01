@@ -67,3 +67,6 @@ mlruns/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+
+# local quantized checkpoint scratch
+q/
