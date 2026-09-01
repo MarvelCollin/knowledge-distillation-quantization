@@ -66,11 +66,8 @@ identical on both denominators.
       step. Eval running; results section not yet written, so `sec:splitresult` is a dangling
       reference until it lands.
 
-## Needs a human (2)
+## Needs a human (1)
 
-- [ ] **Revoke the leaked GitHub token.** It was only ever in `.git/config`, never in any
-      commit, blob, dangling object or commit message (verified exhaustively). Already removed
-      from local config, but the token is still valid until revoked on GitHub.
 - [ ] **Confirm Prof. Derwin's IEEE membership grade** if he holds one. The byline claim was
       removed because no public source confirms it.
 
