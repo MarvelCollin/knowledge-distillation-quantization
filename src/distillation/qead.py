@@ -34,9 +34,9 @@ def fused_qead_kld_pass(hidden: torch.Tensor, lm_head_weight: torch.Tensor,
             if compute_kld:
                 scaled = logits / temperature
                 log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
-                student_at = torch.gather(scaled, -1, teacher_ids[:, s:e]).float() - log_z
+                student_logprobs = torch.gather(scaled, -1, teacher_ids[:, s:e]).float() - log_z
                 safe_teacher = teacher_probs[:, s:e].clamp(min=1e-10)
-                per_token_kld[:, s:e] = (teacher_probs[:, s:e] * (safe_teacher.log() - student_at)).sum(dim=-1)
+                per_token_kld[:, s:e] = (teacher_probs[:, s:e] * (safe_teacher.log() - student_logprobs)).sum(dim=-1)
 
             if compute_error:
                 flat = logits.reshape(-1, logits.size(-1))

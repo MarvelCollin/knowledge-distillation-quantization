@@ -52,8 +52,8 @@ def skew_kld_per_token(
 ) -> torch.Tensor:
     scaled = student_logits / temperature
     log_z = torch.logsumexp(scaled, dim=-1, keepdim=True).float()
-    student_at = (torch.gather(scaled, -1, teacher_ids).float() - log_z).exp()
-    mixture = (lam * student_at + (1 - lam) * teacher_probs).clamp(min=1e-10)
+    student_probs = (torch.gather(scaled, -1, teacher_ids).float() - log_z).exp()
+    mixture = (lam * student_probs + (1 - lam) * teacher_probs).clamp(min=1e-10)
     safe_teacher = teacher_probs.clamp(min=1e-10)
     return (teacher_probs * (safe_teacher.log() - mixture.log())).sum(dim=-1)
 
