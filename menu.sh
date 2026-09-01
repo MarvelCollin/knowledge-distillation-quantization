@@ -100,6 +100,59 @@ run_cmd() {
     return $code
 }
 
+# After training, offer to push OLD experiment checkpoints (outputs_*) to Drive and
+# delete them locally to reclaim space. Never touches bare `outputs` (holds eval results
+# the menu reads) nor this run's keep_dir. Each dir is checksum-verified on Drive before
+# its local copy is removed. sudo chown first, so root-owned (docker-written) files are
+# readable by rclone and deletable by us.
+offload_outputs_prompt() {
+    local keep_dir="$1"
+    export PATH="$HOME/.local/bin:$PATH"
+
+    shopt -s nullglob
+    local candidates=() d
+    for d in outputs_*; do
+        [ -d "$d" ] || continue
+        [ "$d" = "$keep_dir" ] && continue
+        candidates+=("$d")
+    done
+    shopt -u nullglob
+
+    if [ ${#candidates[@]} -eq 0 ]; then
+        echo -e "  ${CYAN}No old checkpoints to offload.${NC}"
+        return 0
+    fi
+
+    echo -e "  ${BOLD}Reclaim disk space?${NC} Old checkpoints that can move to Drive (gdrive:kd-backup):"
+    local sz
+    for d in "${candidates[@]}"; do
+        sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+        echo -e "     ${YELLOW}$d${NC} ($sz)"
+    done
+    echo -e "  ${CYAN}Kept local: bare 'outputs' (eval results) and this run's '$keep_dir'.${NC}"
+    echo -n "  Upload to Drive and delete local? (yes/n): "
+    local ans; read -r ans
+    if [ "$ans" != "yes" ]; then
+        echo -e "  ${CYAN}Skipped — nothing deleted.${NC}"
+        return 0
+    fi
+
+    for d in "${candidates[@]}"; do
+        echo -e "  ${YELLOW}▶ offloading $d${NC}"
+        sudo chown -R "$(id -u):$(id -g)" "$d"
+        if ! rclone copy "$d" "gdrive:kd-backup/$d" --transfers 8 --checkers 16 --drive-chunk-size 128M --log-level ERROR; then
+            echo -e "  ${RED}upload failed for $d — keeping local, stopping.${NC}"
+            return 1
+        fi
+        if ! rclone check "$d" "gdrive:kd-backup/$d" --one-way; then
+            echo -e "  ${RED}verify failed for $d — keeping local, stopping.${NC}"
+            return 1
+        fi
+        rm -rf "$d"
+        echo -e "  ${GREEN}✓ $d on Drive and removed locally.${NC}  free: $(df -h / | awk 'NR==2{print $4}')"
+    done
+}
+
 # Ask for the sudo password ONCE up front and refresh it in the background, so a long
 # multi-step pipeline never stops to re-ask mid-run (sudo's timestamp would otherwise
 # expire between the train / retrain / compare steps).
@@ -243,6 +296,10 @@ run_training_then_optionally_compare() {
         read -rp "Press Enter to return to menu..."
         return
     fi
+    local keep_dir
+    keep_dir=$(awk '/^training:/{f=1} f&&/output_dir:/{print $2; exit}' "$CFG")
+    offload_outputs_prompt "$keep_dir"
+    echo ""
     if [ "$COMPARE_AFTER" = "1" ]; then
         echo -e "  ${GREEN}✓ Training complete — starting pre-configured compare eval...${NC}"
         echo ""
