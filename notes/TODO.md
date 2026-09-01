@@ -66,11 +66,6 @@ identical on both denominators.
       step. Eval running; results section not yet written, so `sec:splitresult` is a dangling
       reference until it lands.
 
-## Needs a human (1)
-
-- [ ] **Confirm Prof. Derwin's IEEE membership grade** if he holds one. The byline claim was
-      removed because no public source confirms it.
-
 ---
 
 ## Known limitations, all now declared in the paper
