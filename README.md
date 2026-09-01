@@ -39,14 +39,14 @@ It does at INT8 and does not at 4 bits, and the weight-space measurements here e
 
 ## Requirements
 
-A CUDA GPU, Docker with the NVIDIA container runtime, and a Hugging Face token for the base
-model downloads. Python dependencies are pinned in `requirements.txt` (PyTorch, Transformers,
-vLLM, EvalPlus).
+A CUDA GPU and Docker with the NVIDIA container runtime. The base models are public on Hugging
+Face and need no access token. Python dependencies are pinned in `requirements.txt` (PyTorch,
+Transformers, vLLM, EvalPlus).
 
 ## Running
 
 ```bash
-cp .env.example .env          # add your HF_TOKEN
+cp .env.example .env          # all entries are optional
 docker compose build
 
 docker compose run --rm train                                  # distillation
