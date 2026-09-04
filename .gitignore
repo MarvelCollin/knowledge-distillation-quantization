@@ -70,3 +70,4 @@ mlruns/
 
 # local quantized checkpoint scratch
 q/
+codeocean.zip
